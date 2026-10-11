@@ -112,7 +112,7 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 }
 static void exit_task(void)
 {
-	do_exit(0);
+	do_exit(current_thread_info()->exit_code);
 }
 
 static void del_host_task(void *arg)
@@ -151,6 +151,17 @@ long lkl_syscall(long no, long *params)
 	}
 
 	switch_to_host_task(task);
+
+	/*
+	 * A host task can't exit from inside a syscall: its host thread has to
+	 * unwind first. Record the status; the task exits with it when the host
+	 * thread goes away (del_host_task).
+	 */
+	if (no == __NR_exit || no == __NR_exit_group) {
+		task_thread_info(task)->exit_code = (params[0] & 0xff) << 8;
+		ret = 0;
+		goto out;
+	}
 
 	ret = run_syscall(no, params);
 
