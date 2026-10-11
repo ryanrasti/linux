@@ -167,11 +167,17 @@ out:
 
 static struct task_struct *idle_host_task;
 
-/* called from idle, don't failed, don't block */
-void wakeup_idle_host_task(void)
+/*
+ * called from idle, don't failed, don't block; returns false if there is no
+ * idle host task yet
+ */
+bool wakeup_idle_host_task(void)
 {
-	if (!need_resched() && idle_host_task)
+	if (!idle_host_task)
+		return false;
+	if (!need_resched())
 		wake_up_process(idle_host_task);
+	return true;
 }
 
 static int idle_host_task_loop(void *unused)

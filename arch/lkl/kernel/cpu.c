@@ -51,6 +51,9 @@ struct lkl_cpu {
 	struct lkl_sem *sem;
 	/* semaphore used for shutdown */
 	struct lkl_sem *shutdown_sem;
+	/* idle waits here for an interrupt before the idle host task exists */
+	struct lkl_sem *idle_sem;
+	bool idle_waiting;
 } cpu;
 
 static int __cpu_try_get_lock(int n)
@@ -158,6 +161,10 @@ int lkl_cpu_try_run_irq(int irq)
 		set_irq_pending(irq);
 		cpu.irqs_pending = true;
 	}
+	if (ret >= -1 && cpu.idle_waiting) {
+		cpu.idle_waiting = false;
+		lkl_ops->sem_up(cpu.idle_sem);
+	}
 	__cpu_try_get_unlock(ret, 1);
 
 	return ret;
@@ -185,8 +192,31 @@ static void lkl_cpu_cleanup(bool shutdown)
 		lkl_ops->sem_free(cpu.shutdown_sem);
 	if (cpu.sem)
 		lkl_ops->sem_free(cpu.sem);
+	if (cpu.idle_sem)
+		lkl_ops->sem_free(cpu.idle_sem);
 	if (cpu.lock)
 		lkl_ops->mutex_free(cpu.lock);
+}
+
+/*
+ * Release the CPU and sleep until the next interrupt is triggered. Spinning
+ * instead would keep the CPU from the host threads that deliver interrupts,
+ * which hangs hosts that run threads cooperatively.
+ */
+static void lkl_cpu_wait_irq(void)
+{
+	lkl_ops->mutex_lock(cpu.lock);
+	if (cpu.irqs_pending) {
+		/* run them before going idle */
+		lkl_ops->mutex_unlock(cpu.lock);
+		return;
+	}
+	cpu.idle_waiting = true;
+	lkl_ops->mutex_unlock(cpu.lock);
+
+	lkl_cpu_put();
+	lkl_ops->sem_down(cpu.idle_sem);
+	lkl_cpu_get();
 }
 
 void arch_cpu_idle(void)
@@ -205,8 +235,9 @@ void arch_cpu_idle(void)
 	/* enable irqs now to allow direct irqs to run */
 	local_irq_enable();
 
-	/* switch to idle_host_task */
-	wakeup_idle_host_task();
+	/* switch to idle_host_task; it does not exist until boot completes */
+	if (!wakeup_idle_host_task())
+		lkl_cpu_wait_irq();
 }
 
 int lkl_cpu_init(void)
@@ -214,8 +245,9 @@ int lkl_cpu_init(void)
 	cpu.lock = lkl_ops->mutex_alloc(0);
 	cpu.sem = lkl_ops->sem_alloc(0);
 	cpu.shutdown_sem = lkl_ops->sem_alloc(0);
+	cpu.idle_sem = lkl_ops->sem_alloc(0);
 
-	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem) {
+	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem || !cpu.idle_sem) {
 		lkl_cpu_cleanup(false);
 		return -ENOMEM;
 	}

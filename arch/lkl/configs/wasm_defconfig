@@ -7,5 +7,6 @@ CONFIG_PRINTK_TIME=y
 # CONFIG_BLOCK is not set
 # CONFIG_NET is not set
 # CONFIG_PCI is not set
+# CONFIG_VT is not set
 CONFIG_TMPFS=y
 CONFIG_DEBUG_INFO_NONE=y

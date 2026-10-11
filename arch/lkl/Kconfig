@@ -40,6 +40,13 @@ config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
 
+config LKL_EARLY_CONSOLE
+	bool "Early boot console"
+	default n
+	help
+	  Register a boot console from an early initcall, so kernel messages
+	  are printed before the regular console registers in core initcalls.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER
