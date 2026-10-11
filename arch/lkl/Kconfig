@@ -47,6 +47,15 @@ config LKL_EARLY_CONSOLE
 	  Register a boot console from an early initcall, so kernel messages
 	  are printed before the regular console registers in core initcalls.
 
+config LKL_HOSTBLK
+	bool "Host block devices"
+	depends on BLOCK
+	default n
+	help
+	  Block devices whose storage is provided by the host through the
+	  blk_* host operations, which copy data directly to and from kernel
+	  buffers. The disks show up as /dev/hostblk<N>.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER

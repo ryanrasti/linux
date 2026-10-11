@@ -141,6 +141,12 @@ enum lkl_prot {
  * @munmap - unmap previously mapped memory
  *
  * @pci_ops - pointer to PCI host operations
+ *
+ * @blk_count - number of host block devices (see arch/lkl/drivers/hostblk.c)
+ * @blk_capacity - size of a host block device in bytes
+ * @blk_rw - read or write len bytes at the given 512-byte sector, directly to
+ * or from buf; returns 0 or a negative errno
+ * @blk_flush - make completed writes durable; returns 0 or a negative errno
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -201,6 +207,12 @@ struct lkl_host_operations {
 				enum lkl_prot prot);
 
 	struct lkl_dev_pci_ops *pci_ops;
+
+	int (*blk_count)(void);
+	unsigned long long (*blk_capacity)(int disk);
+	int (*blk_rw)(int disk, int write, unsigned long long sector, void *buf,
+		      unsigned long len);
+	int (*blk_flush)(int disk);
 };
 
 /**
