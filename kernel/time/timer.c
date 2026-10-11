@@ -60,6 +60,11 @@
 
 __visible u64 jiffies_64 __cacheline_aligned_in_smp = INITIAL_JIFFIES;
 
+#ifdef __wasm__
+/* other arches alias jiffies to jiffies_64 in their linker script */
+extern unsigned long volatile jiffies __alias(jiffies_64);
+#endif
+
 EXPORT_SYMBOL(jiffies_64);
 
 /*

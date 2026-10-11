@@ -294,7 +294,9 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 	return delta;
 }
 
+#ifndef __wasm__
 const struct sched_class fair_sched_class;
+#endif
 
 /**************************************************************
  * CFS operations on generic schedulable entities:
