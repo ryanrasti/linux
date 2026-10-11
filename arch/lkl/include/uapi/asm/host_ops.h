@@ -147,6 +147,12 @@ enum lkl_prot {
  * @blk_rw - read or write len bytes at the given 512-byte sector, directly to
  * or from buf; returns 0 or a negative errno
  * @blk_flush - make completed writes durable; returns 0 or a negative errno
+ *
+ * @copy_from_user - copy n bytes from user memory; returns the number of bytes
+ * not copied. Used instead of memcpy when user memory is not part of the
+ * kernel's address space (e.g. a separate wasm memory per process); needs
+ * CONFIG_UACCESS_MEMCPY=n
+ * @copy_to_user - the reverse of copy_from_user
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -213,6 +219,11 @@ struct lkl_host_operations {
 	int (*blk_rw)(int disk, int write, unsigned long long sector, void *buf,
 		      unsigned long len);
 	int (*blk_flush)(int disk);
+
+	unsigned long (*copy_from_user)(void *to, const void *from,
+					unsigned long n);
+	unsigned long (*copy_to_user)(void *to, const void *from,
+				      unsigned long n);
 };
 
 /**
