@@ -93,8 +93,13 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 
 	switch_to_host_task(host0);
 
+	/*
+	 * A new thread group is a separate process: it also gets its own
+	 * signal handlers (a copy of host0's), so the handlers it installs
+	 * don't change how host0 and the other host tasks see signals.
+	 */
 	if (new_tg_leader)
-		flags &= ~CLONE_THREAD;
+		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
 
 	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
 	if (pid < 0)
