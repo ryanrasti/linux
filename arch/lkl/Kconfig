@@ -40,6 +40,10 @@ config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
 
+config LKL_WASM
+	def_bool OUTPUT_FORMAT = "wasm"
+	select ARCH_HAS_SYSCALL_WRAPPER
+
 config ARCH_DMA_ADDR_T_64BIT
 	def_bool 64BIT
 

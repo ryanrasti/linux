@@ -3,6 +3,6 @@
 #
 # Print the C compiler output file format, as determined by objdump.
 t=`mktemp` || exit 1
-echo 'void foo(void) {}' | $CC -x c - -c -o "$t" \
+echo 'void foo(void) {}' | $CC $CLANG_FLAGS -x c - -c -o "$t" \
 	&& LC_ALL=C $OBJDUMP -p "$t" | awk '/file format/ {print $4}'
 rm "$t"

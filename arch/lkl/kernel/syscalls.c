@@ -16,6 +16,28 @@
 #include <asm/cpu.h>
 #include <asm/sched.h>
 
+#ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
+typedef long (*syscall_handler_t)(const long *args);
+
+static long __lkl_sys_ni_syscall(const long *args)
+{
+	return sys_ni_syscall();
+}
+
+/* indirect so table aliases in asm/syscalls.h expand before pasting */
+#define __LKL_SYM(sym) __lkl_##sym
+
+#undef __SYSCALL
+#define __SYSCALL(nr, sym) long __LKL_SYM(sym)(const long *args);
+#include <asm/unistd.h>
+#if __BITS_PER_LONG == 32
+#include <asm/unistd_32.h>
+#endif
+
+#undef __SYSCALL
+#define __SYSCALL(nr, sym)[nr] = __LKL_SYM(sym),
+#define __LKL_SYS_NI __lkl_sys_ni_syscall
+#else
 static asmlinkage long sys_virtio_mmio_device_add(long base, long size,
 						  unsigned int irq);
 
@@ -25,9 +47,11 @@ typedef long (*syscall_handler_t)(long arg1, ...);
 
 #undef __SYSCALL
 #define __SYSCALL(nr, sym)[nr] = sym,
+#define __LKL_SYS_NI sys_ni_syscall
+#endif
 
 void *syscall_table[__NR_syscalls] = {
-	[0 ... __NR_syscalls - 1] =  sys_ni_syscall,
+	[0 ... __NR_syscalls - 1] =  __LKL_SYS_NI,
 #include <asm/unistd.h>
 
 #if __BITS_PER_LONG == 32
@@ -43,8 +67,12 @@ static long run_syscall(long no, long *params)
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
 
+#ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
+	ret = handler(params);
+#else
 	ret = handler(params[0], params[1], params[2], params[3], params[4],
 		      params[5]);
+#endif
 
 	task_work_run();
 

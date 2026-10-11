@@ -4,6 +4,7 @@
 #include <linux/personality.h>
 #include <linux/reboot.h>
 #include <linux/fs.h>
+#include <linux/fdtable.h>
 #include <linux/start_kernel.h>
 #include <linux/syscalls.h>
 #include <linux/tick.h>
@@ -208,9 +209,9 @@ static int __init fs_setup(void)
 	// emit an error. The kernel's strncpy implementation attempts to read
 	// 8 bytes at once and, thus, triggers KASan violation for the 6-byte
 	// string.
-	fd = sys_open("/init\0\0", O_CREAT, 0700);
+	fd = do_sys_open(AT_FDCWD, "/init\0\0", O_CREAT, 0700);
 	WARN_ON(fd < 0);
-	sys_close(fd);
+	close_fd(fd);
 
 	register_binfmt(&lkl_run_init_binfmt);
 
