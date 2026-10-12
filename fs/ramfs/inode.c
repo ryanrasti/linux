@@ -244,7 +244,17 @@ static int ramfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		 * but traditionally ramfs has ignored all mount options,
 		 * and as it is used as a !CONFIG_SHMEM simple substitute
 		 * for tmpfs, better continue to ignore other mount options.
+		 * Except those tmpfs itself refuses without quota support,
+		 * and fds, which no tmpfs option is: programs probing what
+		 * tmpfs supports (systemd) can then tell.
 		 */
+		if (param->type == fs_value_is_file ||
+		    !strcmp(param->key, "quota") ||
+		    !strcmp(param->key, "usrquota") ||
+		    !strcmp(param->key, "grpquota") ||
+		    str_has_prefix(param->key, "usrquota_") ||
+		    str_has_prefix(param->key, "grpquota_"))
+			return invalfc(fc, "Unsupported parameter '%s'", param->key);
 		return 0;
 	}
 	if (opt < 0)

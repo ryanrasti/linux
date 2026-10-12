@@ -10,6 +10,7 @@
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
+#include <linux/pid_namespace.h>
 #include <linux/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
@@ -281,7 +282,12 @@ long lkl_syscall(long no, long *params)
 
 	switch_to_host_task(task);
 
-	if (no == __NR_reboot) {
+	/*
+	 * the kernel's halt (lkl_sys_halt); in a child pid namespace, reboot
+	 * ends its init instead (reboot_pid_ns: do_exit), a task exiting as
+	 * any other does, below
+	 */
+	if (no == __NR_reboot && task_active_pid_ns(task) == &init_pid_ns) {
 		ret = run_syscall(no, params);
 		thread_sched_jb();
 		return ret;
