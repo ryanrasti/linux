@@ -4,7 +4,12 @@ CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
 CONFIG_PRINTK_TIME=y
 # CONFIG_KALLSYMS is not set
-# CONFIG_NET is not set
+# Networking: Unix sockets only (local IPC: tokio, systemd, D-Bus); no IP
+CONFIG_NET=y
+CONFIG_UNIX=y
+# CONFIG_INET is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_ETHTOOL_NETLINK is not set
 # CONFIG_PCI is not set
 # CONFIG_VT is not set
 CONFIG_TMPFS=y
