@@ -177,6 +177,11 @@ enum lkl_prot {
  * means the host has it; 1 asks for the file's contents, which follow in
  * order, len bytes at a time at off of size. Returns 0 once the host has the
  * program, or a negative errno (-ENOEXEC: not a program it can run).
+ * @exec_lib - the shared libraries for key's program, after exec_load: returns
+ * 1 with the path of the next file to try in path (size bytes), 0 when it has
+ * them all, or a negative errno. The kernel opens that path and sends the
+ * file with exec_load, then calls again with err (0 or why it couldn't) and,
+ * if it sent the file, loaded: the library's key. Optional.
  * @exec - replace the calling process's program with key's, with the given
  * argv and envp (args: argc then envc NUL-terminated strings), from its
  * return to user mode on. Called past exec's point of no return; an error
@@ -259,6 +264,8 @@ struct lkl_host_operations {
 
 	int (*exec_load)(const char *key, const void *data, unsigned long off,
 			 unsigned long len, unsigned long size);
+	int (*exec_lib)(const char *key, const char *loaded, int err, char *path,
+			unsigned long size);
 	int (*exec)(const char *key, const char *args, unsigned long len,
 		    int argc, int envc);
 };

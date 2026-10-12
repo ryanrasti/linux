@@ -3,7 +3,8 @@
  * Executing wasm programs. The host runs each program as a wasm instance
  * with its own memory; the kernel does the generic exec work and hands the
  * host the program (the file's contents, which the host keeps under a key
- * that identifies them) and the new argv and envp.
+ * that identifies them), the shared libraries it needs, and the new argv
+ * and envp.
  */
 #include <linux/binfmts.h>
 #include <linux/fs.h>
@@ -65,6 +66,40 @@ static int load_program(struct file *file, const char *key)
 }
 
 /*
+ * The shared libraries the program needs (as ld.so would find them): the
+ * host says which file to try next, from what the modules need and their run
+ * paths; the kernel opens it, in the process's namespace, and sends it.
+ */
+static int load_libraries(const char *key)
+{
+	char libkey[80], *path;
+	const char *loaded = NULL;
+	int err = 0, ret;
+
+	if (!lkl_ops->exec_lib)
+		return 0;
+	path = kmalloc(PATH_MAX, GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+	while ((ret = lkl_ops->exec_lib(key, loaded, err, path, PATH_MAX)) > 0) {
+		struct file *file = filp_open(path, O_RDONLY | O_LARGEFILE, 0);
+
+		loaded = NULL;
+		if (IS_ERR(file)) {
+			err = PTR_ERR(file);
+			continue;
+		}
+		program_key(file, libkey, sizeof(libkey));
+		err = load_program(file, libkey);
+		filp_close(file, NULL);
+		if (!err)
+			loaded = libkey;
+	}
+	kfree(path);
+	return ret;
+}
+
+/*
  * The argv and envp strings, in order: on !MMU they are in bprm's pages, from
  * bprm->p up (argv, then envp, then the filename).
  */
@@ -102,6 +137,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 
 	program_key(bprm->file, key, sizeof(key));
 	ret = load_program(bprm->file, key);
+	if (!ret)
+		ret = load_libraries(key);
 	if (ret)
 		return ret;
 	args = exec_args(bprm, &len);
