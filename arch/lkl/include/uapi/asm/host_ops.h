@@ -161,12 +161,22 @@ enum lkl_prot {
  * with the CPU released; the host then resumes the child's user context,
  * where clone returns 0. Returns a thread handle or 0 if the thread could not
  * be created. Without it, clone from userspace fails with -ENOSYS.
+ * @vm_thread_create - the same for a task cloned with CLONE_VM (a thread, or
+ * vfork's child): it shares the caller's memory, so the host starts it at the
+ * function its libc left at the top of stack (the clone's new stack pointer),
+ * instead of resuming a copy. Without it, clone with CLONE_VM fails with
+ * -EINVAL.
  *
  * @signal_handler - run a process's signal handler (a function pointer in the
  * process) for sig; called on the way back from a syscall, on the process's
  * host thread, with the CPU released. info: for an SA_SIGINFO handler, which
  * takes (sig, info, ucontext), the siginfo_t to copy to the process (NULL
- * for a plain handler). Without it, processes get no signals delivered.
+ * for a plain handler). mask: the signal mask (sigset_t) that sigreturn
+ * restores, as the ucontext's uc_sigmask, which the handler may change.
+ * Without it, processes get no signals delivered. Returns nonzero if the
+ * handler moved the thread out of the syscall it was in (as by changing the
+ * context's program counter natively): the syscall then ends with -EINTR
+ * rather than restarting.
  * @task_exit - the calling host thread's task exited during a syscall (exit,
  * exit_group, a fatal signal), with the given wait status. The thread should
  * end without returning; if it returns, lkl_syscall returns 0 and the thread's
@@ -263,7 +273,10 @@ struct lkl_host_operations {
 				      unsigned long n);
 
 	lkl_thread_t (*user_thread_create)(void (*f)(void *), void *arg);
-	void (*signal_handler)(unsigned long handler, int sig, const void *info);
+	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
+					 unsigned long stack);
+	int (*signal_handler)(unsigned long handler, int sig, const void *info,
+			      void *mask);
 	void (*task_exit)(int status);
 
 	int (*exec_load)(const char *key, const void *data, unsigned long off,
