@@ -153,6 +153,14 @@ enum lkl_prot {
  * kernel's address space (e.g. a separate wasm memory per process); needs
  * CONFIG_UACCESS_MEMCPY=n
  * @copy_to_user - the reverse of copy_from_user
+ *
+ * @user_thread_create - create the host thread of a task cloned from
+ * userspace (fork by a host task's syscall); called on the parent's host
+ * thread, inside the syscall. The thread runs f(arg), which returns once the
+ * kernel has first scheduled the task and made it the thread's host task,
+ * with the CPU released; the host then resumes the child's user context,
+ * where clone returns 0. Returns a thread handle or 0 if the thread could not
+ * be created. Without it, clone from userspace fails with -ENOSYS.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -224,6 +232,8 @@ struct lkl_host_operations {
 					unsigned long n);
 	unsigned long (*copy_to_user)(void *to, const void *from,
 				      unsigned long n);
+
+	lkl_thread_t (*user_thread_create)(void (*f)(void *), void *arg);
 };
 
 /**

@@ -109,6 +109,17 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	*task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
 
+	/*
+	 * host0 ignores SIGCHLD so that exited host tasks are reaped; a new
+	 * process starts with the default, so that its own children can be
+	 * waited for.
+	 */
+	if (new_tg_leader) {
+		spin_lock_irq(&(*task)->sighand->siglock);
+		(*task)->sighand->action[SIGCHLD - 1].sa.sa_handler = SIG_DFL;
+		spin_unlock_irq(&(*task)->sighand->siglock);
+	}
+
 	host_task_id++;
 
 	snprintf((*task)->comm, sizeof((*task)->comm), "host%d", host_task_id);
@@ -179,6 +190,50 @@ out:
 	lkl_cpu_put();
 
 	return ret;
+}
+
+/*
+ * A task cloned from userspace (fork) runs on a new host thread. It waits
+ * there like any new thread until the kernel first schedules it, then
+ * becomes the thread's host task, leaves the kernel, and returns to the host,
+ * which resumes the child's user context.
+ */
+static void user_thread_bootstrap(void *arg)
+{
+	struct thread_info *ti = arg;
+
+	lkl_ops->sem_down(ti->sched_sem);
+	/* copy_process() failed after copy_thread(); see kill_thread() */
+	if (ti->dead)
+		lkl_ops->thread_exit();
+
+	set_ti_thread_flag(ti, TIF_HOST_THREAD);
+	lkl_ops->tls_set(task_key, ti->task);
+	if (ti->prev_sched)
+		schedule_tail(ti->prev_sched);
+	/* nobody joins host threads; the task exits when the thread does */
+	lkl_ops->thread_detach();
+	lkl_cpu_put();
+}
+
+int copy_user_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args)
+{
+	struct thread_info *ti = task_thread_info(p);
+
+	if (!lkl_ops->user_thread_create || !lkl_ops->tls_set ||
+	    !test_thread_flag(TIF_HOST_THREAD))
+		return -ENOSYS;
+	/* each process has its own memory; nothing can share it yet */
+	if (args->flags & CLONE_VM)
+		return -EINVAL;
+
+	/* a plain thread, which kill_thread() can end, until it first runs */
+	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+	clear_ti_thread_flag(ti, TIF_SCHED_JB);
+	ti->tid = lkl_ops->user_thread_create(user_thread_bootstrap, ti);
+
+	return ti->tid ? 0 : -ENOMEM;
 }
 
 static struct task_struct *idle_host_task;

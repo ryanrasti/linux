@@ -16,6 +16,7 @@ static int init_ti(struct thread_info *ti)
 	ti->dead = false;
 	ti->prev_sched = NULL;
 	ti->tid = 0;
+	ti->exit_code = 0;
 
 	return 0;
 }
@@ -173,6 +174,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		set_ti_thread_flag(ti, TIF_HOST_THREAD);
 		return 0;
 	}
+
+	/* clone from userspace */
+	if (!args->fn)
+		return copy_user_thread(p, args);
 
 	tba = kmalloc(sizeof(*tba), GFP_KERNEL);
 	if (!tba)
