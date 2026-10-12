@@ -12,3 +12,19 @@ CONFIG_DEVTMPFS=y
 CONFIG_LKL_HOSTBLK=y
 CONFIG_EXT4_FS=y
 CONFIG_DEBUG_INFO_NONE=y
+# Nothing to drive: no keyboards, mice, sensors, firmware or hardware RNGs
+# CONFIG_INPUT is not set
+# CONFIG_SERIO is not set
+# CONFIG_HID_SUPPORT is not set
+# CONFIG_HWMON is not set
+# CONFIG_HW_RANDOM is not set
+# CONFIG_FW_LOADER is not set
+# Unused kernel features
+# CONFIG_FTRACE is not set
+# CONFIG_IO_URING is not set
+# CONFIG_AIO is not set
+# CONFIG_MQ_IOSCHED_DEADLINE is not set
+# CONFIG_MQ_IOSCHED_KYBER is not set
+# 512 /dev/{pty,tty}XX nodes, each a devtmpfs round trip at boot; devpts
+# (/dev/ptmx, UNIX98) is what programs use
+# CONFIG_LEGACY_PTYS is not set
