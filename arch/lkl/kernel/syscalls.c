@@ -179,7 +179,14 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	if (new_tg_leader)
 		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
 
-	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
+	/*
+	 * A process is a user mode thread, as init is: kernel threads get no
+	 * siginfo queued for their signals (sender, sigqueue's value).
+	 */
+	if (new_tg_leader)
+		pid = user_mode_thread(host_task_stub, NULL, flags);
+	else
+		pid = kernel_thread(host_task_stub, NULL, NULL, flags);
 	if (pid < 0)
 		return pid;
 
@@ -275,12 +282,15 @@ long lkl_syscall(long no, long *params)
 
 		if (sc.handler) {
 			struct k_sigaction *ka = &sc.ksig.ka;
+			siginfo_t info;
+			bool si = ka->sa.sa_flags & SA_SIGINFO;
 
+			if (si)
+				copy_siginfo_to_external(&info, &sc.ksig.info);
 			/* in user mode */
 			lkl_cpu_put();
 			lkl_ops->signal_handler((unsigned long)ka->sa.sa_handler,
-						sc.ksig.sig,
-						!!(ka->sa.sa_flags & SA_SIGINFO));
+						sc.ksig.sig, si ? &info : NULL);
 			ret = lkl_cpu_get();
 			if (ret < 0)
 				return ret;
