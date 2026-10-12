@@ -35,8 +35,10 @@ CONFIG_DEBUG_INFO_NONE=y
 # CONFIG_LEGACY_PTYS is not set
 # What an init system (systemd) needs besides Unix sockets: cgroup v2; pid
 # and mount namespaces (the init runs as pid 1 of its own pid namespace, as
-# in a container); file handles; autofs. (No shmem without an MMU: tmpfs is
-# ramfs, without xattrs, and there's no memfd_create.)
+# in a container); file handles; autofs; memfd_create (systemd hands each
+# service its state in a memfd). No shmem without an MMU: tmpfs and memfds
+# are ramfs (no xattrs, no seals).
+CONFIG_MEMFD_CREATE=y
 CONFIG_CGROUPS=y
 CONFIG_NAMESPACES=y
 CONFIG_PID_NS=y
