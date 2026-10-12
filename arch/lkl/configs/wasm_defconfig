@@ -45,3 +45,13 @@ CONFIG_PID_NS=y
 CONFIG_UTS_NS=y
 CONFIG_FHANDLE=y
 CONFIG_AUTOFS_FS=y
+# Networking as libkrun's TSI does it (docs/tsi.md): inet sockets are TSI
+# sockets (tsi_hijack), local ones real inet, the rest proxied by the host
+# over vsock, whose transport is host operations (LKL_HOSTVSOCK). IPv4 for
+# now.
+CONFIG_INET=y
+# CONFIG_IPV6 is not set
+CONFIG_VSOCKETS=y
+# CONFIG_VSOCKETS_LOOPBACK is not set
+CONFIG_LKL_HOSTVSOCK=y
+CONFIG_TSI=y
