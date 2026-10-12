@@ -148,6 +148,16 @@ enum lkl_prot {
  * or from buf; returns 0 or a negative errno
  * @blk_flush - make completed writes durable; returns 0 or a negative errno
  *
+ * @vsock_init - the host's end of vsock (arch/lkl/drivers/hostvsock.c):
+ * virtio-vsock packets, without a device. The host calls notify, on a thread
+ * of its own as for a timer, when it has queued packets for us. Returns our
+ * CID, or 0 if the host has no vsock.
+ * @vsock_send - a packet for the host: its header (struct virtio_vsock_hdr)
+ * and len bytes of payload; returns 0 or a negative errno
+ * @vsock_recv - the next queued packet, header then payload, into buf of
+ * size bytes; returns its length (0: none queued), or, with buf NULL, just
+ * its length
+ *
  * @copy_from_user - copy n bytes from user memory; returns the number of bytes
  * not copied. Used instead of memcpy when user memory is not part of the
  * kernel's address space (e.g. a separate wasm memory per process); needs
@@ -266,6 +276,10 @@ struct lkl_host_operations {
 	int (*blk_rw)(int disk, int write, unsigned long long sector, void *buf,
 		      unsigned long len);
 	int (*blk_flush)(int disk);
+
+	unsigned int (*vsock_init)(void (*notify)(void));
+	int (*vsock_send)(const void *hdr, const void *data, unsigned long len);
+	unsigned long (*vsock_recv)(void *buf, unsigned long size);
 
 	unsigned long (*copy_from_user)(void *to, const void *from,
 					unsigned long n);
