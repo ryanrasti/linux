@@ -283,14 +283,16 @@ long lkl_syscall(long no, long *params)
 		if (sc.handler) {
 			struct k_sigaction *ka = &sc.ksig.ka;
 			siginfo_t info;
+			int moved;
 			bool si = ka->sa.sa_flags & SA_SIGINFO;
 
 			if (si)
 				copy_siginfo_to_external(&info, &sc.ksig.info);
 			/* in user mode */
 			lkl_cpu_put();
-			lkl_ops->signal_handler((unsigned long)ka->sa.sa_handler,
-						sc.ksig.sig, si ? &info : NULL);
+			moved = lkl_ops->signal_handler((unsigned long)ka->sa.sa_handler,
+							sc.ksig.sig, si ? &info : NULL,
+							&sc.saved_mask);
 			ret = lkl_cpu_get();
 			if (ret < 0)
 				return ret;
@@ -298,6 +300,10 @@ long lkl_syscall(long no, long *params)
 
 			/* sigreturn; then more signals, or the syscall again */
 			set_current_blocked(&sc.saved_mask);
+			if (moved && sc.restart) {
+				sc.restart = false;
+				sc.ret = -EINTR;
+			}
 			if (!sc.restart)
 				sc.no = NO_SYSCALL;
 			continue;
@@ -345,14 +351,18 @@ int copy_user_thread(struct task_struct *p,
 	if (!lkl_ops->user_thread_create || !lkl_ops->tls_set ||
 	    !test_thread_flag(TIF_HOST_THREAD))
 		return -ENOSYS;
-	/* each process has its own memory; nothing can share it yet */
-	if (args->flags & CLONE_VM)
+	/* sharing the caller's memory (a thread, vfork): started, not copied */
+	if ((args->flags & CLONE_VM) && !lkl_ops->vm_thread_create)
 		return -EINVAL;
 
 	/* a plain thread, which kill_thread() can end, until it first runs */
 	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
 	clear_ti_thread_flag(ti, TIF_SCHED_JB);
-	ti->tid = lkl_ops->user_thread_create(user_thread_bootstrap, ti);
+	if (args->flags & CLONE_VM)
+		ti->tid = lkl_ops->vm_thread_create(user_thread_bootstrap, ti,
+						    args->stack);
+	else
+		ti->tid = lkl_ops->user_thread_create(user_thread_bootstrap, ti);
 
 	return ti->tid ? 0 : -ENOMEM;
 }
