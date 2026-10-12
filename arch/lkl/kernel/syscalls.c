@@ -376,6 +376,12 @@ int copy_user_thread(struct task_struct *p,
 	/* sharing the caller's memory (a thread, vfork): started, not copied */
 	if ((args->flags & CLONE_VM) && !lkl_ops->vm_thread_create)
 		return -EINVAL;
+	/*
+	 * and on a stack of its own: it starts at libc's start block there
+	 * (natively, no stack means the caller's, as vfork's child uses)
+	 */
+	if ((args->flags & CLONE_VM) && !args->stack)
+		return -EINVAL;
 
 	/* a plain thread, which kill_thread() can end, until it first runs */
 	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
