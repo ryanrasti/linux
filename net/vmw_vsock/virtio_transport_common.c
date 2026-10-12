@@ -1123,7 +1123,7 @@ virtio_transport_dgram_enqueue(struct vsock_sock *vsk,
 	src_port = vsk->local_addr.svm_port;
 
 	skb = virtio_transport_alloc_skb(&info, dgram_len, false,
-					 NULL, src_cid, src_port,
+					 src_cid, src_port,
 					 remote_addr->svm_cid,
 					 remote_addr->svm_port);
 

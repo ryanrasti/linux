@@ -1122,6 +1122,7 @@ static bool tsi_has_udp_listener(struct sock *sk, struct sockaddr *addr,
 			sock_put(listener);  /* Release the reference */
 			return true;
 		}
+#if IS_ENABLED(CONFIG_IPV6)
 	} else if (tsk->family == PF_INET6) {
 		struct sockaddr_in6 *sin6;
 		const struct in6_addr *daddr;
@@ -1149,6 +1150,7 @@ static bool tsi_has_udp_listener(struct sock *sk, struct sockaddr *addr,
 			sock_put(listener);  /* Release the reference */
 			return true;
 		}
+#endif
 	}
 
 	return false;
