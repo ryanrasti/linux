@@ -178,8 +178,9 @@ static int lkl_run_init(struct linux_binprm *bprm)
 {
 	int ret;
 
+	/* not ours: let exec try other formats, or fail with ENOEXEC */
 	if (strcmp("/init", bprm->filename) != 0)
-		return -EINVAL;
+		return -ENOEXEC;
 
 	ret = begin_new_exec(bprm);
 	if (ret)
