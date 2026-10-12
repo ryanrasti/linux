@@ -171,6 +171,16 @@ enum lkl_prot {
  * exit_group, a fatal signal), with the given wait status. The thread should
  * end without returning; if it returns, lkl_syscall returns 0 and the thread's
  * next syscall gets a new host task.
+ *
+ * @exec_load - make sure the host has the program identified by key (a file
+ * and its version), to run it with exec. First called with data == NULL: 0
+ * means the host has it; 1 asks for the file's contents, which follow in
+ * order, len bytes at a time at off of size. Returns 0 once the host has the
+ * program, or a negative errno (-ENOEXEC: not a program it can run).
+ * @exec - replace the calling process's program with key's, with the given
+ * argv and envp (args: argc then envc NUL-terminated strings), from its
+ * return to user mode on. Called past exec's point of no return; an error
+ * kills the process. Without it, there are no wasm executables.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -246,6 +256,11 @@ struct lkl_host_operations {
 	lkl_thread_t (*user_thread_create)(void (*f)(void *), void *arg);
 	void (*signal_handler)(unsigned long handler, int sig, int siginfo);
 	void (*task_exit)(int status);
+
+	int (*exec_load)(const char *key, const void *data, unsigned long off,
+			 unsigned long len, unsigned long size);
+	int (*exec)(const char *key, const char *args, unsigned long len,
+		    int argc, int envc);
 };
 
 /**
