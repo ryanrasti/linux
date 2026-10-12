@@ -186,6 +186,10 @@ enum lkl_prot {
  * argv and envp (args: argc then envc NUL-terminated strings), from its
  * return to user mode on. Called past exec's point of no return; an error
  * kills the process. Without it, there are no wasm executables.
+ *
+ * @random - fill buf with len cryptographically random bytes; returns 0 or a
+ * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
+ * would (see asm/archrandom.h). Optional.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -268,6 +272,8 @@ struct lkl_host_operations {
 			unsigned long size);
 	int (*exec)(const char *key, const char *args, unsigned long len,
 		    int argc, int envc);
+
+	int (*random)(void *buf, unsigned long len);
 };
 
 /**
