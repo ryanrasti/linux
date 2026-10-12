@@ -18,6 +18,7 @@
 #include <linux/mman.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/falloc.h>
 
 #include <linux/uaccess.h>
 #include "internal.h"
@@ -29,6 +30,8 @@ static unsigned long ramfs_nommu_get_unmapped_area(struct file *file,
 						   unsigned long pgoff,
 						   unsigned long flags);
 static int ramfs_nommu_mmap(struct file *file, struct vm_area_struct *vma);
+static long ramfs_nommu_fallocate(struct file *file, int mode, loff_t offset,
+				  loff_t len);
 
 static unsigned ramfs_mmap_capabilities(struct file *file)
 {
@@ -46,6 +49,7 @@ const struct file_operations ramfs_file_operations = {
 	.splice_read		= filemap_splice_read,
 	.splice_write		= iter_file_splice_write,
 	.llseek			= generic_file_llseek,
+	.fallocate		= ramfs_nommu_fallocate,
 };
 
 const struct inode_operations ramfs_file_inode_operations = {
@@ -158,6 +162,35 @@ static int ramfs_nommu_resize(struct inode *inode, loff_t newsize, loff_t size)
 
 	truncate_setsize(inode, newsize);
 	return 0;
+}
+
+/*****************************************************************************/
+/*
+ * Without shmem (no MMU), tmpfs is ramfs: allocating is extending the size,
+ * as shmem_fallocate() does for the programs that expect it of tmpfs (e.g.
+ * systemd-journald, for files in /run); holes read as zeros anyway.
+ */
+static long ramfs_nommu_fallocate(struct file *file, int mode, loff_t offset,
+				  loff_t len)
+{
+	struct inode *inode = file_inode(file);
+	loff_t end = offset + len, size;
+	int ret = 0;
+
+	if (mode & ~FALLOC_FL_KEEP_SIZE)
+		return -EOPNOTSUPP;
+
+	inode_lock(inode);
+	size = i_size_read(inode);
+	if (!(mode & FALLOC_FL_KEEP_SIZE) && end > size) {
+		ret = inode_newsize_ok(inode, end);
+		if (!ret)
+			ret = ramfs_nommu_resize(inode, end, size);
+		if (!ret)
+			inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
+	}
+	inode_unlock(inode);
+	return ret;
 }
 
 /*****************************************************************************/
