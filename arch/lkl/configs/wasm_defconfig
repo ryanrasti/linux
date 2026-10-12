@@ -16,6 +16,9 @@ CONFIG_TMPFS=y
 CONFIG_DEVTMPFS=y
 CONFIG_LKL_HOSTBLK=y
 CONFIG_EXT4_FS=y
+# host directories (FUSE served by the host: fs/fuse/hostfuse.c)
+CONFIG_FUSE_FS=y
+CONFIG_HOSTFUSE=y
 CONFIG_DEBUG_INFO_NONE=y
 # Nothing to drive: no keyboards, mice, sensors, firmware or hardware RNGs
 # CONFIG_INPUT is not set
