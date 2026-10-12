@@ -259,8 +259,13 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 		 * we must not include the current process in the key. Since
 		 * there is only one address space, the address is a unique key
 		 * on its own.
+		 *
+		 * LKL: no MMU, but each process has a memory of its own (a wasm
+		 * instance's), so the same address in two processes is two
+		 * futexes: key by mm, as with an MMU. (Processes not started by
+		 * exec have no mm, and still share keys.)
 		 */
-		if (IS_ENABLED(CONFIG_MMU))
+		if (IS_ENABLED(CONFIG_MMU) || IS_ENABLED(CONFIG_LKL))
 			key->private.mm = mm;
 		else
 			key->private.mm = NULL;
