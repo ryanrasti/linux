@@ -16,7 +16,7 @@ static int init_ti(struct thread_info *ti)
 	ti->dead = false;
 	ti->prev_sched = NULL;
 	ti->tid = 0;
-	ti->exit_code = 0;
+	ti->syscall = NULL;
 
 	return 0;
 }
@@ -104,6 +104,13 @@ struct task_struct *__switch_to(struct task_struct *prev,
 		/* Atomic. Must be done before wakeup next */
 		clear_ti_thread_flag(_prev, TIF_SCHED_JB);
 		_prev_jb = _prev->sched_jb;
+	} else if (_prev->syscall && READ_ONCE(prev->__state) == TASK_DEAD) {
+		/*
+		 * A host task exited in a syscall: it never runs again, so
+		 * return to its host thread in lkl_syscall() instead.
+		 */
+		set_bit(TIF_SCHED_JB, &_prev_flags);
+		_prev_jb = *host_syscall_jb(_prev->syscall);
 	}
 
 	lkl_ops->sem_up(_next->sched_sem);

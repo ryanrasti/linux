@@ -25,6 +25,8 @@ static inline int arch_object_is_on_stack(const void *obj)
 	return addr >= stack && addr - stack < stack_size;
 }
 
+struct host_syscall;
+
 struct thread_info {
 	struct task_struct *task;
 	unsigned long flags;
@@ -35,8 +37,8 @@ struct thread_info {
 	lkl_thread_t tid;
 	struct task_struct *prev_sched;
 	unsigned long stackend;
-	/* status from exit/exit_group, applied when a host task exits */
-	int exit_code;
+	/* the syscall a host task is in (arch/lkl/kernel/syscalls.c) */
+	struct host_syscall *syscall;
 };
 
 #define INIT_THREAD_INFO(tsk)				\
@@ -70,6 +72,8 @@ void threads_cleanup(void);
 #define TIF_SCHED_JB			7
 #define TIF_HOST_THREAD			8
 #define TIF_NOTIFY_SIGNAL		9
+/* a host task running a process: gets signals on the way back from syscalls */
+#define TIF_USER_TASK			10
 
 #define __HAVE_THREAD_FUNCTIONS
 

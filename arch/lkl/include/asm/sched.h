@@ -25,6 +25,8 @@ static inline void thread_sched_jb(void)
 void switch_to_host_task(struct task_struct *);
 int host_task_stub(void *unused);
 struct kernel_clone_args;
+struct host_syscall;
+struct lkl_jmp_buf *host_syscall_jb(struct host_syscall *sc);
 int copy_user_thread(struct task_struct *p,
 		     const struct kernel_clone_args *args);
 

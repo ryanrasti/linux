@@ -161,6 +161,16 @@ enum lkl_prot {
  * with the CPU released; the host then resumes the child's user context,
  * where clone returns 0. Returns a thread handle or 0 if the thread could not
  * be created. Without it, clone from userspace fails with -ENOSYS.
+ *
+ * @signal_handler - run a process's signal handler (a function pointer in the
+ * process) for sig; called on the way back from a syscall, on the process's
+ * host thread, with the CPU released. siginfo: an SA_SIGINFO handler, which
+ * takes (sig, info, ucontext); both are NULL for now. Without it, processes
+ * get no signals delivered.
+ * @task_exit - the calling host thread's task exited during a syscall (exit,
+ * exit_group, a fatal signal), with the given wait status. The thread should
+ * end without returning; if it returns, lkl_syscall returns 0 and the thread's
+ * next syscall gets a new host task.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -234,6 +244,8 @@ struct lkl_host_operations {
 				      unsigned long n);
 
 	lkl_thread_t (*user_thread_create)(void (*f)(void *), void *arg);
+	void (*signal_handler)(unsigned long handler, int sig, int siginfo);
+	void (*task_exit)(int status);
 };
 
 /**

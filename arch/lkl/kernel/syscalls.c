@@ -9,6 +9,8 @@
 #include <linux/task_work.h>
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
+#include <linux/sched/signal.h>
+#include <linux/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
@@ -79,6 +81,82 @@ static long run_syscall(long no, long *params)
 	return ret;
 }
 
+/*
+ * A syscall by a host task, with what a real arch does on the way back to
+ * user mode: signal delivery and syscall restart. The task may exit in it
+ * (exit, a fatal signal); its final schedule() then comes back to jb (see
+ * __switch_to()).
+ */
+struct host_syscall {
+	long no;		/* NO_SYSCALL: only deliver signals */
+	long *params;
+	long ret;
+	bool restart;		/* run the syscall again */
+	bool handler;		/* run ksig's handler, then restore saved_mask */
+	struct ksignal ksig;
+	sigset_t saved_mask;
+	struct lkl_jmp_buf jb;
+};
+
+#define NO_SYSCALL -1
+
+struct lkl_jmp_buf *host_syscall_jb(struct host_syscall *sc)
+{
+	return &sc->jb;
+}
+
+/* ka: the handler about to run, if any */
+static void prepare_restart(struct host_syscall *sc, struct k_sigaction *ka)
+{
+	switch (sc->ret) {
+	case -ERESTARTNOHAND:
+	case -ERESTART_RESTARTBLOCK:
+		if (ka) {
+			sc->ret = -EINTR;
+			return;
+		}
+		break;
+	case -ERESTARTSYS:
+		if (ka && !(ka->sa.sa_flags & SA_RESTART)) {
+			sc->ret = -EINTR;
+			return;
+		}
+		break;
+	case -ERESTARTNOINTR:
+		break;
+	default:
+		return;
+	}
+	if (sc->ret == -ERESTART_RESTARTBLOCK)
+		sc->no = __NR_restart_syscall;
+	sc->restart = true;
+}
+
+static void host_syscall_body(void)
+{
+	struct host_syscall *sc = current_thread_info()->syscall;
+	bool syscall = sc->no != NO_SYSCALL;
+
+	if (syscall)
+		sc->ret = run_syscall(sc->no, sc->params);
+	sc->restart = false;
+	sc->handler = false;
+
+	if (!test_thread_flag(TIF_USER_TASK) || !lkl_ops->signal_handler)
+		return;
+	/* may not return: a fatal signal exits the task */
+	if (!signal_pending(current) || !get_signal(&sc->ksig)) {
+		if (syscall)
+			prepare_restart(sc, NULL);
+		restore_saved_sigmask();
+		return;
+	}
+	if (syscall)
+		prepare_restart(sc, &sc->ksig.ka);
+	sc->saved_mask = *sigmask_to_save();
+	sc->handler = true;
+	signal_setup_done(0, &sc->ksig, 0);
+}
 
 #define CLONE_FLAGS (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD |	\
 		     CLONE_SIGHAND | SIGCHLD)
@@ -115,6 +193,7 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	 * waited for.
 	 */
 	if (new_tg_leader) {
+		set_tsk_thread_flag(*task, TIF_USER_TASK);
 		spin_lock_irq(&(*task)->sighand->siglock);
 		(*task)->sighand->action[SIGCHLD - 1].sa.sa_handler = SIG_DFL;
 		spin_unlock_irq(&(*task)->sighand->siglock);
@@ -128,7 +207,7 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 }
 static void exit_task(void)
 {
-	do_exit(current_thread_info()->exit_code);
+	do_exit(0);
 }
 
 static void del_host_task(void *arg)
@@ -147,9 +226,20 @@ static void del_host_task(void *arg)
 
 static struct lkl_tls_key *task_key;
 
+/* the task exited in the syscall; the CPU has gone to the next task */
+static void host_task_exited(struct task_struct *task)
+{
+	int status = task->exit_code;
+
+	lkl_ops->tls_set(task_key, NULL);
+	if (lkl_ops->task_exit)
+		lkl_ops->task_exit(status);
+}
+
 long lkl_syscall(long no, long *params)
 {
 	struct task_struct *task = host0;
+	struct host_syscall sc = { .no = no, .params = params };
 	long ret;
 
 	ret = lkl_cpu_get();
@@ -168,23 +258,44 @@ long lkl_syscall(long no, long *params)
 
 	switch_to_host_task(task);
 
-	/*
-	 * A host task can't exit from inside a syscall: its host thread has to
-	 * unwind first. Record the status; the task exits with it when the host
-	 * thread goes away (del_host_task).
-	 */
-	if (no == __NR_exit || no == __NR_exit_group) {
-		task_thread_info(task)->exit_code = (params[0] & 0xff) << 8;
-		ret = 0;
-		goto out;
-	}
-
-	ret = run_syscall(no, params);
-
 	if (no == __NR_reboot) {
+		ret = run_syscall(no, params);
 		thread_sched_jb();
 		return ret;
 	}
+
+	for (;;) {
+		task_thread_info(task)->syscall = &sc;
+		lkl_ops->jmp_buf_set(&sc.jb, host_syscall_body);
+		if (READ_ONCE(task->__state) == TASK_DEAD) {
+			host_task_exited(task);
+			return 0;
+		}
+		task_thread_info(task)->syscall = NULL;
+
+		if (sc.handler) {
+			struct k_sigaction *ka = &sc.ksig.ka;
+
+			/* in user mode */
+			lkl_cpu_put();
+			lkl_ops->signal_handler((unsigned long)ka->sa.sa_handler,
+						sc.ksig.sig,
+						!!(ka->sa.sa_flags & SA_SIGINFO));
+			ret = lkl_cpu_get();
+			if (ret < 0)
+				return ret;
+			switch_to_host_task(task);
+
+			/* sigreturn; then more signals, or the syscall again */
+			set_current_blocked(&sc.saved_mask);
+			if (!sc.restart)
+				sc.no = NO_SYSCALL;
+			continue;
+		}
+		if (!sc.restart)
+			break;
+	}
+	ret = sc.ret;
 
 out:
 	lkl_cpu_put();
