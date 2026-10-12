@@ -43,7 +43,7 @@ static long __lkl_sys_ni_syscall(const long *args)
 static asmlinkage long sys_virtio_mmio_device_add(long base, long size,
 						  unsigned int irq);
 
-static asmlinkage long sys_new_thread_group_leader(void);
+static asmlinkage long sys_new_thread_group_leader(unsigned long flags);
 
 typedef long (*syscall_handler_t)(long arg1, ...);
 
@@ -164,7 +164,16 @@ static void host_syscall_body(void)
 static int host_task_id;
 static struct task_struct *host0;
 
-static int new_host_task(struct task_struct **task, int new_tg_leader)
+/* namespaces a new thread group can ask for (new_thread_group_leader) */
+#define NEW_TG_NS_FLAGS (CLONE_NEWPID | CLONE_NEWNS)
+
+/*
+ * ns_flags: for a new thread group, NEW_TG_NS_FLAGS to start it in new
+ * namespaces; with CLONE_NEWPID it is pid 1 of its own pid namespace, an
+ * init (host0, which the host's own syscalls use, is pid 1 of the root one).
+ */
+static int new_host_task(struct task_struct **task, int new_tg_leader,
+			 unsigned long ns_flags)
 {
 	pid_t pid;
 	unsigned long flags = CLONE_FLAGS;
@@ -176,8 +185,13 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	 * signal handlers (a copy of host0's), so the handlers it installs
 	 * don't change how host0 and the other host tasks see signals.
 	 */
-	if (new_tg_leader)
+	if (new_tg_leader) {
 		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
+		flags |= ns_flags & NEW_TG_NS_FLAGS;
+		/* a new mount namespace needs its own root and cwd */
+		if (flags & CLONE_NEWNS)
+			flags &= ~CLONE_FS;
+	}
 
 	/*
 	 * A process is a user mode thread, as init is: kernel threads get no
@@ -256,7 +270,9 @@ long lkl_syscall(long no, long *params)
 	if (lkl_ops->tls_get) {
 		task = lkl_ops->tls_get(task_key);
 		if (!task) {
-			ret = new_host_task(&task, no == __NR_new_thread_group_leader);
+			ret = new_host_task(&task,
+					    no == __NR_new_thread_group_leader,
+					    params[0]);
 			if (ret)
 				goto out;
 			lkl_ops->tls_set(task_key, task);
@@ -483,7 +499,8 @@ exit_device_put:
 }
 
 
-SYSCALL_DEFINE0(new_thread_group_leader)
+/* flags: NEW_TG_NS_FLAGS, used by new_host_task() */
+SYSCALL_DEFINE1(new_thread_group_leader, unsigned long, flags)
 {
 	// No-op here -- actual handling is done in lkl_syscall routine.
 	if (current->tgid == current->pid)

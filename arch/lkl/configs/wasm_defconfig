@@ -33,3 +33,13 @@ CONFIG_DEBUG_INFO_NONE=y
 # 512 /dev/{pty,tty}XX nodes, each a devtmpfs round trip at boot; devpts
 # (/dev/ptmx, UNIX98) is what programs use
 # CONFIG_LEGACY_PTYS is not set
+# What an init system (systemd) needs besides Unix sockets: cgroup v2; pid
+# and mount namespaces (the init runs as pid 1 of its own pid namespace, as
+# in a container); file handles; autofs. (No shmem without an MMU: tmpfs is
+# ramfs, without xattrs, and there's no memfd_create.)
+CONFIG_CGROUPS=y
+CONFIG_NAMESPACES=y
+CONFIG_PID_NS=y
+CONFIG_UTS_NS=y
+CONFIG_FHANDLE=y
+CONFIG_AUTOFS_FS=y
