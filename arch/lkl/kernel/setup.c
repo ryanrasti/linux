@@ -1,4 +1,5 @@
 #include <linux/binfmts.h>
+#include <linux/kthread.h>
 #include <linux/init.h>
 #include <linux/init_task.h>
 #include <linux/personality.h>
@@ -190,7 +191,14 @@ static int lkl_run_init(struct linux_binprm *bprm)
 
 	set_binfmt(&lkl_run_init_binfmt);
 
-	init_pid_ns.child_reaper = 0;
+	/*
+	 * Orphans' new parent: not this thread, which leaves without exiting
+	 * (lkl_ops->thread_exit), and not none (an orphan's exit notified a
+	 * null parent: a shell's background job outliving it crashed the
+	 * kernel). kthreadd ignores every signal, SIGCHLD too, so the orphans
+	 * it inherits are reaped as they exit, as an init's waits would.
+	 */
+	init_pid_ns.child_reaper = kthreadd_task;
 
 	syscalls_init();
 
