@@ -148,6 +148,15 @@ enum lkl_prot {
  * or from buf; returns 0 or a negative errno
  * @blk_flush - make completed writes durable; returns 0 or a negative errno
  *
+ * @fuse_connect - connect to the host's filesystem named tag, served with the
+ * FUSE protocol (mount -t hostfuse TAG DIR, fs/fuse/hostfuse.c): a handle
+ * >= 0, or a negative errno (-ENOENT: no such filesystem)
+ * @fuse_request - a FUSE request on connection conn: in_len bytes at in, its
+ * header first. If out_len, the request has a reply: wait for it, write it to
+ * out (at most out_len bytes, its header first) and return its length;
+ * otherwise return 0. A negative errno if the request couldn't be handled.
+ * @fuse_disconnect - the connection's filesystem was unmounted
+ *
  * @copy_from_user - copy n bytes from user memory; returns the number of bytes
  * not copied. Used instead of memcpy when user memory is not part of the
  * kernel's address space (e.g. a separate wasm memory per process); needs
@@ -266,6 +275,11 @@ struct lkl_host_operations {
 	int (*blk_rw)(int disk, int write, unsigned long long sector, void *buf,
 		      unsigned long len);
 	int (*blk_flush)(int disk);
+
+	int (*fuse_connect)(const char *tag);
+	long (*fuse_request)(int conn, const void *in, unsigned long in_len,
+			     void *out, unsigned long out_len);
+	void (*fuse_disconnect)(int conn);
 
 	unsigned long (*copy_from_user)(void *to, const void *from,
 					unsigned long n);
