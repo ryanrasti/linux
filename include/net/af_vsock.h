@@ -76,6 +76,7 @@ struct vsock_sock {
 };
 
 s64 vsock_connectible_has_data(struct vsock_sock *vsk);
+s64 vsock_dgram_has_data(struct vsock_sock *vsk);
 s64 vsock_stream_has_data(struct vsock_sock *vsk);
 s64 vsock_stream_has_space(struct vsock_sock *vsk);
 struct sock *vsock_create_connected(struct sock *parent);
@@ -120,11 +121,21 @@ struct vsock_transport {
 
 	/* DGRAM. */
 	int (*dgram_bind)(struct vsock_sock *, struct sockaddr_vm *);
-	int (*dgram_dequeue)(struct vsock_sock *vsk, struct msghdr *msg,
-			     size_t len, int flags);
 	int (*dgram_enqueue)(struct vsock_sock *, struct sockaddr_vm *,
 			     struct msghdr *, size_t len);
 	bool (*dgram_allow)(u32 cid, u32 port);
+	int (*dgram_get_cid)(struct sk_buff *skb, unsigned int *cid);
+	int (*dgram_get_port)(struct sk_buff *skb, unsigned int *port);
+	int (*dgram_get_length)(struct sk_buff *skb, size_t *length);
+
+	/* The number of bytes into the buffer at which the payload starts, as
+	 * first seen by the receiving socket layer. For example, if the
+	 * transport presets the skb pointers using skb_pull(sizeof(header))
+	 * than this would be zero, otherwise it would be the size of the
+	 * header.
+	 */
+	const size_t dgram_payload_offset;
+	s64 (*dgram_has_data)(struct vsock_sock *);
 
 	/* STREAM. */
 	/* TODO: stream_bind() */
@@ -221,6 +232,7 @@ void vsock_for_each_connected_socket(struct vsock_transport *transport,
 				     void (*fn)(struct sock *sk));
 int vsock_assign_transport(struct vsock_sock *vsk, struct vsock_sock *psk);
 bool vsock_find_cid(unsigned int cid);
+struct sock *vsock_find_bound_dgram_socket(struct sockaddr_vm *addr);
 
 /**** TAP ****/
 

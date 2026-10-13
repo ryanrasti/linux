@@ -47,6 +47,17 @@ config LKL_EARLY_CONSOLE
 	  Register a boot console from an early initcall, so kernel messages
 	  are printed before the regular console registers in core initcalls.
 
+config LKL_HOSTVSOCK
+	bool "Host vsock transport"
+	depends on VSOCKETS
+	select VIRTIO_VSOCKETS_COMMON
+	default n
+	help
+	  A vsock transport whose packets (virtio-vsock's) go to and from the
+	  host through the vsock_* host operations, without a virtio device.
+	  The guest's CID is the host's choice; the host is CID 2. With TSI,
+	  the host provides the guest's network.
+
 config LKL_HOSTBLK
 	bool "Host block devices"
 	depends on BLOCK
