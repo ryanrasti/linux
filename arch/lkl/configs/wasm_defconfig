@@ -52,3 +52,5 @@ CONFIG_AUTOFS_FS=y
 CONFIG_OVERLAY_FS=y
 CONFIG_EROFS_FS=y
 CONFIG_EROFS_FS_BACKED_BY_FILE=y
+# (uncompressed images only: decompression needs vmap)
+# CONFIG_EROFS_FS_ZIP is not set
