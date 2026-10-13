@@ -45,3 +45,7 @@ CONFIG_PID_NS=y
 CONFIG_UTS_NS=y
 CONFIG_FHANDLE=y
 CONFIG_AUTOFS_FS=y
+# NixOS's /etc: an overlay of an EROFS image (a file in /nix/store)
+CONFIG_OVERLAY_FS=y
+CONFIG_EROFS_FS=y
+CONFIG_EROFS_FS_BACKED_BY_FILE=y
