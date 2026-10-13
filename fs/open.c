@@ -976,6 +976,15 @@ static int do_dentry_open(struct file *f,
 
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
 
+	/*
+	 * lkl: a process's memory isn't pages the kernel can pin (each process
+	 * has its own; get_user_pages fails), so direct I/O would fail with
+	 * EFAULT at the first read or write. Say so at open (and fcntl), as a
+	 * filesystem without direct I/O does: programs fall back to buffered.
+	 */
+	if (IS_ENABLED(CONFIG_LKL))
+		f->f_mode &= ~FMODE_CAN_ODIRECT;
+
 	if ((f->f_flags & O_DIRECT) && !(f->f_mode & FMODE_CAN_ODIRECT))
 		return -EINVAL;
 
