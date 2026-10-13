@@ -3,6 +3,8 @@ CONFIG_EXPERT=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
 CONFIG_PRINTK_TIME=y
+# SysV IPC: shared memory for processes in a domain (docs/fork.md)
+CONFIG_SYSVIPC=y
 # CONFIG_KALLSYMS is not set
 # Networking: Unix sockets only (local IPC: tokio, systemd, D-Bus); no IP
 CONFIG_NET=y

@@ -263,8 +263,14 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 		 * LKL: no MMU, but each process has a memory of its own (a wasm
 		 * instance's), so the same address in two processes is two
 		 * futexes: key by mm, as with an MMU. (Processes not started by
-		 * exec have no mm, and still share keys.)
+		 * exec have no mm, and still share keys.) Processes in a domain
+		 * share a memory: key by the domain (odd, so no mm's address).
 		 */
+#ifdef CONFIG_LKL
+		if (mm && mm->context.domain)
+			key->private.mm = (void *)(mm->context.domain * 2 + 1);
+		else
+#endif
 		if (IS_ENABLED(CONFIG_MMU) || IS_ENABLED(CONFIG_LKL))
 			key->private.mm = mm;
 		else

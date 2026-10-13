@@ -215,6 +215,9 @@ enum lkl_prot {
  * argv and envp (args: argc then envc NUL-terminated strings), from its
  * return to user mode on. Called past exec's point of no return; an error
  * kills the process. Without it, there are no wasm executables.
+ * @exec_domain - after exec: the domain the new program runs in, 0 for none
+ * (its own memory). Processes in a domain share their memory, so their
+ * futexes are keyed by it. Optional.
  *
  * @random - fill buf with len cryptographically random bytes; returns 0 or a
  * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
@@ -313,6 +316,7 @@ struct lkl_host_operations {
 			unsigned long size);
 	int (*exec)(const char *key, const char *args, unsigned long len,
 		    int argc, int envc);
+	unsigned long (*exec_domain)(void);
 
 	int (*random)(void *buf, unsigned long len);
 };

@@ -155,6 +155,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	kvfree(args);
 	if (ret)
 		return ret;
+	if (lkl_ops->exec_domain)
+		current->mm->context.domain = lkl_ops->exec_domain();
 	set_binfmt(&wasm_format);
 	finalize_exec(bprm);
 	return 0;
