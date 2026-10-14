@@ -190,7 +190,13 @@ static int lkl_run_init(struct linux_binprm *bprm)
 
 	set_binfmt(&lkl_run_init_binfmt);
 
-	init_pid_ns.child_reaper = 0;
+	/*
+	 * Orphans go to this task, pid 1, which becomes host0 (syscalls_init):
+	 * it ignores SIGCHLD, so they're reaped when they exit. (With none, an
+	 * orphan's exit notified a NULL parent: processes outlive their
+	 * parents, as a daemon does pg_ctl.)
+	 */
+	init_pid_ns.child_reaper = current;
 
 	syscalls_init();
 
