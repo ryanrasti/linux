@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * hostfuse: filesystems served by the host (lkl_ops->fuse_*), as virtio-fs's
- * are by virtiofsd, without virtio: each FUSE request goes to the host as one
- * buffer (header, arguments, then any page data), and its reply comes back
- * the same way. mount -t hostfuse TAG DIR mounts the host's filesystem TAG.
+ * are by virtiofsd, without virtio: each FUSE request goes to the host as a
+ * list of its pieces (header, arguments, then any data, in the page cache's
+ * own pages), and the host writes its reply into such a list. No buffer of
+ * the request's size: without an MMU that would be contiguous, which a
+ * megabyte's write may not find. mount -t hostfuse TAG DIR mounts the host's
+ * filesystem TAG.
  *
  * Requests may be sent where they can't be ended (see virtio_fs.c), so a
  * worker sends them. The host answers synchronously, as for hostblk.
@@ -24,28 +27,27 @@ struct hostfuse {
 	struct work_struct work;
 };
 
-/* copy len bytes between buf and a request's pages (to_pages: into them) */
-static void hostfuse_copy_pages(struct fuse_args_pages *ap, void *buf,
-				unsigned int len, bool to_pages)
+/* seg: len bytes of a request's pages, a piece each; returns how many */
+static int hostfuse_page_segs(struct fuse_args_pages *ap,
+			      struct lkl_fuse_seg *seg, unsigned int len)
 {
 	unsigned int i, n;
+	int segs = 0;
 
 	for (i = 0; i < ap->num_pages && len; i++) {
-		void *p = kmap_local_page(ap->pages[i]) + ap->descs[i].offset;
-
 		n = min(ap->descs[i].length, len);
-		if (to_pages)
-			memcpy(p, buf, n);
-		else
-			memcpy(buf, p, n);
-		kunmap_local(p);
-		buf += n;
+		seg[segs].base = page_address(ap->pages[i]) + ap->descs[i].offset;
+		seg[segs++].len = n;
 		len -= n;
 	}
+	return segs;
 }
 
-/* the reply's arguments into the request's (as fuse_dev_do_write does) */
-static int hostfuse_copy_out(struct fuse_req *req, void *buf, unsigned int len)
+/*
+ * The reply's arguments, len bytes, already in place: their sizes (as
+ * fuse_dev_do_write sets them), and a short read's pages zeroed past it
+ */
+static int hostfuse_reply(struct fuse_req *req, unsigned int len)
 {
 	struct fuse_args *args = req->args;
 	struct fuse_args_pages *ap = container_of(args, typeof(*ap), args);
@@ -59,27 +61,20 @@ static int hostfuse_copy_out(struct fuse_req *req, void *buf, unsigned int len)
 			n = min(n, len);
 		else if (n > len)
 			return -EIO;
-		if (i == last && args->out_pages) {
-			hostfuse_copy_pages(ap, buf, n, true);
-			if (args->page_zeroing) {
-				unsigned int j, rest = n;
+		if (i == last && args->out_pages && args->page_zeroing) {
+			unsigned int j, rest = n;
 
-				/* (zero the rest of a short read's pages) */
-				for (j = 0; j < ap->num_pages; j++) {
-					unsigned int dl = ap->descs[j].length;
+			for (j = 0; j < ap->num_pages; j++) {
+				unsigned int dl = ap->descs[j].length;
 
-					if (rest < dl)
-						zero_user_segment(ap->pages[j],
-							ap->descs[j].offset + rest,
-							ap->descs[j].offset + dl);
-					rest -= min(rest, dl);
-				}
+				if (rest < dl)
+					zero_user_segment(ap->pages[j],
+						ap->descs[j].offset + rest,
+						ap->descs[j].offset + dl);
+				rest -= min(rest, dl);
 			}
-		} else {
-			memcpy(args->out_args[i].value, buf, n);
 		}
 		args->out_args[i].size = n;
-		buf += n;
 		len -= n;
 	}
 	return 0;
@@ -90,50 +85,58 @@ static void hostfuse_send(struct hostfuse *hf, struct fuse_req *req)
 	struct fuse_args *args = req->args;
 	struct fuse_args_pages *ap = container_of(args, typeof(*ap), args);
 	bool reply = test_bit(FR_ISREPLY, &req->flags);
-	unsigned int in_len, out_len = 0, i, n;
-	void *in, *out = NULL, *p;
+	/* (a header and the arguments each way, and the pages) */
+	unsigned int i, max = 2 + args->in_numargs + args->out_numargs +
+		(args->in_pages || args->out_pages ? ap->num_pages : 0);
+	struct lkl_fuse_seg *in, *out;
+	int in_n = 0, out_n = 0;
 	long ret;
 
-	in_len = sizeof(req->in.h) +
-		 fuse_len_args(args->in_numargs, (struct fuse_arg *)args->in_args);
-	if (reply)
-		out_len = sizeof(req->out.h) +
-			  fuse_len_args(args->out_numargs, args->out_args);
-	in = kvmalloc(in_len, GFP_NOFS);
-	if (reply)
-		out = kvmalloc(out_len, GFP_NOFS);
-	if (!in || (reply && !out)) {
+	in = kmalloc_array(2 * max, sizeof(*in), GFP_NOFS);
+	if (!in) {
 		req->out.h.error = -ENOMEM;
 		goto end;
 	}
+	out = in + max;
 
-	req->in.h.len = in_len;
-	memcpy(in, &req->in.h, sizeof(req->in.h));
-	p = in + sizeof(req->in.h);
+	req->in.h.len = sizeof(req->in.h) +
+		fuse_len_args(args->in_numargs, (struct fuse_arg *)args->in_args);
+	in[in_n++] = (struct lkl_fuse_seg){ &req->in.h, sizeof(req->in.h) };
 	for (i = 0; i < args->in_numargs; i++) {
-		n = args->in_args[i].size;
+		unsigned int n = args->in_args[i].size;
+
 		if (i == args->in_numargs - 1 && args->in_pages)
-			hostfuse_copy_pages(ap, p, n, false);
+			in_n += hostfuse_page_segs(ap, in + in_n, n);
 		else
-			memcpy(p, args->in_args[i].value, n);
-		p += n;
+			in[in_n++] = (struct lkl_fuse_seg){
+				(void *)args->in_args[i].value, n };
+	}
+	if (reply) {
+		out[out_n++] = (struct lkl_fuse_seg){ &req->out.h,
+						      sizeof(req->out.h) };
+		for (i = 0; i < args->out_numargs; i++) {
+			unsigned int n = args->out_args[i].size;
+
+			if (i == args->out_numargs - 1 && args->out_pages)
+				out_n += hostfuse_page_segs(ap, out + out_n, n);
+			else
+				out[out_n++] = (struct lkl_fuse_seg){
+					args->out_args[i].value, n };
+		}
 	}
 
-	ret = lkl_ops->fuse_request(hf->conn, in, in_len, out, out_len);
+	ret = lkl_ops->fuse_request(hf->conn, in, in_n, out, out_n);
+	kfree(in);
 	if (!reply)
 		goto end;
 	if (ret < (long)sizeof(req->out.h)) {
 		req->out.h.error = ret < 0 ? ret : -EIO;
 		goto end;
 	}
-	memcpy(&req->out.h, out, sizeof(req->out.h));
-	ret = hostfuse_copy_out(req, out + sizeof(req->out.h),
-				ret - sizeof(req->out.h));
+	ret = hostfuse_reply(req, ret - sizeof(req->out.h));
 	if (ret)
 		req->out.h.error = ret;
 end:
-	kvfree(in);
-	kvfree(out);
 	fuse_request_end(req);
 }
 
@@ -185,7 +188,9 @@ static void hostfuse_send_forget(struct fuse_iqueue *fiq,
 		.arg = { .nlookup = link->forget_one.nlookup },
 	};
 
-	lkl_ops->fuse_request(hf->conn, &req, sizeof(req), NULL, 0);
+	struct lkl_fuse_seg seg = { &req, sizeof(req) };
+
+	lkl_ops->fuse_request(hf->conn, &seg, 1, NULL, 0);
 	kfree(link);
 }
 

@@ -151,10 +151,11 @@ enum lkl_prot {
  * @fuse_connect - connect to the host's filesystem named tag, served with the
  * FUSE protocol (mount -t hostfuse TAG DIR, fs/fuse/hostfuse.c): a handle
  * >= 0, or a negative errno (-ENOENT: no such filesystem)
- * @fuse_request - a FUSE request on connection conn: in_len bytes at in, its
- * header first. If out_len, the request has a reply: wait for it, write it to
- * out (at most out_len bytes, its header first) and return its length;
- * otherwise return 0. A negative errno if the request couldn't be handled.
+ * @fuse_request - a FUSE request on connection conn: the in_n pieces at in,
+ * in order, its header first. If out_n, the request has a reply: wait for it,
+ * write it across the out_n pieces at out, in order (its header first; at
+ * most their total), and return its length; otherwise return 0. A negative
+ * errno if the request couldn't be handled.
  * @fuse_disconnect - the connection's filesystem was unmounted
  *
  * @vsock_init - the host's end of vsock (arch/lkl/drivers/hostvsock.c):
@@ -223,6 +224,12 @@ enum lkl_prot {
  * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
  * would (see asm/archrandom.h). Optional.
  */
+/* a piece of a FUSE request or reply, in the kernel's memory (fuse_request) */
+struct lkl_fuse_seg {
+	void *base;
+	unsigned long len;
+};
+
 struct lkl_host_operations {
 	const char *virtio_devices;
 
@@ -290,8 +297,8 @@ struct lkl_host_operations {
 	int (*blk_flush)(int disk);
 
 	int (*fuse_connect)(const char *tag);
-	long (*fuse_request)(int conn, const void *in, unsigned long in_len,
-			     void *out, unsigned long out_len);
+	long (*fuse_request)(int conn, const struct lkl_fuse_seg *in, int in_n,
+			     const struct lkl_fuse_seg *out, int out_n);
 	void (*fuse_disconnect)(int conn);
 
 	unsigned int (*vsock_init)(void (*notify)(void));
