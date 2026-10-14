@@ -5231,7 +5231,13 @@ static struct file *__shmem_file_setup(struct vfsmount *mnt, const char *name,
 	inode->i_flags |= i_flags;
 	inode->i_size = size;
 	clear_nlink(inode);	/* It is unlinked */
-	res = ERR_PTR(ramfs_nommu_expand_for_mapping(inode, size));
+	/*
+	 * LKL: no pages up front. A process maps it in its own memory (SysV
+	 * shared memory in a domain's: linux-workers' docs/fork.md), never in
+	 * these, which would be the whole size, contiguous, in the kernel's.
+	 */
+	res = ERR_PTR(IS_ENABLED(CONFIG_LKL) ? 0 :
+		      ramfs_nommu_expand_for_mapping(inode, size));
 	if (!IS_ERR(res))
 		res = alloc_file_pseudo(inode, mnt, name, O_RDWR,
 				&shmem_file_operations);
