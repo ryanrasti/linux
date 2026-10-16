@@ -7,9 +7,9 @@
  * network's (a host's own policy says which: Node's, the public network
  * only), its data in the host's buffers, its state the host's, which the
  * kernel asks for when it needs it; the host raises an interrupt when a
- * socket's state changes, which wakes its waiters. A listener is offered to
- * the host first: if it publishes the port, the host's connections queue
- * on it; if not, it's a local listener.
+ * socket's state changes, which wakes its waiters. A listener listens in
+ * the guest, and is offered to the host: if it publishes the port, the
+ * host's connections queue on it too.
  *
  * Userspace's AF_INET and AF_INET6 stream and datagram sockets come here
  * (hostsock_family(): the arch's syscall table), under retired family
@@ -47,13 +47,15 @@ struct hsock {
 	int family;			/* AF_INET or AF_INET6 */
 	enum mode mode;
 	int hid;			/* the host's socket (REMOTE) */
-	bool listener;			/* a REMOTE listener */
+	bool listener;			/* a REMOTE listener (and its inner one) */
 	bool error_told;		/* a failure's errno is in sk_err, once */
 	struct sockaddr_storage peer;	/* a REMOTE datagram socket's connect() */
 	int peer_len;
 };
 
 #define hs_sk(sk) ((struct hsock *)(sk))
+
+static const struct proto_ops hostsock_stream_ops, hostsock_dgram_ops;
 
 static bool hostsock_on;
 static int hostsock_irq;
@@ -71,6 +73,43 @@ int hostsock_family(int family, int type)
 	if (family == AF_INET6)
 		return AF_HOSTSOCK6;
 	return family;
+}
+
+/*
+ * getsockopt(SOL_SOCKET, SO_DOMAIN) on ours: AF_INET(6), not the family
+ * they're registered under. (The generic SOL_SOCKET options don't reach
+ * our ops; and our sock can't say AF_INET itself: code that sees an inet
+ * sock takes it for an inet_sock, as ours isn't.) params: getsockopt's.
+ */
+bool hostsock_sol_socket(const long *params, long *ret)
+{
+	int __user *optval = (int __user *)params[3];
+	int __user *optlen = (int __user *)params[4];
+	struct socket *sock;
+	int err, len, family;
+
+	if (!hostsock_on || params[1] != SOL_SOCKET || params[2] != SO_DOMAIN)
+		return false;
+	sock = sockfd_lookup(params[0], &err);
+	if (!sock)
+		return false;
+	if (sock->ops != &hostsock_stream_ops && sock->ops != &hostsock_dgram_ops) {
+		sockfd_put(sock);
+		return false;
+	}
+	family = hs_sk(sock->sk)->family;
+	sockfd_put(sock);
+	/* (as sk_getsockopt()) */
+	if (get_user(len, optlen))
+		*ret = -EFAULT;
+	else if (len < 0)
+		*ret = -EINVAL;
+	else {
+		len = min_t(int, len, sizeof(family));
+		*ret = copy_to_user(optval, &family, len) || put_user(len, optlen) ?
+			-EFAULT : 0;
+	}
+	return true;
 }
 
 static unsigned int hs_state(struct hsock *hs)
@@ -131,13 +170,35 @@ static int hs_open(struct hsock *hs)
  * Wait for any of bits in the host's state (or a failure), as long as
  * *timeo: 0, -EAGAIN (out of time), or -EINTR/-ERESTARTSYS
  */
+/* a published listener's inner one has a connection to accept */
+static bool hs_inner_acceptable(struct hsock *hs)
+{
+	return hs->listener &&
+	       (hs->inner->ops->poll(NULL, hs->inner, NULL) & EPOLLIN);
+}
+
+/* a published listener's inner one has a connection: wake our waiters */
+static void hs_inner_ready(struct sock *inner)
+{
+	struct hsock *hs;
+
+	sock_def_readable(inner);
+	rcu_read_lock();
+	/* (its accepted children inherit the callback, not the pointer) */
+	hs = __rcu_dereference_sk_user_data_with_flags(inner, SK_USER_DATA_NOCOPY);
+	if (hs)
+		hs->sk.sk_data_ready(&hs->sk);
+	rcu_read_unlock();
+}
+
 static int hs_wait(struct hsock *hs, unsigned int bits, long *timeo)
 {
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	int err = 0;
 
 	add_wait_queue(sk_sleep(&hs->sk), &wait);
-	while (!(hs_state(hs) & (bits | LKL_SOCK_FAILED))) {
+	while (!(hs_state(hs) & (bits | LKL_SOCK_FAILED)) &&
+	       !hs_inner_acceptable(hs)) {
 		if (!*timeo) {
 			err = -EAGAIN;
 			break;
@@ -176,7 +237,6 @@ static void hostsock_notify(void)
 	lkl_trigger_irq(hostsock_irq);
 }
 
-static const struct proto_ops hostsock_stream_ops, hostsock_dgram_ops;
 static struct proto hostsock_proto;
 
 /* our sock for sock, with an inner socket (made here, unless given) */
@@ -207,6 +267,8 @@ static struct hsock *hs_new(struct net *net, struct socket *sock, int family,
 		}
 	}
 	hs->inner = inner;
+	/* (SO_PROTOCOL: as inet's; sk_family stays ours, see above) */
+	sk->sk_protocol = inner->sk->sk_protocol;
 	return hs;
 }
 
@@ -244,6 +306,12 @@ static int hostsock_release(struct socket *sock)
 		hs->hid = 0;
 	}
 	if (hs->inner) {
+		if (hs->listener) {
+			write_lock_bh(&hs->inner->sk->sk_callback_lock);
+			rcu_assign_sk_user_data(hs->inner->sk, NULL);
+			hs->inner->sk->sk_data_ready = sock_def_readable;
+			write_unlock_bh(&hs->inner->sk->sk_callback_lock);
+		}
 		sock_release(hs->inner);
 		hs->inner = NULL;
 	}
@@ -340,75 +408,100 @@ static int hostsock_dgram_connect(struct socket *sock, struct sockaddr *addr,
 }
 
 /*
- * Offered to the host: published, the host's connections queue here
- * (REMOTE); if it won't (not a port it publishes), a local listener.
+ * A listener in the guest, and offered to the host: published, the host's
+ * connections queue here too (REMOTE, a listener); if it won't (not a port
+ * it publishes), only the guest's.
  */
 static int hostsock_listen(struct socket *sock, int backlog)
 {
 	struct hsock *hs = hs_sk(sock->sk);
 	struct sockaddr_storage addr;
 	long timeo = MAX_SCHEDULE_TIMEOUT;
+	struct sock *inner;
 	int len, err;
 
-	if (hs->mode == REMOTE)
-		return hs->listener ? 0 : -EINVAL;
-	if (hs->mode == UNDECIDED) {
-		len = hs->inner->ops->getname(hs->inner, (struct sockaddr *)&addr, 0);
-		if (len > 0 && !hs_loopback((struct sockaddr *)&addr, len, false) &&
-		    !hs_open(hs)) {
-			err = lkl_ops->sock_listen(hs->hid, &addr, len, backlog);
-			if (!err)
-				err = hs_wait(hs, LKL_SOCK_LISTENING, &timeo);
-			if (!err)
-				err = hs_error(hs_state(hs));
-			if (!err) {
-				hs->mode = REMOTE;
-				hs->listener = true;
-				return 0;
-			}
-			xa_erase(&hsocks, hs->hid);
-			lkl_ops->sock_close(hs->hid);
-			hs->hid = 0;
-			if (err != -EPERM && err != -EADDRINUSE && err != -EADDRNOTAVAIL)
-				return err;
-		}
-		hs->mode = LOCAL;
+	if (hs->mode == REMOTE && !hs->listener)
+		return -EINVAL;
+	err = hs->inner->ops->listen(hs->inner, backlog);
+	if (err || hs->mode != UNDECIDED)
+		return err;
+	hs->mode = LOCAL;
+	len = hs->inner->ops->getname(hs->inner, (struct sockaddr *)&addr, 0);
+	if (len <= 0 || hs_loopback((struct sockaddr *)&addr, len, false) ||
+	    hs_open(hs))
+		return 0;
+	err = lkl_ops->sock_listen(hs->hid, &addr, len, backlog);
+	if (!err)
+		err = hs_wait(hs, LKL_SOCK_LISTENING, &timeo);
+	if (!err)
+		err = hs_error(hs_state(hs));
+	if (err) {
+		xa_erase(&hsocks, hs->hid);
+		lkl_ops->sock_close(hs->hid);
+		hs->hid = 0;
+		return err == -EPERM || err == -EADDRINUSE ||
+		       err == -EADDRNOTAVAIL ? 0 : err;
 	}
-	return hs->inner->ops->listen(hs->inner, backlog);
+	hs->mode = REMOTE;
+	hs->listener = true;
+	inner = hs->inner->sk;
+	/* (hs_inner_ready() may see hs until a grace period ends) */
+	sock_set_flag(&hs->sk, SOCK_RCU_FREE);
+	write_lock_bh(&inner->sk_callback_lock);
+	__rcu_assign_sk_user_data_with_flags(inner, hs, SK_USER_DATA_NOCOPY);
+	inner->sk_data_ready = hs_inner_ready;
+	write_unlock_bh(&inner->sk_callback_lock);
+	return 0;
 }
 
+/* a connection from the guest: the inner listener's */
+static int hs_accept_local(struct hsock *hs, struct socket *newsock,
+			   struct proto_accept_arg *arg)
+{
+	struct hsock *child;
+	struct socket *inner;
+	int err;
+
+	inner = sock_alloc();
+	if (!inner)
+		return -ENOMEM;
+	inner->type = hs->inner->type;
+	inner->ops = hs->inner->ops;
+	err = hs->inner->ops->accept(hs->inner, inner, arg);
+	if (err) {
+		sock_release(inner);
+		return err;
+	}
+	child = hs_new(sock_net(&hs->sk), newsock, hs->family, 0, arg->kern, inner);
+	if (IS_ERR(child)) {
+		sock_release(inner);
+		return PTR_ERR(child);
+	}
+	child->mode = LOCAL;
+	newsock->state = SS_CONNECTED;
+	return 0;
+}
+
+/* a published listener's: the guest's connections, and the host's */
 static int hostsock_accept(struct socket *sock, struct socket *newsock,
 			   struct proto_accept_arg *arg)
 {
 	struct hsock *hs = hs_sk(sock->sk), *child;
-	struct socket *inner = NULL;
+	int flags = arg->flags;
 	long timeo;
 	int hid, err;
 
-	if (hs->mode == LOCAL) {
-		inner = sock_alloc();
-		if (!inner)
-			return -ENOMEM;
-		inner->type = hs->inner->type;
-		inner->ops = hs->inner->ops;
-		err = hs->inner->ops->accept(hs->inner, inner, arg);
-		if (err) {
-			sock_release(inner);
-			return err;
-		}
-		child = hs_new(sock_net(sock->sk), newsock, hs->family, 0, arg->kern, inner);
-		if (IS_ERR(child)) {
-			sock_release(inner);
-			return PTR_ERR(child);
-		}
-		child->mode = LOCAL;
-		newsock->state = SS_CONNECTED;
-		return 0;
-	}
+	if (hs->mode == LOCAL)
+		return hs_accept_local(hs, newsock, arg);
 	if (!hs->listener)
 		return -EINVAL;
-	timeo = sock_rcvtimeo(sock->sk, arg->flags & O_NONBLOCK);
+	timeo = sock_rcvtimeo(sock->sk, flags & O_NONBLOCK);
 	for (;;) {
+		arg->flags = flags | O_NONBLOCK;
+		err = hs_accept_local(hs, newsock, arg);
+		arg->flags = flags;
+		if (err != -EAGAIN)
+			return err;
 		hid = lkl_ops->sock_accept(hs->hid);
 		if (hid != -EAGAIN)
 			break;
@@ -473,7 +566,8 @@ static __poll_t hostsock_poll(struct file *file, struct socket *sock,
 		return EPOLLOUT | EPOLLWRNORM;
 	state = hs_state(hs);
 	if (hs->listener)
-		return state & LKL_SOCK_ACCEPTABLE ? EPOLLIN | EPOLLRDNORM : 0;
+		return state & LKL_SOCK_ACCEPTABLE || hs_inner_acceptable(hs) ?
+			EPOLLIN | EPOLLRDNORM : 0;
 	if (state & LKL_SOCK_READABLE)
 		mask |= EPOLLIN | EPOLLRDNORM;
 	if (state & LKL_SOCK_EOF)

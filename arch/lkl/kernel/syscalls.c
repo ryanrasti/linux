@@ -73,6 +73,8 @@ static long run_syscall(long no, long *params)
 	/* AF_INET(6) sockets, local or the host's (drivers/hostsock.c) */
 	if (no == __NR_socket)
 		params[0] = hostsock_family(params[0], params[1]);
+	else if (no == __NR_getsockopt && hostsock_sol_socket(params, &ret))
+		goto out;
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 	ret = handler(params);
@@ -81,6 +83,7 @@ static long run_syscall(long no, long *params)
 		      params[5]);
 #endif
 
+out:
 	task_work_run();
 
 	return ret;
