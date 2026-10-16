@@ -8374,32 +8374,10 @@ LIST_HEAD(task_groups);
 static struct kmem_cache *task_group_cache __ro_after_init;
 #endif
 
-#ifdef __wasm__
-struct sched_class __sched_classes[NR_SCHED_CLASSES];
-
-static void __init sched_init_classes(void)
-{
-#ifdef CONFIG_SMP
-	stop_sched_class = stop_sched_class_tmpl;
-#endif
-	dl_sched_class = dl_sched_class_tmpl;
-	rt_sched_class = rt_sched_class_tmpl;
-	fair_sched_class = fair_sched_class_tmpl;
-#ifdef CONFIG_SCHED_CLASS_EXT
-	ext_sched_class = ext_sched_class_tmpl;
-#endif
-	idle_sched_class = idle_sched_class_tmpl;
-}
-#else
-static inline void sched_init_classes(void) { }
-#endif
-
 void __init sched_init(void)
 {
 	unsigned long ptr = 0;
 	int i;
-
-	sched_init_classes();
 
 	/* Make sure the linker didn't screw up */
 #ifdef CONFIG_SMP

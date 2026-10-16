@@ -1,5 +1,7 @@
 extra-y := vmlinux.lds
 extra-y += vmlinux-fuzzing-postlink.lds
+# linked first, outside vmlinux.a (wasm-first.c)
+extra-$(CONFIG_LKL_WASM) += wasm-first.o
 
 KASAN_SANITIZE_init.o := n
 KASAN_SANITIZE_stacktrace.o := n

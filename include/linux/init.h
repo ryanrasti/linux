@@ -131,14 +131,7 @@ static inline initcall_t initcall_from_entry(initcall_entry_t *entry)
 }
 #endif
 
-#ifdef __wasm__
-/* weak: an empty section has no __start_/__stop_ symbols */
-extern initcall_entry_t __start_con_initcall[] __weak, __stop_con_initcall[] __weak;
-#define __con_initcall_start __start_con_initcall
-#define __con_initcall_end __stop_con_initcall
-#else
 extern initcall_entry_t __con_initcall_start[], __con_initcall_end[];
-#endif
 
 /* Used for constructor calls. */
 typedef void (*ctor_fn_t)(void);
@@ -253,10 +246,6 @@ extern struct module __this_module;
 		return fn();					\
 	}							\
 	__ADDRESSABLE(__stub)
-#elif defined(__wasm__)
-/* C-identifier names, so wasm-ld emits __start_/__stop_ symbols for them */
-#define __initcall_section(__sec, __iid)			\
-	#__sec
 #else
 #define __initcall_section(__sec, __iid)			\
 	#__sec ".init"
@@ -290,11 +279,7 @@ extern struct module __this_module;
 #define ___define_initcall(fn, id, __sec)			\
 	__unique_initcall(fn, id, __sec, __initcall_id(fn))
 
-#ifdef __wasm__
-#define __define_initcall(fn, id) ___define_initcall(fn, id, initcall##id)
-#else
 #define __define_initcall(fn, id) ___define_initcall(fn, id, .initcall##id)
-#endif
 
 /*
  * Early initcalls run before initializing SMP.
@@ -333,11 +318,7 @@ extern struct module __this_module;
 #define __exitcall(fn)						\
 	static exitcall_t __exitcall_##fn __exit_call = fn
 
-#ifdef __wasm__
-#define console_initcall(fn)	___define_initcall(fn, con, con_initcall)
-#else
 #define console_initcall(fn)	___define_initcall(fn, con, .con_initcall)
-#endif
 
 struct obs_kernel_param {
 	const char *str;
@@ -345,16 +326,7 @@ struct obs_kernel_param {
 	int early;
 };
 
-#ifdef __wasm__
-#define __SETUP_SECTION "init_setup"
-extern const struct obs_kernel_param __start_init_setup[] __weak,
-	__stop_init_setup[] __weak;
-#define __setup_start __start_init_setup
-#define __setup_end __stop_init_setup
-#else
-#define __SETUP_SECTION ".init.setup"
 extern const struct obs_kernel_param __setup_start[], __setup_end[];
-#endif
 
 /*
  * Only for really core code.  See moduleparam.h for the normal way.
@@ -366,7 +338,7 @@ extern const struct obs_kernel_param __setup_start[], __setup_end[];
 	static const char __setup_str_##unique_id[] __initconst		\
 		__aligned(1) = str; 					\
 	static struct obs_kernel_param __setup_##unique_id		\
-		__used __section(__SETUP_SECTION)			\
+		__used __section(".init.setup")				\
 		__aligned(__alignof__(struct obs_kernel_param))		\
 		= { __setup_str_##unique_id, fn, early }
 

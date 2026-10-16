@@ -2496,47 +2496,6 @@ static inline void put_prev_set_next_task(struct rq *rq,
  *
  * Also enforce alignment on the instance, not the type, to guarantee layout.
  */
-#ifdef __wasm__
-/*
- * No linker script to lay the classes out back to back: keep them in one
- * array, highest priority first. DEFINE_SCHED_CLASS() defines a template
- * that sched_init_classes() copies into place.
- */
-enum {
-#ifdef CONFIG_SMP
-	SCHED_CLASS_IDX_stop,
-#endif
-	SCHED_CLASS_IDX_dl,
-	SCHED_CLASS_IDX_rt,
-	SCHED_CLASS_IDX_fair,
-#ifdef CONFIG_SCHED_CLASS_EXT
-	SCHED_CLASS_IDX_ext,
-#endif
-	SCHED_CLASS_IDX_idle,
-	NR_SCHED_CLASSES,
-};
-
-#define DEFINE_SCHED_CLASS(name) \
-const struct sched_class name##_sched_class_tmpl
-
-extern struct sched_class __sched_classes[NR_SCHED_CLASSES];
-#define __sched_class_highest	(&__sched_classes[0])
-#define __sched_class_lowest	(&__sched_classes[NR_SCHED_CLASSES])
-
-extern const struct sched_class stop_sched_class_tmpl;
-extern const struct sched_class dl_sched_class_tmpl;
-extern const struct sched_class rt_sched_class_tmpl;
-extern const struct sched_class fair_sched_class_tmpl;
-extern const struct sched_class ext_sched_class_tmpl;
-extern const struct sched_class idle_sched_class_tmpl;
-
-#define stop_sched_class	(__sched_classes[SCHED_CLASS_IDX_stop])
-#define dl_sched_class		(__sched_classes[SCHED_CLASS_IDX_dl])
-#define rt_sched_class		(__sched_classes[SCHED_CLASS_IDX_rt])
-#define fair_sched_class	(__sched_classes[SCHED_CLASS_IDX_fair])
-#define ext_sched_class		(__sched_classes[SCHED_CLASS_IDX_ext])
-#define idle_sched_class	(__sched_classes[SCHED_CLASS_IDX_idle])
-#else
 #define DEFINE_SCHED_CLASS(name) \
 const struct sched_class name##_sched_class \
 	__aligned(__alignof__(struct sched_class)) \
@@ -2551,12 +2510,9 @@ extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
-#ifdef CONFIG_SCHED_CLASS_EXT
-extern const struct sched_class ext_sched_class;
-#endif
-#endif /* __wasm__ */
 
 #ifdef CONFIG_SCHED_CLASS_EXT
+extern const struct sched_class ext_sched_class;
 
 DECLARE_STATIC_KEY_FALSE(__scx_ops_enabled);	/* SCX BPF scheduler loaded */
 DECLARE_STATIC_KEY_FALSE(__scx_switched_all);	/* all fair class tasks on SCX */

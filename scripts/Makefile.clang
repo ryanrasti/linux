@@ -12,7 +12,6 @@ CLANG_TARGET_FLAGS_riscv	:= riscv64-linux-gnu
 CLANG_TARGET_FLAGS_s390		:= s390x-linux-gnu
 CLANG_TARGET_FLAGS_x86		:= x86_64-linux-gnu
 CLANG_TARGET_FLAGS_um		:= $(CLANG_TARGET_FLAGS_$(SUBARCH))
-CLANG_TARGET_FLAGS_lkl		:= $(if $(CROSS_COMPILE),$(notdir $(CROSS_COMPILE:%-=%)),$(shell $(CC) -dumpmachine))
 CLANG_TARGET_FLAGS		:= $(CLANG_TARGET_FLAGS_$(SRCARCH))
 
 ifeq ($(CLANG_TARGET_FLAGS),)

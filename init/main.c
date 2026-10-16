@@ -1286,53 +1286,6 @@ int __init_or_module do_one_initcall(initcall_t fn)
 }
 
 
-#ifdef __wasm__
-/*
- * No linker script concatenates the initcall sections: wasm-ld gives each
- * section its own __start_/__stop_ symbols (weak, as a section may be
- * empty), so a level is a list of ranges.
- */
-struct initcall_range {
-	initcall_entry_t *start, *end;
-};
-
-#define DECLARE_INITCALL_SECTION(sec)					\
-	extern initcall_entry_t __start_##sec[] __weak, __stop_##sec[] __weak
-#define INITCALL_RANGE(sec)	{ __start_##sec, __stop_##sec }
-
-DECLARE_INITCALL_SECTION(initcallearly);
-DECLARE_INITCALL_SECTION(initcall0);
-DECLARE_INITCALL_SECTION(initcall0s);
-DECLARE_INITCALL_SECTION(initcall1);
-DECLARE_INITCALL_SECTION(initcall1s);
-DECLARE_INITCALL_SECTION(initcall2);
-DECLARE_INITCALL_SECTION(initcall2s);
-DECLARE_INITCALL_SECTION(initcall3);
-DECLARE_INITCALL_SECTION(initcall3s);
-DECLARE_INITCALL_SECTION(initcall4);
-DECLARE_INITCALL_SECTION(initcall4s);
-DECLARE_INITCALL_SECTION(initcall5);
-DECLARE_INITCALL_SECTION(initcall5s);
-DECLARE_INITCALL_SECTION(initcallrootfs);
-DECLARE_INITCALL_SECTION(initcall6);
-DECLARE_INITCALL_SECTION(initcall6s);
-DECLARE_INITCALL_SECTION(initcall7);
-DECLARE_INITCALL_SECTION(initcall7s);
-
-/* same grouping as INIT_CALLS in include/asm-generic/vmlinux.lds.h */
-static const struct initcall_range initcall_levels[][3] __initconst = {
-	{ INITCALL_RANGE(initcall0), INITCALL_RANGE(initcall0s) },
-	{ INITCALL_RANGE(initcall1), INITCALL_RANGE(initcall1s) },
-	{ INITCALL_RANGE(initcall2), INITCALL_RANGE(initcall2s) },
-	{ INITCALL_RANGE(initcall3), INITCALL_RANGE(initcall3s) },
-	{ INITCALL_RANGE(initcall4), INITCALL_RANGE(initcall4s) },
-	{ INITCALL_RANGE(initcall5), INITCALL_RANGE(initcall5s),
-	  INITCALL_RANGE(initcallrootfs) },
-	{ INITCALL_RANGE(initcall6), INITCALL_RANGE(initcall6s) },
-	{ INITCALL_RANGE(initcall7), INITCALL_RANGE(initcall7s) },
-};
-#define NR_INITCALL_LEVELS ARRAY_SIZE(initcall_levels)
-#else
 static initcall_entry_t *initcall_levels[] __initdata = {
 	__initcall0_start,
 	__initcall1_start,
@@ -1344,8 +1297,6 @@ static initcall_entry_t *initcall_levels[] __initdata = {
 	__initcall7_start,
 	__initcall_end,
 };
-#define NR_INITCALL_LEVELS (ARRAY_SIZE(initcall_levels) - 1)
-#endif
 
 /* Keep these in sync with initcalls in include/linux/init.h */
 static const char *initcall_level_names[] __initdata = {
@@ -1376,17 +1327,8 @@ static void __init do_initcall_level(int level, char *command_line)
 		   NULL, ignore_unknown_bootoption);
 
 	trace_initcall_level(initcall_level_names[level]);
-#ifdef __wasm__
-	for (int i = 0; i < ARRAY_SIZE(initcall_levels[level]); i++) {
-		const struct initcall_range *r = &initcall_levels[level][i];
-
-		for (fn = r->start; fn < r->end; fn++)
-			do_one_initcall(initcall_from_entry(fn));
-	}
-#else
 	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
 		do_one_initcall(initcall_from_entry(fn));
-#endif
 }
 
 static void __init do_initcalls(void)
@@ -1399,7 +1341,7 @@ static void __init do_initcalls(void)
 	if (!command_line)
 		panic("%s: Failed to allocate %zu bytes\n", __func__, len);
 
-	for (level = 0; level < NR_INITCALL_LEVELS; level++) {
+	for (level = 0; level < ARRAY_SIZE(initcall_levels) - 1; level++) {
 		/* Parser modifies command_line, restore it each time */
 		strcpy(command_line, saved_command_line);
 		do_initcall_level(level, command_line);
@@ -1429,11 +1371,7 @@ static void __init do_pre_smp_initcalls(void)
 	initcall_entry_t *fn;
 
 	trace_initcall_level("early");
-#ifdef __wasm__
-	for (fn = __start_initcallearly; fn < __stop_initcallearly; fn++)
-#else
 	for (fn = __initcall_start; fn < __initcall0_start; fn++)
-#endif
 		do_one_initcall(initcall_from_entry(fn));
 }
 
