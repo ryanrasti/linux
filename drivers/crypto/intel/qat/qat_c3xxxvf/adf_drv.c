@@ -163,7 +163,6 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			goto out_err_free_reg;
 		}
 	}
-	pci_set_master(pdev);
 	/* Completion for VF2PF request/response message exchange */
 	init_completion(&accel_dev->vf.msg_received);
 
@@ -226,4 +225,4 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Intel");
 MODULE_DESCRIPTION("Intel(R) QuickAssist Technology");
 MODULE_VERSION(ADF_DRV_VERSION);
-MODULE_IMPORT_NS(CRYPTO_QAT);
+MODULE_IMPORT_NS("CRYPTO_QAT");

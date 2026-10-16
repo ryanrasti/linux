@@ -366,8 +366,6 @@ static int vimc_probe(struct platform_device *pdev)
 	/* Initialize media device */
 	strscpy(vimc->mdev.model, VIMC_MDEV_MODEL_NAME,
 		sizeof(vimc->mdev.model));
-	snprintf(vimc->mdev.bus_info, sizeof(vimc->mdev.bus_info),
-		 "platform:%s", VIMC_PDEV_NAME);
 	vimc->mdev.dev = &pdev->dev;
 	media_device_init(&vimc->mdev);
 
@@ -410,7 +408,7 @@ static struct platform_device vimc_pdev = {
 
 static struct platform_driver vimc_pdrv = {
 	.probe		= vimc_probe,
-	.remove_new	= vimc_remove,
+	.remove		= vimc_remove,
 	.driver		= {
 		.name	= VIMC_PDEV_NAME,
 	},
@@ -424,6 +422,7 @@ static int __init vimc_init(void)
 	if (ret) {
 		dev_err(&vimc_pdev.dev,
 			"platform device registration failed (err=%d)\n", ret);
+		platform_device_put(&vimc_pdev);
 		return ret;
 	}
 

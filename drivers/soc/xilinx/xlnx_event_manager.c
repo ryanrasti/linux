@@ -77,17 +77,17 @@ struct registered_event_data {
 
 static bool xlnx_is_error_event(const u32 node_id)
 {
-	u32 pm_family_code, pm_sub_family_code;
+	u32 pm_family_code;
 
-	zynqmp_pm_get_family_info(&pm_family_code, &pm_sub_family_code);
+	zynqmp_pm_get_family_info(&pm_family_code);
 
-	if (pm_sub_family_code == VERSAL_SUB_FAMILY_CODE) {
+	if (pm_family_code == PM_VERSAL_FAMILY_CODE) {
 		if (node_id == VERSAL_EVENT_ERROR_PMC_ERR1 ||
 		    node_id == VERSAL_EVENT_ERROR_PMC_ERR2 ||
 		    node_id == VERSAL_EVENT_ERROR_PSM_ERR1 ||
 		    node_id == VERSAL_EVENT_ERROR_PSM_ERR2)
 			return true;
-	} else {
+	} else if (pm_family_code == PM_VERSAL_NET_FAMILY_CODE) {
 		if (node_id == VERSAL_NET_EVENT_ERROR_PMC_ERR1 ||
 		    node_id == VERSAL_NET_EVENT_ERROR_PMC_ERR2 ||
 		    node_id == VERSAL_NET_EVENT_ERROR_PMC_ERR3 ||
@@ -188,8 +188,10 @@ static int xlnx_add_cb_for_suspend(event_cb_func_t cb_fun, void *data)
 	INIT_LIST_HEAD(&eve_data->cb_list_head);
 
 	cb_data = kmalloc(sizeof(*cb_data), GFP_KERNEL);
-	if (!cb_data)
+	if (!cb_data) {
+		kfree(eve_data);
 		return -ENOMEM;
+	}
 	cb_data->eve_cb = cb_fun;
 	cb_data->agent_data = data;
 
@@ -709,7 +711,7 @@ static void xlnx_event_manager_remove(struct platform_device *pdev)
 
 static struct platform_driver xlnx_event_manager_driver = {
 	.probe = xlnx_event_manager_probe,
-	.remove_new = xlnx_event_manager_remove,
+	.remove = xlnx_event_manager_remove,
 	.driver = {
 		.name = "xlnx_event_manager",
 	},

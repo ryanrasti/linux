@@ -537,6 +537,11 @@ static short create_adapter_obj(struct hpi_adapter_obj *pao,
 		hr1.size = sizeof(hr1);
 
 		error = hpi6000_message_response_sequence(pao, 0, &hm, &hr0);
+		if (error) {
+			HPI_DEBUG_LOG(ERROR, "message transport error %d\n",
+						  error);
+			return error;
+		}
 		if (hr0.error) {
 			HPI_DEBUG_LOG(DEBUG, "message error %d\n", hr0.error);
 			return hr0.error;
@@ -608,7 +613,7 @@ static void adapter_get_asserts(struct hpi_adapter_obj *pao,
 		phr->u.ax.assert.p2 = 0;
 		phr->u.ax.assert.count = 1;	/* assert count */
 		phr->u.ax.assert.dsp_index = -1;	/* "dsp index" */
-		strcpy(phr->u.ax.assert.sz_message, "PCI2040 error");
+		strscpy(phr->u.ax.assert.sz_message, "PCI2040 error");
 		phr->u.ax.assert.dsp_msg_addr = 0;
 		gw_pci_read_asserts = 0;
 		gw_pci_write_asserts = 0;

@@ -31,11 +31,6 @@ struct platform_device {
 	struct resource	*resource;
 
 	const struct platform_device_id	*id_entry;
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char *driver_override;
 
 	/* MFD cell pointer */
 	struct mfd_cell *mfd_cell;
@@ -235,17 +230,7 @@ extern void platform_device_put(struct platform_device *pdev);
 
 struct platform_driver {
 	int (*probe)(struct platform_device *);
-
-	/*
-	 * .remove_new() is a relic from a prototype conversion of .remove().
-	 * New drivers are supposed to implement .remove(). Once all drivers are
-	 * converted to not use .remove_new any more, it will be dropped.
-	 */
-	union {
-		void (*remove)(struct platform_device *);
-		void (*remove_new)(struct platform_device *);
-	};
-
+	void (*remove)(struct platform_device *);
 	void (*shutdown)(struct platform_device *);
 	int (*suspend)(struct platform_device *, pm_message_t state);
 	int (*resume)(struct platform_device *);

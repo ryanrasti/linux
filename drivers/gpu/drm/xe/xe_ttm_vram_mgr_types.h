@@ -6,10 +6,8 @@
 #ifndef _XE_TTM_VRAM_MGR_TYPES_H_
 #define _XE_TTM_VRAM_MGR_TYPES_H_
 
-#include <drm/drm_buddy.h>
+#include <linux/gpu_buddy.h>
 #include <drm/ttm/ttm_device.h>
-
-struct xe_mem_region;
 
 /**
  * struct xe_ttm_vram_mgr - XE TTM VRAM manager
@@ -20,9 +18,7 @@ struct xe_ttm_vram_mgr {
 	/** @manager: Base TTM resource manager */
 	struct ttm_resource_manager manager;
 	/** @mm: DRM buddy allocator which manages the VRAM */
-	struct drm_buddy mm;
-	/** @vram: ptr to details of associated VRAM region */
-	struct xe_mem_region *vram;
+	struct gpu_buddy mm;
 	/** @visible_size: Proped size of the CPU visible portion */
 	u64 visible_size;
 	/** @visible_avail: CPU visible portion still unallocated */

@@ -598,13 +598,8 @@ static int __maybe_unused xisc_runtime_suspend(struct device *dev)
 static int __maybe_unused xisc_runtime_resume(struct device *dev)
 {
 	struct isc_device *isc = dev_get_drvdata(dev);
-	int ret;
 
-	ret = clk_prepare_enable(isc->hclock);
-	if (ret)
-		return ret;
-
-	return ret;
+	return clk_prepare_enable(isc->hclock);
 }
 
 static const struct dev_pm_ops microchip_xisc_dev_pm_ops = {
@@ -621,7 +616,7 @@ MODULE_DEVICE_TABLE(of, microchip_xisc_of_match);
 
 static struct platform_driver microchip_xisc_driver = {
 	.probe	= microchip_xisc_probe,
-	.remove_new = microchip_xisc_remove,
+	.remove = microchip_xisc_remove,
 	.driver	= {
 		.name		= "microchip-sama7g5-xisc",
 		.pm		= &microchip_xisc_dev_pm_ops,

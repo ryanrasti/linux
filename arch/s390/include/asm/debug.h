@@ -66,14 +66,15 @@ typedef int (debug_header_proc_t) (debug_info_t *id,
 				   struct debug_view *view,
 				   int area,
 				   debug_entry_t *entry,
-				   char *out_buf);
+				   char *out_buf, size_t out_buf_size);
 
 typedef int (debug_format_proc_t) (debug_info_t *id,
 				   struct debug_view *view, char *out_buf,
+				   size_t out_buf_size,
 				   const char *in_buf);
 typedef int (debug_prolog_proc_t) (debug_info_t *id,
 				   struct debug_view *view,
-				   char *out_buf);
+				   char *out_buf, size_t out_buf_size);
 typedef int (debug_input_proc_t) (debug_info_t *id,
 				  struct debug_view *view,
 				  struct file *file,
@@ -81,8 +82,13 @@ typedef int (debug_input_proc_t) (debug_info_t *id,
 				  size_t in_buf_size, loff_t *offset);
 
 int debug_dflt_header_fn(debug_info_t *id, struct debug_view *view,
-			 int area, debug_entry_t *entry, char *out_buf);
+			 int area, debug_entry_t *entry,
+			 char *out_buf, size_t out_buf_size);
 
+#define DEBUG_SPRINTF_MAX_ARGS 10
+int debug_sprintf_format_fn(debug_info_t *id, struct debug_view *view,
+			    char *out_buf, size_t out_buf_size,
+			    const char *inbuf);
 struct debug_view {
 	char name[DEBUG_MAX_NAME_LEN];
 	debug_prolog_proc_t *prolog_proc;
@@ -111,6 +117,9 @@ debug_info_t *debug_register(const char *name, int pages, int nr_areas,
 debug_info_t *debug_register_mode(const char *name, int pages, int nr_areas,
 				  int buf_size, umode_t mode, uid_t uid,
 				  gid_t gid);
+
+ssize_t debug_dump(debug_info_t *id, struct debug_view *view,
+		   char *buf, size_t buf_size, bool reverse);
 
 void debug_unregister(debug_info_t *id);
 
@@ -451,7 +460,11 @@ static int VNAME(var, active_entries)[EARLY_AREAS] __initdata
 #define __REGISTER_STATIC_DEBUG_INFO(var, name, pages, areas, view)	\
 static int __init VNAME(var, reg)(void)					\
 {									\
-	debug_register_static(&var, (pages), (areas));			\
+	int rc;								\
+									\
+	rc = debug_register_static(&var, (pages), (areas));		\
+	if (rc)								\
+		return rc;						\
 	debug_register_view(&var, (view));				\
 	return 0;							\
 }									\
@@ -483,7 +496,7 @@ static debug_info_t __refdata var =					\
 	__DEBUG_INFO_INIT(var, (name), (buf_size));			\
 __REGISTER_STATIC_DEBUG_INFO(var, name, pages, nr_areas, view)
 
-void debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas);
+int debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas);
 
 #endif /* MODULE */
 

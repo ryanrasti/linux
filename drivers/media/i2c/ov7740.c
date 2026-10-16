@@ -117,7 +117,7 @@ struct ov7740 {
 	struct v4l2_ctrl *brightness;
 	struct v4l2_ctrl *contrast;
 
-	struct mutex mutex;	/* To serialize asynchronus callbacks */
+	struct mutex mutex;	/* To serialize asynchronous callbacks */
 
 	struct gpio_desc *resetb_gpio;
 	struct gpio_desc *pwdn_gpio;
@@ -1036,13 +1036,10 @@ static int ov7740_probe(struct i2c_client *client)
 	if (!ov7740)
 		return -ENOMEM;
 
-	ov7740->xvclk = devm_clk_get(&client->dev, "xvclk");
-	if (IS_ERR(ov7740->xvclk)) {
-		ret = PTR_ERR(ov7740->xvclk);
-		dev_err(&client->dev,
-			"OV7740: fail to get xvclk: %d\n", ret);
-		return ret;
-	}
+	ov7740->xvclk = devm_v4l2_sensor_clk_get(&client->dev, "xvclk");
+	if (IS_ERR(ov7740->xvclk))
+		return dev_err_probe(&client->dev, PTR_ERR(ov7740->xvclk),
+				     "OV7740: fail to get xvclk\n");
 
 	ret = ov7740_probe_dt(client, ov7740);
 	if (ret)
@@ -1119,10 +1116,8 @@ static void ov7740_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ov7740 *ov7740 = container_of(sd, struct ov7740, subdev);
 
-	mutex_destroy(&ov7740->mutex);
-	v4l2_ctrl_handler_free(ov7740->subdev.ctrl_handler);
-	media_entity_cleanup(&ov7740->subdev.entity);
 	v4l2_async_unregister_subdev(sd);
+	media_entity_cleanup(&ov7740->subdev.entity);
 	ov7740_free_controls(ov7740);
 
 	pm_runtime_get_sync(&client->dev);

@@ -28,6 +28,20 @@ void vif_device_init(struct vif_device *v,
 }
 EXPORT_SYMBOL(vif_device_init);
 
+static void __mr_free_table(struct work_struct *work)
+{
+	struct mr_table *mrt = container_of(to_rcu_work(work),
+					    struct mr_table, work);
+
+	rhltable_destroy(&mrt->mfc_hash);
+	kfree(mrt);
+}
+
+void mr_table_free(struct mr_table *mrt)
+{
+	queue_rcu_work(system_unbound_wq, &mrt->work);
+}
+
 struct mr_table *
 mr_table_alloc(struct net *net, u32 id,
 	       struct mr_table_ops *ops,
@@ -38,7 +52,7 @@ mr_table_alloc(struct net *net, u32 id,
 	struct mr_table *mrt;
 	int err;
 
-	mrt = kzalloc(sizeof(*mrt), GFP_KERNEL);
+	mrt = kzalloc(sizeof(*mrt), GFP_KERNEL_ACCOUNT);
 	if (!mrt)
 		return ERR_PTR(-ENOMEM);
 	mrt->id = id;
@@ -50,6 +64,8 @@ mr_table_alloc(struct net *net, u32 id,
 		kfree(mrt);
 		return ERR_PTR(err);
 	}
+
+	INIT_RCU_WORK(&mrt->work, __mr_free_table);
 	INIT_LIST_HEAD(&mrt->mfc_cache_list);
 	INIT_LIST_HEAD(&mrt->mfc_unres_queue);
 
@@ -263,9 +279,9 @@ int mr_fill_mroute(struct mr_table *mrt, struct sk_buff *skb,
 	lastuse = READ_ONCE(c->mfc_un.res.lastuse);
 	lastuse = time_after_eq(jiffies, lastuse) ? jiffies - lastuse : 0;
 
-	mfcs.mfcs_packets = c->mfc_un.res.pkt;
-	mfcs.mfcs_bytes = c->mfc_un.res.bytes;
-	mfcs.mfcs_wrong_if = c->mfc_un.res.wrong_if;
+	mfcs.mfcs_packets = atomic_long_read(&c->mfc_un.res.pkt);
+	mfcs.mfcs_bytes = atomic_long_read(&c->mfc_un.res.bytes);
+	mfcs.mfcs_wrong_if = atomic_long_read(&c->mfc_un.res.wrong_if);
 	if (nla_put_64bit(skb, RTA_MFC_STATS, sizeof(mfcs), &mfcs, RTA_PAD) ||
 	    nla_put_u64_64bit(skb, RTA_EXPIRES, jiffies_to_clock_t(lastuse),
 			      RTA_PAD))
@@ -329,9 +345,6 @@ next_entry:
 	spin_lock_bh(lock);
 	list_for_each_entry(mfc, &mrt->mfc_unres_queue, list) {
 		if (e < s_e)
-			goto next_entry2;
-		if (filter->dev &&
-		    !mr_mfc_uses_dev(mrt, mfc, filter->dev))
 			goto next_entry2;
 
 		err = fill(mrt, skb, NETLINK_CB(cb->skb).portid,

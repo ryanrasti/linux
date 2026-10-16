@@ -36,6 +36,8 @@ static uint profile_numbers[5] = {0, 1, 2, 3, 4};
 
 static void kone_profile_activated(struct kone_device *kone, uint new_profile)
 {
+	if (new_profile < 1 || new_profile > ARRAY_SIZE(kone->profiles))
+		new_profile = 1;
 	kone->actual_profile = new_profile;
 	kone->actual_dpi = kone->profiles[new_profile - 1].startup_dpi;
 }
@@ -261,7 +263,7 @@ static int kone_get_firmware_version(struct usb_device *usb_dev, int *result)
 }
 
 static ssize_t kone_sysfs_read_settings(struct file *fp, struct kobject *kobj,
-		struct bin_attribute *attr, char *buf,
+		const struct bin_attribute *attr, char *buf,
 		loff_t off, size_t count) {
 	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct kone_device *kone = hid_get_drvdata(dev_get_drvdata(dev));
@@ -285,7 +287,7 @@ static ssize_t kone_sysfs_read_settings(struct file *fp, struct kobject *kobj,
  * case of error the old data is still valid
  */
 static ssize_t kone_sysfs_write_settings(struct file *fp, struct kobject *kobj,
-		struct bin_attribute *attr, char *buf,
+		const struct bin_attribute *attr, char *buf,
 		loff_t off, size_t count) {
 	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct kone_device *kone = hid_get_drvdata(dev_get_drvdata(dev));
@@ -327,11 +329,11 @@ unlock:
 
 	return sizeof(struct kone_settings);
 }
-static BIN_ATTR(settings, 0660, kone_sysfs_read_settings,
-		kone_sysfs_write_settings, sizeof(struct kone_settings));
+static const BIN_ATTR(settings, 0660, kone_sysfs_read_settings,
+		      kone_sysfs_write_settings, sizeof(struct kone_settings));
 
 static ssize_t kone_sysfs_read_profilex(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr,
+		struct kobject *kobj, const struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count) {
 	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct kone_device *kone = hid_get_drvdata(dev_get_drvdata(dev));
@@ -351,7 +353,7 @@ static ssize_t kone_sysfs_read_profilex(struct file *fp,
 
 /* Writes data only if different to stored data */
 static ssize_t kone_sysfs_write_profilex(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr,
+		struct kobject *kobj, const struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count) {
 	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct kone_device *kone = hid_get_drvdata(dev_get_drvdata(dev));
@@ -382,7 +384,7 @@ static ssize_t kone_sysfs_write_profilex(struct file *fp,
 	return sizeof(struct kone_profile);
 }
 #define PROFILE_ATTR(number)					\
-static struct bin_attribute bin_attr_profile##number = {	\
+static const struct bin_attribute bin_attr_profile##number = {	\
 	.attr = { .name = "profile" #number, .mode = 0660 },	\
 	.size = sizeof(struct kone_profile),			\
 	.read = kone_sysfs_read_profilex,			\
@@ -634,7 +636,7 @@ static struct attribute *kone_attrs[] = {
 	NULL,
 };
 
-static struct bin_attribute *kone_bin_attributes[] = {
+static const struct bin_attribute *const kone_bin_attributes[] = {
 	&bin_attr_settings,
 	&bin_attr_profile1,
 	&bin_attr_profile2,
@@ -793,8 +795,10 @@ static void kone_keep_values_up_to_date(struct kone_device *kone,
 {
 	switch (event->event) {
 	case kone_mouse_event_switch_profile:
-		kone->actual_dpi = kone->profiles[event->value - 1].
-				startup_dpi;
+		if (event->value >= 1 &&
+		    event->value <= ARRAY_SIZE(kone->profiles))
+			kone->actual_dpi =
+				kone->profiles[event->value - 1].startup_dpi;
 		fallthrough;
 	case kone_mouse_event_osd_profile:
 		kone->actual_profile = event->value;

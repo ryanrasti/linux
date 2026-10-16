@@ -639,7 +639,7 @@ static int imgu_css_osys_calc_frame_and_stripe_params(
 				/*
 				 * FW workaround for a HW bug: if the first
 				 * chroma pixel is generated exactly at the end
-				 * of chunck scaler HW may not output the pixel
+				 * of chunk scaler HW may not output the pixel
 				 * for downscale factors smaller than 1.5
 				 * (timing issue).
 				 */
@@ -1416,7 +1416,7 @@ imgu_css_shd_ops_calc(struct imgu_abi_shd_intra_frame_operations_data *ops,
 }
 
 /*
- * The follow handshake procotol is the same for AF, AWB and AWB FR.
+ * The following handshake protocol is the same for AF, AWB and AWB FR.
  *
  * for n sets of meta-data, the flow is:
  * --> init
@@ -1770,6 +1770,8 @@ static int imgu_css_cfg_acc_stripe(struct imgu_css *css, unsigned int pipe,
 		acc->stripe.bds_out_stripes[0].width =
 			ALIGN(css_pipe->rect[IPU3_CSS_RECT_BDS].width, f);
 	} else {
+		u32 offset;
+
 		/* Image processing is divided into two stripes */
 		acc->stripe.bds_out_stripes[0].width =
 			acc->stripe.bds_out_stripes[1].width =
@@ -1788,8 +1790,10 @@ static int imgu_css_cfg_acc_stripe(struct imgu_css *css, unsigned int pipe,
 			acc->stripe.bds_out_stripes[1].width += f;
 		}
 		/* Overlap between stripes is IPU3_UAPI_ISP_VEC_ELEMS * 4 */
-		acc->stripe.bds_out_stripes[1].offset =
-			acc->stripe.bds_out_stripes[0].width - 2 * f;
+		offset = acc->stripe.bds_out_stripes[0].width - 2 * f;
+		if (offset > 65535)
+			return -EINVAL;
+		acc->stripe.bds_out_stripes[1].offset = offset;
 	}
 
 	acc->stripe.effective_stripes[0].height =
@@ -2626,7 +2630,7 @@ int imgu_css_cfg_acc(struct imgu_css *css, unsigned int pipe,
 		return -EINVAL;
 
 	acc->awb.config.grid.height_per_slice =
-		IMGU_ABI_AWB_MAX_CELLS_PER_SET / acc->awb.config.grid.width,
+		IMGU_ABI_AWB_MAX_CELLS_PER_SET / acc->awb.config.grid.width;
 	imgu_css_grid_end_calc(&acc->awb.config.grid);
 
 	for (i = 0; i < stripes; i++)

@@ -1493,6 +1493,7 @@ static int si476x_radio_probe(struct platform_device *pdev)
 	return 0;
 exit:
 	v4l2_ctrl_handler_free(radio->videodev.ctrl_handler);
+	v4l2_device_unregister(&radio->v4l2dev);
 	return rval;
 }
 
@@ -1513,7 +1514,7 @@ static struct platform_driver si476x_radio_driver = {
 		.name	= DRIVER_NAME,
 	},
 	.probe		= si476x_radio_probe,
-	.remove_new	= si476x_radio_remove,
+	.remove		= si476x_radio_remove,
 };
 module_platform_driver(si476x_radio_driver);
 

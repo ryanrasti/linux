@@ -92,10 +92,7 @@ void dwmac_dma_stop_rx(struct stmmac_priv *priv, void __iomem *ioaddr, u32 chan)
 #ifdef DWMAC_DMA_DEBUG
 static void show_tx_process_state(unsigned int status)
 {
-	unsigned int state;
-	state = (status & DMA_STATUS_TS_MASK) >> DMA_STATUS_TS_SHIFT;
-
-	switch (state) {
+	switch (FIELD_GET(DMA_STATUS_TS_MASK, status)) {
 	case 0:
 		pr_debug("- TX (Stopped): Reset or Stop command\n");
 		break;
@@ -123,10 +120,7 @@ static void show_tx_process_state(unsigned int status)
 
 static void show_rx_process_state(unsigned int status)
 {
-	unsigned int state;
-	state = (status & DMA_STATUS_RS_MASK) >> DMA_STATUS_RS_SHIFT;
-
-	switch (state) {
+	switch (FIELD_GET(DMA_STATUS_RS_MASK, status)) {
 	case 0:
 		pr_debug("- RX (Stopped): Reset or Stop command\n");
 		break;
@@ -251,7 +245,7 @@ void dwmac_dma_flush_tx_fifo(void __iomem *ioaddr)
 void stmmac_set_mac_addr(void __iomem *ioaddr, const u8 addr[6],
 			 unsigned int high, unsigned int low)
 {
-	unsigned long data;
+	u32 data;
 
 	data = (addr[5] << 8) | addr[4];
 	/* For MAC Addr registers we have to set the Address Enable (AE)

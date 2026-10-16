@@ -101,6 +101,10 @@ ieee80211_s1g_rx_twt_setup(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_twt_setup *twt = (void *)mgmt->u.action.u.s1g.variable;
 	struct ieee80211_twt_params *twt_agrt = (void *)twt->params;
 
+	if (!(twt->control & IEEE80211_TWT_CONTROL_NEG_TYPE_BROADCAST) &&
+	    twt->length < sizeof(twt->control) + sizeof(*twt_agrt))
+		return;
+
 	twt_agrt->req_type &= cpu_to_le16(~IEEE80211_TWT_REQTYPE_REQUEST);
 
 	/* broadcast TWT not supported yet */
@@ -143,7 +147,7 @@ ieee80211_s1g_tx_twt_setup_fail(struct ieee80211_sub_if_data *sdata,
 
 	drv_twt_teardown_request(sdata->local, sdata, &sta->sta, flowid);
 
-	ieee80211_s1g_send_twt_teardown(sdata, mgmt->sa, sdata->vif.addr,
+	ieee80211_s1g_send_twt_teardown(sdata, mgmt->da, sdata->vif.addr,
 					flowid);
 }
 
@@ -193,4 +197,30 @@ void ieee80211_s1g_status_twt_action(struct ieee80211_sub_if_data *sdata,
 	default:
 		break;
 	}
+}
+
+void ieee80211_s1g_cap_to_sta_s1g_cap(struct ieee80211_sub_if_data *sdata,
+				      const struct ieee80211_s1g_cap *s1g_cap_ie,
+				      struct link_sta_info *link_sta)
+{
+	struct ieee80211_sta_s1g_cap *s1g_cap = &link_sta->pub->s1g_cap;
+
+	memset(s1g_cap, 0, sizeof(*s1g_cap));
+
+	memcpy(s1g_cap->cap, s1g_cap_ie->capab_info, sizeof(s1g_cap->cap));
+	memcpy(s1g_cap->nss_mcs, s1g_cap_ie->supp_mcs_nss,
+	       sizeof(s1g_cap->nss_mcs));
+
+	s1g_cap->s1g = true;
+
+	/* Maximum MPDU length is 1 bit for S1G */
+	if (s1g_cap->cap[3] & S1G_CAP3_MAX_MPDU_LEN) {
+		link_sta->pub->agg.max_amsdu_len =
+			IEEE80211_MAX_MPDU_LEN_VHT_7991;
+	} else {
+		link_sta->pub->agg.max_amsdu_len =
+			IEEE80211_MAX_MPDU_LEN_VHT_3895;
+	}
+
+	ieee80211_sta_recalc_aggregates(&link_sta->sta->sta);
 }

@@ -12,6 +12,7 @@
 
 #include <linux/interrupt.h>
 #include <linux/compat.h>
+#include <linux/export.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/blkpg.h>
@@ -324,7 +325,7 @@ out_err:
 static int dasd_release_space(struct dasd_device *device,
 			      struct format_data_t *rdata)
 {
-	if (!device->discipline->is_ese && !device->discipline->is_ese(device))
+	if (!device->discipline->is_ese || !device->discipline->is_ese(device))
 		return -ENOTSUPP;
 	if (!device->discipline->release_space)
 		return -ENOTSUPP;

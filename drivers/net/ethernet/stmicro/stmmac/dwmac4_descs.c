@@ -110,14 +110,20 @@ static int dwmac4_wrback_get_rx_status(struct stmmac_extra_stats *x,
 
 	message_type = (rdes1 & ERDES4_MSG_TYPE_MASK) >> 8;
 
-	if (rdes1 & RDES1_IP_HDR_ERROR)
+	if (rdes1 & RDES1_IP_HDR_ERROR) {
 		x->ip_hdr_err++;
+		ret |= csum_none;
+	}
 	if (rdes1 & RDES1_IP_CSUM_BYPASSED)
 		x->ip_csum_bypassed++;
 	if (rdes1 & RDES1_IPV4_HEADER)
 		x->ipv4_pkt_rcvd++;
 	if (rdes1 & RDES1_IPV6_HEADER)
 		x->ipv6_pkt_rcvd++;
+	if (rdes1 & RDES1_IP_PAYLOAD_ERROR) {
+		x->ip_payload_err++;
+		ret |= csum_none;
+	}
 
 	if (message_type == RDES_EXT_NO_PTP)
 		x->no_ptp_rx_msg_type_ext++;
@@ -490,11 +496,11 @@ static void dwmac4_set_sarc(struct dma_desc *p, u32 sarc_type)
 	p->des3 |= cpu_to_le32(sarc_type & TDES3_SA_INSERT_CTRL_MASK);
 }
 
-static int set_16kib_bfsize(int mtu)
+static int set_16kib_bfsize(int len)
 {
 	int ret = 0;
 
-	if (unlikely(mtu >= BUF_SIZE_8KiB))
+	if (unlikely(len > BUF_SIZE_8KiB))
 		ret = BUF_SIZE_16KiB;
 	return ret;
 }

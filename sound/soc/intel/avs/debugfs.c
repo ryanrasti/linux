@@ -8,10 +8,13 @@
 
 #include <linux/debugfs.h>
 #include <linux/kfifo.h>
+#include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/sched/signal.h>
+#include <linux/string_helpers.h>
 #include <sound/soc.h>
 #include "avs.h"
+#include "debug.h"
 #include "messages.h"
 
 static unsigned int __kfifo_fromio(struct kfifo *fifo, const void __iomem *src, unsigned int len)
@@ -143,7 +146,7 @@ static ssize_t probe_points_write(struct file *file, const char __user *from, si
 	int ret;
 
 	ret = parse_int_array_user(from, count, (int **)&array);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	num_elems = *array;
@@ -180,7 +183,7 @@ static ssize_t probe_points_disconnect_write(struct file *file, const char __use
 	int ret;
 
 	ret = parse_int_array_user(from, count, (int **)&array);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	num_elems = *array;
@@ -236,15 +239,20 @@ static int strace_open(struct inode *inode, struct file *file)
 	if (!try_module_get(adev->dev->driver->owner))
 		return -ENODEV;
 
-	if (kfifo_initialized(&adev->trace_fifo))
-		return -EBUSY;
+	if (kfifo_initialized(&adev->trace_fifo)) {
+		ret = -EBUSY;
+		goto err;
+	}
 
 	ret = kfifo_alloc(&adev->trace_fifo, PAGE_SIZE, GFP_KERNEL);
 	if (ret < 0)
-		return ret;
+		goto err;
 
 	file->private_data = adev;
 	return 0;
+err:
+	module_put(adev->dev->driver->owner);
+	return ret;
 }
 
 static int strace_release(struct inode *inode, struct file *file)
@@ -314,7 +322,6 @@ err_ipc:
 	if (!adev->logged_resources) {
 		avs_dsp_enable_d0ix(adev);
 err_d0ix:
-		pm_runtime_mark_last_busy(adev->dev);
 		pm_runtime_put_autosuspend(adev->dev);
 	}
 
@@ -341,7 +348,6 @@ static int disable_logs(struct avs_dev *adev, u32 resource_mask)
 	/* If that's the last resource, allow for D3. */
 	if (!adev->logged_resources) {
 		avs_dsp_enable_d0ix(adev);
-		pm_runtime_mark_last_busy(adev->dev);
 		pm_runtime_put_autosuspend(adev->dev);
 	}
 
@@ -368,11 +374,14 @@ static ssize_t trace_control_write(struct file *file, const char __user *from, s
 	int ret;
 
 	ret = parse_int_array_user(from, count, (int **)&array);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	num_elems = *array;
-	resource_mask = array[1];
+	if (!num_elems) {
+		ret = -EINVAL;
+		goto free_array;
+	}
 
 	/*
 	 * Disable if just resource mask is provided - no log priority flags.
@@ -380,6 +389,7 @@ static ssize_t trace_control_write(struct file *file, const char __user *from, s
 	 * Enable input format:   mask, prio1, .., prioN
 	 * Where 'N' equals number of bits set in the 'mask'.
 	 */
+	resource_mask = array[1];
 	if (num_elems == 1) {
 		ret = disable_logs(adev, resource_mask);
 	} else {

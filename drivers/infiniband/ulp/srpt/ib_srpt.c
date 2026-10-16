@@ -667,9 +667,9 @@ static int srpt_refresh_port(struct srpt_port *sport)
 						  srpt_mad_recv_handler,
 						  sport, 0);
 		if (IS_ERR(mad_agent)) {
-			pr_err("%s-%d: MAD agent registration failed (%ld). Note: this is expected if SR-IOV is enabled.\n",
+			pr_err("%s-%d: MAD agent registration failed (%pe). Note: this is expected if SR-IOV is enabled.\n",
 			       dev_name(&sport->sdev->device->dev), sport->port,
-			       PTR_ERR(mad_agent));
+			       mad_agent);
 			sport->mad_agent = NULL;
 			memset(&port_modify, 0, sizeof(port_modify));
 			port_modify.clr_port_cap_mask = IB_PORT_DEVICE_MGMT_SUP;
@@ -959,6 +959,7 @@ static int srpt_alloc_rw_ctxs(struct srpt_send_ioctx *ioctx,
 	struct srpt_rdma_ch *ch = ioctx->ch;
 	struct scatterlist *prev = NULL;
 	unsigned prev_nents;
+	u8 n_rdma, n_rw_ctx;
 	int ret, i;
 
 	if (nbufs == 1) {
@@ -969,6 +970,9 @@ static int srpt_alloc_rw_ctxs(struct srpt_send_ioctx *ioctx,
 		if (!ioctx->rw_ctxs)
 			return -ENOMEM;
 	}
+
+	n_rw_ctx = ioctx->n_rw_ctx;
+	n_rdma = ioctx->n_rdma;
 
 	for (i = ioctx->n_rw_ctx; i < nbufs; i++, db++) {
 		struct srpt_rw_ctx *ctx = &ioctx->rw_ctxs[i];
@@ -1016,6 +1020,9 @@ unwind:
 	}
 	if (ioctx->rw_ctxs != &ioctx->s_rw_ctx)
 		kfree(ioctx->rw_ctxs);
+	ioctx->rw_ctxs = NULL;
+	ioctx->n_rw_ctx = n_rw_ctx;
+	ioctx->n_rdma = n_rdma;
 	return ret;
 }
 
@@ -1129,9 +1136,10 @@ static int srpt_get_desc_tbl(struct srpt_recv_ioctx *recv_ioctx,
 		struct srp_imm_buf *imm_buf = srpt_get_desc_buf(srp_cmd);
 		void *data = (void *)srp_cmd + imm_data_offset;
 		uint32_t len = be32_to_cpu(imm_buf->len);
-		uint32_t req_size = imm_data_offset + len;
+		uint32_t req_size;
 
-		if (req_size > srp_max_req_size) {
+		if (check_add_overflow((uint32_t)imm_data_offset, len, &req_size) ||
+		    req_size > srp_max_req_size) {
 			pr_err("Immediate data (length %d + %d) exceeds request size %d\n",
 			       imm_data_offset, len, srp_max_req_size);
 			return -EINVAL;
@@ -1595,7 +1603,7 @@ static void srpt_handle_cmd(struct srpt_rdma_ch *ch,
 
 	rc = target_init_cmd(cmd, ch->sess, &send_ioctx->sense_data[0],
 			     scsilun_to_int(&srp_cmd->lun), data_len,
-			     TCM_SIMPLE_TAG, dir, TARGET_SCF_ACK_KREF);
+			     cmd->sam_task_attr, dir, TARGET_SCF_ACK_KREF);
 	if (rc != 0) {
 		pr_debug("target_submit_cmd() returned %d for tag %#llx\n", rc,
 			 srp_cmd->tag);
@@ -1865,8 +1873,8 @@ retry:
 				 IB_POLL_WORKQUEUE);
 	if (IS_ERR(ch->cq)) {
 		ret = PTR_ERR(ch->cq);
-		pr_err("failed to create CQ cqe= %d ret= %d\n",
-		       ch->rq_size + sq_size, ret);
+		pr_err("failed to create CQ cqe= %d ret= %pe\n",
+		       ch->rq_size + sq_size, ch->cq);
 		goto out;
 	}
 	ch->cq_size = ch->rq_size + sq_size;
@@ -3132,7 +3140,7 @@ static int srpt_alloc_srq(struct srpt_device *sdev)
 	WARN_ON_ONCE(sdev->srq);
 	srq = ib_create_srq(sdev->pd, &srq_attr);
 	if (IS_ERR(srq)) {
-		pr_debug("ib_create_srq() failed: %ld\n", PTR_ERR(srq));
+		pr_debug("ib_create_srq() failed: %pe\n", srq);
 		return PTR_ERR(srq);
 	}
 
@@ -3236,8 +3244,7 @@ static int srpt_add_one(struct ib_device *device)
 	if (rdma_port_get_link_layer(device, 1) == IB_LINK_LAYER_INFINIBAND)
 		sdev->cm_id = ib_create_cm_id(device, srpt_cm_handler, sdev);
 	if (IS_ERR(sdev->cm_id)) {
-		pr_info("ib_create_cm_id() failed: %ld\n",
-			PTR_ERR(sdev->cm_id));
+		pr_info("ib_create_cm_id() failed: %pe\n", sdev->cm_id);
 		ret = PTR_ERR(sdev->cm_id);
 		sdev->cm_id = NULL;
 		if (!rdma_cm_id)
@@ -3687,8 +3694,7 @@ static struct rdma_cm_id *srpt_create_rdma_id(struct sockaddr *listen_addr)
 	rdma_cm_id = rdma_create_id(&init_net, srpt_rdma_cm_handler,
 				    NULL, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(rdma_cm_id)) {
-		pr_err("RDMA/CM ID creation failed: %ld\n",
-		       PTR_ERR(rdma_cm_id));
+		pr_err("RDMA/CM ID creation failed: %pe\n", rdma_cm_id);
 		goto out;
 	}
 

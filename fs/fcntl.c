@@ -12,7 +12,6 @@
 #include <linux/fs.h>
 #include <linux/filelock.h>
 #include <linux/file.h>
-#include <linux/fdtable.h>
 #include <linux/capability.h>
 #include <linux/dnotify.h>
 #include <linux/slab.h>
@@ -356,8 +355,7 @@ static bool rw_hint_valid(u64 hint)
 	}
 }
 
-static long fcntl_get_rw_hint(struct file *file, unsigned int cmd,
-			      unsigned long arg)
+static long fcntl_get_rw_hint(struct file *file, unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
 	u64 __user *argp = (u64 __user *)arg;
@@ -368,12 +366,17 @@ static long fcntl_get_rw_hint(struct file *file, unsigned int cmd,
 	return 0;
 }
 
-static long fcntl_set_rw_hint(struct file *file, unsigned int cmd,
-			      unsigned long arg)
+static long fcntl_set_rw_hint(struct file *file, unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
 	u64 __user *argp = (u64 __user *)arg;
 	u64 hint;
+
+	/* nothing is ever written to it */
+	if (IS_IMMUTABLE(inode))
+		return -EPERM;
+	if (!inode_owner_or_capable(file_mnt_idmap(file), inode))
+		return -EPERM;
 
 	if (copy_from_user(&hint, argp, sizeof(hint)))
 		return -EFAULT;
@@ -396,6 +399,9 @@ static long fcntl_set_rw_hint(struct file *file, unsigned int cmd,
 static long f_dupfd_query(int fd, struct file *filp)
 {
 	CLASS(fd_raw, f)(fd);
+
+	if (fd_empty(f))
+		return -EBADF;
 
 	/*
 	 * We can do the 'fdput()' immediately, as the only thing that
@@ -542,10 +548,10 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		err = memfd_fcntl(filp, cmd, argi);
 		break;
 	case F_GET_RW_HINT:
-		err = fcntl_get_rw_hint(filp, cmd, arg);
+		err = fcntl_get_rw_hint(filp, arg);
 		break;
 	case F_SET_RW_HINT:
-		err = fcntl_set_rw_hint(filp, cmd, arg);
+		err = fcntl_set_rw_hint(filp, arg);
 		break;
 	default:
 		break;
@@ -570,24 +576,21 @@ static int check_fcntl_cmd(unsigned cmd)
 
 SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {	
-	struct fd f = fdget_raw(fd);
-	long err = -EBADF;
+	CLASS(fd_raw, f)(fd);
+	long err;
 
-	if (!fd_file(f))
-		goto out;
+	if (fd_empty(f))
+		return -EBADF;
 
 	if (unlikely(fd_file(f)->f_mode & FMODE_PATH)) {
 		if (!check_fcntl_cmd(cmd))
-			goto out1;
+			return -EBADF;
 	}
 
 	err = security_file_fcntl(fd_file(f), cmd, arg);
 	if (!err)
 		err = do_fcntl(fd, cmd, arg, fd_file(f));
 
-out1:
- 	fdput(f);
-out:
 	return err;
 }
 
@@ -596,21 +599,21 @@ SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
 		unsigned long, arg)
 {	
 	void __user *argp = (void __user *)arg;
-	struct fd f = fdget_raw(fd);
+	CLASS(fd_raw, f)(fd);
 	struct flock64 flock;
-	long err = -EBADF;
+	long err;
 
-	if (!fd_file(f))
-		goto out;
+	if (fd_empty(f))
+		return -EBADF;
 
 	if (unlikely(fd_file(f)->f_mode & FMODE_PATH)) {
 		if (!check_fcntl_cmd(cmd))
-			goto out1;
+			return -EBADF;
 	}
 
 	err = security_file_fcntl(fd_file(f), cmd, arg);
 	if (err)
-		goto out1;
+		return err;
 	
 	switch (cmd) {
 	case F_GETLK64:
@@ -635,9 +638,6 @@ SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
 		err = do_fcntl(fd, cmd, arg, fd_file(f));
 		break;
 	}
-out1:
-	fdput(f);
-out:
 	return err;
 }
 #endif
@@ -733,21 +733,21 @@ static int fixup_compat_flock(struct flock *flock)
 static long do_compat_fcntl64(unsigned int fd, unsigned int cmd,
 			     compat_ulong_t arg)
 {
-	struct fd f = fdget_raw(fd);
+	CLASS(fd_raw, f)(fd);
 	struct flock flock;
-	long err = -EBADF;
+	long err;
 
-	if (!fd_file(f))
-		return err;
+	if (fd_empty(f))
+		return -EBADF;
 
 	if (unlikely(fd_file(f)->f_mode & FMODE_PATH)) {
 		if (!check_fcntl_cmd(cmd))
-			goto out_put;
+			return -EBADF;
 	}
 
 	err = security_file_fcntl(fd_file(f), cmd, arg);
 	if (err)
-		goto out_put;
+		return err;
 
 	switch (cmd) {
 	case F_GETLK:
@@ -790,8 +790,6 @@ static long do_compat_fcntl64(unsigned int fd, unsigned int cmd,
 		err = do_fcntl(fd, cmd, arg, fd_file(f));
 		break;
 	}
-out_put:
-	fdput(f);
 	return err;
 }
 
@@ -921,11 +919,11 @@ void send_sigio(struct fown_struct *fown, int fd, int band)
 			send_sigio_to_task(p, fown, fd, band, type);
 		rcu_read_unlock();
 	} else {
-		read_lock(&tasklist_lock);
+		rcu_read_lock();
 		do_each_pid_task(pid, type, p) {
 			send_sigio_to_task(p, fown, fd, band, type);
 		} while_each_pid_task(pid, type, p);
-		read_unlock(&tasklist_lock);
+		rcu_read_unlock();
 	}
  out_unlock_fown:
 	read_unlock_irqrestore(&fown->lock, flags);
@@ -967,11 +965,11 @@ int send_sigurg(struct file *file)
 			send_sigurg_to_task(p, fown, type);
 		rcu_read_unlock();
 	} else {
-		read_lock(&tasklist_lock);
+		rcu_read_lock();
 		do_each_pid_task(pid, type, p) {
 			send_sigurg_to_task(p, fown, type);
 		} while_each_pid_task(pid, type, p);
-		read_unlock(&tasklist_lock);
+		rcu_read_unlock();
 	}
  out_unlock_fown:
 	read_unlock_irqrestore(&fown->lock, flags);
@@ -1161,10 +1159,10 @@ static int __init fcntl_init(void)
 	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
 	 * is defined as O_NONBLOCK on some platforms and not on others.
 	 */
-	BUILD_BUG_ON(21 - 1 /* for O_RDONLY being 0 */ !=
+	BUILD_BUG_ON(20 - 1 /* for O_RDONLY being 0 */ !=
 		HWEIGHT32(
 			(VALID_OPEN_FLAGS & ~(O_NONBLOCK | O_NDELAY)) |
-			__FMODE_EXEC | __FMODE_NONOTIFY));
+			__FMODE_EXEC));
 
 	fasync_cache = kmem_cache_create("fasync_cache",
 					 sizeof(struct fasync_struct), 0,

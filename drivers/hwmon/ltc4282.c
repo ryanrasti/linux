@@ -15,6 +15,7 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/i2c.h>
 #include <linux/math.h>
+#include <linux/math64.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
@@ -142,7 +143,7 @@ struct ltc4282_state {
 	 */
 	struct ltc4282_cache in0_1_cache[LTC4282_CHAN_VGPIO];
 	u32 vsense_max;
-	long power_max;
+	s64 power_max;
 	u32 rsense;
 	u16 vdd;
 	u16 vfs_out;
@@ -177,13 +178,15 @@ static const unsigned int ltc4282_out_rates[] = {
 	LTC4282_CLKOUT_CNV, LTC4282_CLKOUT_SYSTEM
 };
 
-static long ltc4282_round_rate(struct clk_hw *hw, unsigned long rate,
-			       unsigned long *parent_rate)
+static int ltc4282_determine_rate(struct clk_hw *hw,
+				  struct clk_rate_request *req)
 {
-	int idx = find_closest(rate, ltc4282_out_rates,
+	int idx = find_closest(req->rate, ltc4282_out_rates,
 			       ARRAY_SIZE(ltc4282_out_rates));
 
-	return ltc4282_out_rates[idx];
+	req->rate = ltc4282_out_rates[idx];
+
+	return 0;
 }
 
 static unsigned long ltc4282_recalc_rate(struct clk_hw *hw,
@@ -382,8 +385,8 @@ static int ltc4282_read_in(struct ltc4282_state *st, u32 attr, long *val,
 						   channel, val);
 	case hwmon_in_min_alarm:
 		if (channel == LTC4282_CHAN_VGPIO)
-			ltc4282_read_alarm(st, LTC4282_ADC_ALERT_LOG,
-					   LTC4282_GPIO_ALARM_L_MASK, val);
+			return ltc4282_read_alarm(st, LTC4282_ADC_ALERT_LOG,
+						  LTC4282_GPIO_ALARM_L_MASK, val);
 
 		return ltc4282_vdd_source_read_alm(st,
 						   LTC4282_VSOURCE_ALARM_L_MASK,
@@ -621,13 +624,12 @@ static int ltc4282_read(struct device *dev, enum hwmon_sensor_types type,
 }
 
 static int ltc4282_write_power_byte(const struct ltc4282_state *st, u32 reg,
-				    long val)
+				    s64 val)
 {
 	u32 power;
 	u64 temp;
 
-	if (val > st->power_max)
-		val = st->power_max;
+	val = clamp(val, 0, st->power_max);
 
 	temp = val * int_pow(U8_MAX, 2) * st->rsense;
 	power = DIV64_U64_ROUND_CLOSEST(temp,
@@ -637,7 +639,7 @@ static int ltc4282_write_power_byte(const struct ltc4282_state *st, u32 reg,
 }
 
 static int ltc4282_write_power_word(const struct ltc4282_state *st, u32 reg,
-				    long val)
+				    u64 val)
 {
 	u64 temp = int_pow(U16_MAX, 2) * st->rsense, temp_2;
 	__be16 __raw;
@@ -946,8 +948,11 @@ static int ltc4282_curr_reset_hist(struct ltc4282_state *st)
 static int ltc4282_write_curr(struct ltc4282_state *st, u32 attr,
 			      long val)
 {
+	s32 ulimit = min_t(u64, INT_MAX,
+			   div_u64((u64)INT_MAX * DECA * MICRO, st->rsense));
+	u64 val64 = clamp(val, 0, ulimit);
 	/* need to pass it in millivolt */
-	u32 in = DIV_ROUND_CLOSEST_ULL((u64)val * st->rsense, DECA * MICRO);
+	u32 in = DIV_ROUND_CLOSEST_ULL(val64 * st->rsense, DECA * MICRO);
 
 	switch (attr) {
 	case hwmon_curr_max:
@@ -1016,8 +1021,9 @@ static umode_t ltc4282_in_is_visible(const struct ltc4282_state *st, u32 attr)
 	case hwmon_in_max:
 	case hwmon_in_min:
 	case hwmon_in_enable:
-	case hwmon_in_reset_history:
 		return 0644;
+	case hwmon_in_reset_history:
+		return 0200;
 	default:
 		return 0;
 	}
@@ -1036,8 +1042,9 @@ static umode_t ltc4282_curr_is_visible(u32 attr)
 		return 0444;
 	case hwmon_curr_max:
 	case hwmon_curr_min:
-	case hwmon_curr_reset_history:
 		return 0644;
+	case hwmon_curr_reset_history:
+		return 0200;
 	default:
 		return 0;
 	}
@@ -1055,8 +1062,9 @@ static umode_t ltc4282_power_is_visible(u32 attr)
 		return 0444;
 	case hwmon_power_max:
 	case hwmon_power_min:
-	case hwmon_power_reset_history:
 		return 0644;
+	case hwmon_power_reset_history:
+		return 0200;
 	default:
 		return 0;
 	}
@@ -1124,7 +1132,7 @@ static ssize_t ltc4282_energy_show(struct device *dev,
 
 static const struct clk_ops ltc4282_ops = {
 	.recalc_rate = ltc4282_recalc_rate,
-	.round_rate = ltc4282_round_rate,
+	.determine_rate = ltc4282_determine_rate,
 	.set_rate = ltc4282_set_rate,
 	.disable = ltc4282_disable,
 };
@@ -1132,7 +1140,7 @@ static const struct clk_ops ltc4282_ops = {
 static int ltc428_clk_provider_setup(struct ltc4282_state *st,
 				     struct device *dev)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_COMMON_CLK))
@@ -1251,7 +1259,8 @@ static int ltc4282_set_max_limits(struct ltc4282_state *st)
 		return ret;
 
 	/* Power is given by ISENSE * Vout. */
-	st->power_max = DIV_ROUND_CLOSEST(st->vsense_max * DECA * MILLI, st->rsense) * st->vfs_out;
+	st->power_max = DIV_ROUND_CLOSEST_ULL((u64)st->vsense_max * DECA * MILLI,
+					      st->rsense) * st->vfs_out;
 	ret = ltc4282_write_power_byte(st, LTC4282_POWER_MAX, st->power_max);
 	if (ret)
 		return ret;
@@ -1418,7 +1427,7 @@ static int ltc4282_setup(struct ltc4282_state *st, struct device *dev)
 	if (!ret) {
 		int reg_val;
 
-		switch (val) {
+		switch (st->vsense_max) {
 		case 12500:
 			reg_val = 0;
 			break;
@@ -1512,13 +1521,6 @@ static int ltc4282_setup(struct ltc4282_state *st, struct device *dev)
 	}
 
 	if (device_property_read_bool(dev, "adi,fault-log-enable")) {
-		ret = regmap_set_bits(st->map, LTC4282_ADC_CTRL,
-				      LTC4282_FAULT_LOG_EN_MASK);
-		if (ret)
-			return ret;
-	}
-
-	if (device_property_read_bool(dev, "adi,fault-log-enable")) {
 		ret = regmap_set_bits(st->map, LTC4282_ADC_CTRL, LTC4282_FAULT_LOG_EN_MASK);
 		if (ret)
 			return ret;
@@ -1603,7 +1605,7 @@ static const struct hwmon_ops ltc4282_hwmon_ops = {
 	.read_string = ltc4282_read_labels,
 };
 
-static const struct hwmon_chip_info ltc2947_chip_info = {
+static const struct hwmon_chip_info ltc4282_chip_info = {
 	.ops = &ltc4282_hwmon_ops,
 	.info = ltc4282_info,
 };
@@ -1674,47 +1676,19 @@ static int ltc4282_show_power1_bad_fault_log(void *arg, u64 *val)
 DEFINE_DEBUGFS_ATTRIBUTE(ltc4282_power1_bad_fault_log,
 			 ltc4282_show_power1_bad_fault_log, NULL, "%llu\n");
 
-static void ltc4282_debugfs_remove(void *dir)
+static void ltc4282_debugfs_init(struct ltc4282_state *st, struct i2c_client *i2c)
 {
-	debugfs_remove_recursive(dir);
-}
-
-static void ltc4282_debugfs_init(struct ltc4282_state *st,
-				 struct i2c_client *i2c,
-				 const struct device *hwmon)
-{
-	const char *debugfs_name;
-	struct dentry *dentry;
-	int ret;
-
-	if (!IS_ENABLED(CONFIG_DEBUG_FS))
-		return;
-
-	debugfs_name = devm_kasprintf(&i2c->dev, GFP_KERNEL, "ltc4282-%s",
-				      dev_name(hwmon));
-	if (!debugfs_name)
-		return;
-
-	dentry = debugfs_create_dir(debugfs_name, NULL);
-	if (IS_ERR(dentry))
-		return;
-
-	ret = devm_add_action_or_reset(&i2c->dev, ltc4282_debugfs_remove,
-				       dentry);
-	if (ret)
-		return;
-
-	debugfs_create_file_unsafe("power1_bad_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("power1_bad_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_power1_bad_fault_log);
-	debugfs_create_file_unsafe("in0_fet_short_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("in0_fet_short_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_fet_short_fault_log);
-	debugfs_create_file_unsafe("in0_fet_bad_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("in0_fet_bad_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_fet_bad_fault_log);
-	debugfs_create_file_unsafe("in1_crit_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("in1_crit_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_in1_crit_fault_log);
-	debugfs_create_file_unsafe("in1_lcrit_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("in1_lcrit_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_in1_lcrit_fault_log);
-	debugfs_create_file_unsafe("curr1_crit_fault_log", 0400, dentry, st,
+	debugfs_create_file_unsafe("curr1_crit_fault_log", 0400, i2c->debugfs, st,
 				   &ltc4282_curr1_crit_fault_log);
 }
 
@@ -1726,8 +1700,7 @@ static int ltc4282_probe(struct i2c_client *i2c)
 
 	st = devm_kzalloc(dev, sizeof(*st), GFP_KERNEL);
 	if (!st)
-		return dev_err_probe(dev, -ENOMEM,
-				     "Failed to allocate memory\n");
+		return -ENOMEM;
 
 	st->map = devm_regmap_init_i2c(i2c, &ltc4282_regmap_config);
 	if (IS_ERR(st->map))
@@ -1752,12 +1725,12 @@ static int ltc4282_probe(struct i2c_client *i2c)
 
 	mutex_init(&st->lock);
 	hwmon = devm_hwmon_device_register_with_info(dev, "ltc4282", st,
-						     &ltc2947_chip_info,
+						     &ltc4282_chip_info,
 						     ltc4282_groups);
 	if (IS_ERR(hwmon))
 		return PTR_ERR(hwmon);
 
-	ltc4282_debugfs_init(st, i2c, hwmon);
+	ltc4282_debugfs_init(st, i2c);
 
 	return 0;
 }

@@ -104,6 +104,7 @@ struct security_hook_list {
 struct lsm_blob_sizes {
 	int lbs_cred;
 	int lbs_file;
+	int lbs_backing_file;
 	int lbs_ib;
 	int lbs_inode;
 	int lbs_sock;
@@ -116,6 +117,9 @@ struct lsm_blob_sizes {
 	int lbs_xattr_count; /* number of xattr slots in new_xattrs array */
 	int lbs_tun_dev;
 	int lbs_bdev;
+	int lbs_bpf_map;
+	int lbs_bpf_prog;
+	int lbs_bpf_token;
 };
 
 /*

@@ -49,13 +49,15 @@ struct rvt_dev_info *rvt_alloc_device(size_t size, int nports)
 {
 	struct rvt_dev_info *rdi;
 
-	rdi = container_of(_ib_alloc_device(size), struct rvt_dev_info, ibdev);
+	rdi = container_of(_ib_alloc_device(size, &init_net), struct rvt_dev_info, ibdev);
 	if (!rdi)
 		return rdi;
 
 	rdi->ports = kcalloc(nports, sizeof(*rdi->ports), GFP_KERNEL);
-	if (!rdi->ports)
+	if (!rdi->ports) {
 		ib_dealloc_device(&rdi->ibdev);
+		return NULL;
+	}
 
 	return rdi;
 }

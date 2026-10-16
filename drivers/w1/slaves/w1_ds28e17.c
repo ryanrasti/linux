@@ -389,6 +389,10 @@ static int w1_f19_i2c_master_transfer(struct i2c_adapter *adapter,
 			 * another simple read in that case.
 			 */
 			if (msgs[i+1].flags & I2C_M_RECV_LEN) {
+				if (msgs[i+1].buf[0] > I2C_SMBUS_BLOCK_MAX) {
+					i = -EPROTO;
+					goto error;
+				}
 				result = w1_f19_i2c_read(sl, msgs[i+1].addr,
 					&(msgs[i+1].buf[1]), msgs[i+1].buf[0]);
 				if (result < 0) {
@@ -415,6 +419,10 @@ static int w1_f19_i2c_master_transfer(struct i2c_adapter *adapter,
 			 * another simple read in that case.
 			 */
 			if (msgs[i].flags & I2C_M_RECV_LEN) {
+				if (msgs[i].buf[0] > I2C_SMBUS_BLOCK_MAX) {
+					i = -EPROTO;
+					goto error;
+				}
 				result = w1_f19_i2c_read(sl,
 					msgs[i].addr,
 					&(msgs[i].buf[1]),
@@ -583,7 +591,7 @@ static ssize_t speed_show(struct device *dev, struct device_attribute *attr,
 		return result;
 
 	/* Return current speed value. */
-	return sprintf(buf, "%d\n", result);
+	return sysfs_emit(buf, "%d\n", result);
 }
 
 static ssize_t speed_store(struct device *dev, struct device_attribute *attr,
@@ -633,7 +641,7 @@ static ssize_t stretch_show(struct device *dev, struct device_attribute *attr,
 	struct w1_f19_data *data = sl->family_data;
 
 	/* Return current stretch value. */
-	return sprintf(buf, "%d\n", data->stretch);
+	return sysfs_emit(buf, "%d\n", data->stretch);
 }
 
 static ssize_t stretch_store(struct device *dev, struct device_attribute *attr,

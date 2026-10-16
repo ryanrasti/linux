@@ -12,6 +12,7 @@
 #include <linux/iosys-map.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
@@ -78,6 +79,12 @@ enum panthor_fw_binary_entry_type {
 
 	/** @CSF_FW_BINARY_ENTRY_TYPE_TIMELINE_METADATA: Timeline metadata interface. */
 	CSF_FW_BINARY_ENTRY_TYPE_TIMELINE_METADATA = 4,
+
+	/**
+	 * @CSF_FW_BINARY_ENTRY_TYPE_BUILD_INFO_METADATA: Metadata about how
+	 * the FW binary was built.
+	 */
+	CSF_FW_BINARY_ENTRY_TYPE_BUILD_INFO_METADATA = 6
 };
 
 #define CSF_FW_BINARY_ENTRY_TYPE(ehdr)					((ehdr) & 0xff)
@@ -85,26 +92,26 @@ enum panthor_fw_binary_entry_type {
 #define CSF_FW_BINARY_ENTRY_UPDATE					BIT(30)
 #define CSF_FW_BINARY_ENTRY_OPTIONAL					BIT(31)
 
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_RD					BIT(0)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_WR					BIT(1)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_EX					BIT(2)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_NONE			(0 << 3)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_CACHED			(1 << 3)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_UNCACHED_COHERENT	(2 << 3)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_CACHED_COHERENT		(3 << 3)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_MASK			GENMASK(4, 3)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_PROT				BIT(5)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_SHARED				BIT(30)
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_ZERO				BIT(31)
+#define CSF_FW_BINARY_IFACE_ENTRY_RD					BIT(0)
+#define CSF_FW_BINARY_IFACE_ENTRY_WR					BIT(1)
+#define CSF_FW_BINARY_IFACE_ENTRY_EX					BIT(2)
+#define CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_NONE			(0 << 3)
+#define CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_CACHED			(1 << 3)
+#define CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_UNCACHED_COHERENT		(2 << 3)
+#define CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_CACHED_COHERENT		(3 << 3)
+#define CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_MASK			GENMASK(4, 3)
+#define CSF_FW_BINARY_IFACE_ENTRY_PROT					BIT(5)
+#define CSF_FW_BINARY_IFACE_ENTRY_SHARED				BIT(30)
+#define CSF_FW_BINARY_IFACE_ENTRY_ZERO					BIT(31)
 
-#define CSF_FW_BINARY_IFACE_ENTRY_RD_SUPPORTED_FLAGS			\
-	(CSF_FW_BINARY_IFACE_ENTRY_RD_RD |				\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_WR |				\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_EX |				\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_MASK |			\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_PROT |				\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_SHARED  |				\
-	 CSF_FW_BINARY_IFACE_ENTRY_RD_ZERO)
+#define CSF_FW_BINARY_IFACE_ENTRY_SUPPORTED_FLAGS			\
+	(CSF_FW_BINARY_IFACE_ENTRY_RD |					\
+	 CSF_FW_BINARY_IFACE_ENTRY_WR |					\
+	 CSF_FW_BINARY_IFACE_ENTRY_EX |					\
+	 CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_MASK |			\
+	 CSF_FW_BINARY_IFACE_ENTRY_PROT |				\
+	 CSF_FW_BINARY_IFACE_ENTRY_SHARED  |				\
+	 CSF_FW_BINARY_IFACE_ENTRY_ZERO)
 
 /**
  * struct panthor_fw_binary_section_entry_hdr - Describes a section of FW binary
@@ -130,6 +137,13 @@ struct panthor_fw_binary_section_entry_hdr {
 		/** @end: End offset in the FW binary. */
 		u32 end;
 	} data;
+};
+
+struct panthor_fw_build_info_hdr {
+	/** @meta_start: Offset of the build info data in the FW binary */
+	u32 meta_start;
+	/** @meta_size: Size of the build info data in the FW binary */
+	u32 meta_size;
 };
 
 /**
@@ -187,7 +201,6 @@ struct panthor_fw_section {
 
 #define MIN_CS_PER_CSG				8
 #define MIN_CSGS				3
-#define MAX_CSG_PRIO				0xf
 
 #define CSF_IFACE_VERSION(major, minor, patch)	\
 	(((major) << 24) | ((minor) << 16) | (patch))
@@ -248,17 +261,6 @@ struct panthor_fw {
 
 	/** @booted: True is the FW is booted */
 	bool booted;
-
-	/**
-	 * @fast_reset: True if the post_reset logic can proceed with a fast reset.
-	 *
-	 * A fast reset is just a reset where the driver doesn't reload the FW sections.
-	 *
-	 * Any time the firmware is properly suspended, a fast reset can take place.
-	 * On the other hand, if the halt operation failed, the driver will reload
-	 * all sections to make sure we start from a fresh state.
-	 */
-	bool fast_reset;
 
 	/** @irq: Job irq data. */
 	struct panthor_irq irq;
@@ -400,7 +402,7 @@ static void panthor_fw_init_section_mem(struct panthor_device *ptdev,
 	int ret;
 
 	if (!section->data.size &&
-	    !(section->flags & CSF_FW_BINARY_IFACE_ENTRY_RD_ZERO))
+	    !(section->flags & CSF_FW_BINARY_IFACE_ENTRY_ZERO))
 		return;
 
 	ret = panthor_kernel_bo_vmap(section->mem);
@@ -408,7 +410,7 @@ static void panthor_fw_init_section_mem(struct panthor_device *ptdev,
 		return;
 
 	memcpy(section->mem->kmap, section->data.buf, section->data.size);
-	if (section->flags & CSF_FW_BINARY_IFACE_ENTRY_RD_ZERO) {
+	if (section->flags & CSF_FW_BINARY_IFACE_ENTRY_ZERO) {
 		memset(section->mem->kmap + section->data.size, 0,
 		       panthor_kernel_bo_size(section->mem) - section->data.size);
 	}
@@ -447,7 +449,8 @@ panthor_fw_alloc_queue_iface_mem(struct panthor_device *ptdev,
 				       DRM_PANTHOR_BO_NO_MMAP,
 				       DRM_PANTHOR_VM_BIND_OP_MAP_NOEXEC |
 				       DRM_PANTHOR_VM_BIND_OP_MAP_UNCACHED,
-				       PANTHOR_VM_KERNEL_AUTO_VA);
+				       PANTHOR_VM_KERNEL_AUTO_VA,
+				       "Queue FW interface");
 	if (IS_ERR(mem))
 		return mem;
 
@@ -479,7 +482,8 @@ panthor_fw_alloc_suspend_buf_mem(struct panthor_device *ptdev, size_t size)
 	return panthor_kernel_bo_create(ptdev, panthor_fw_vm(ptdev), size,
 					DRM_PANTHOR_BO_NO_MMAP,
 					DRM_PANTHOR_VM_BIND_OP_MAP_NOEXEC,
-					PANTHOR_VM_KERNEL_AUTO_VA);
+					PANTHOR_VM_KERNEL_AUTO_VA,
+					"FW suspend buffer");
 }
 
 static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
@@ -491,6 +495,7 @@ static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
 	struct panthor_fw_binary_section_entry_hdr hdr;
 	struct panthor_fw_section *section;
 	u32 section_size;
+	u32 data_size;
 	u32 name_len;
 	int ret;
 
@@ -522,24 +527,34 @@ static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
 		return -EINVAL;
 	}
 
-	if (hdr.flags & ~CSF_FW_BINARY_IFACE_ENTRY_RD_SUPPORTED_FLAGS) {
+	if (hdr.flags & ~CSF_FW_BINARY_IFACE_ENTRY_SUPPORTED_FLAGS) {
 		drm_err(&ptdev->base, "Firmware contains interface with unsupported flags (0x%x)\n",
 			hdr.flags);
 		return -EINVAL;
 	}
 
-	if (hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_RD_PROT) {
+	if (hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_PROT) {
 		drm_warn(&ptdev->base,
 			 "Firmware protected mode entry not be supported, ignoring");
 		return 0;
 	}
 
 	if (hdr.va.start == CSF_MCU_SHARED_REGION_START &&
-	    !(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_RD_SHARED)) {
+	    !(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_SHARED)) {
 		drm_err(&ptdev->base,
 			"Interface at 0x%llx must be shared", CSF_MCU_SHARED_REGION_START);
 		return -EINVAL;
 	}
+
+	section_size = hdr.va.end - hdr.va.start;
+	data_size = hdr.data.end - hdr.data.start;
+	if (data_size > section_size) {
+		drm_err(&ptdev->base, "Firmware corrupted, section data exceeds section size\n");
+		return -EINVAL;
+	}
+
+	if (!section_size)
+		return 0;
 
 	name_len = iter->size - iter->offset;
 
@@ -549,7 +564,7 @@ static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
 
 	list_add_tail(&section->node, &ptdev->fw->sections);
 	section->flags = hdr.flags;
-	section->data.size = hdr.data.end - hdr.data.start;
+	section->data.size = data_size;
 
 	if (section->data.size > 0) {
 		void *data = drmm_kmalloc(&ptdev->base, section->data.size, GFP_KERNEL);
@@ -572,41 +587,40 @@ static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
 		section->name = name;
 	}
 
-	section_size = hdr.va.end - hdr.va.start;
 	if (section_size) {
-		u32 cache_mode = hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_MASK;
+		u32 cache_mode = hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_MASK;
 		struct panthor_gem_object *bo;
 		u32 vm_map_flags = 0;
 		struct sg_table *sgt;
 		u64 va = hdr.va.start;
 
-		if (!(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_RD_WR))
+		if (!(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_WR))
 			vm_map_flags |= DRM_PANTHOR_VM_BIND_OP_MAP_READONLY;
 
-		if (!(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_RD_EX))
+		if (!(hdr.flags & CSF_FW_BINARY_IFACE_ENTRY_EX))
 			vm_map_flags |= DRM_PANTHOR_VM_BIND_OP_MAP_NOEXEC;
 
-		/* TODO: CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_*_COHERENT are mapped to
+		/* TODO: CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_*_COHERENT are mapped to
 		 * non-cacheable for now. We might want to introduce a new
 		 * IOMMU_xxx flag (or abuse IOMMU_MMIO, which maps to device
 		 * memory and is currently not used by our driver) for
 		 * AS_MEMATTR_AARCH64_SHARED memory, so we can take benefit
 		 * of IO-coherent systems.
 		 */
-		if (cache_mode != CSF_FW_BINARY_IFACE_ENTRY_RD_CACHE_MODE_CACHED)
+		if (cache_mode != CSF_FW_BINARY_IFACE_ENTRY_CACHE_MODE_CACHED)
 			vm_map_flags |= DRM_PANTHOR_VM_BIND_OP_MAP_UNCACHED;
 
 		section->mem = panthor_kernel_bo_create(ptdev, panthor_fw_vm(ptdev),
 							section_size,
 							DRM_PANTHOR_BO_NO_MMAP,
-							vm_map_flags, va);
+							vm_map_flags, va, "FW section");
 		if (IS_ERR(section->mem))
 			return PTR_ERR(section->mem);
 
 		if (drm_WARN_ON(&ptdev->base, section->mem->va_node.start != hdr.va.start))
 			return -EINVAL;
 
-		if (section->flags & CSF_FW_BINARY_IFACE_ENTRY_RD_SHARED) {
+		if (section->flags & CSF_FW_BINARY_IFACE_ENTRY_SHARED) {
 			ret = panthor_kernel_bo_vmap(section->mem);
 			if (ret)
 				return ret;
@@ -628,6 +642,46 @@ static int panthor_fw_load_section_entry(struct panthor_device *ptdev,
 	return 0;
 }
 
+static int panthor_fw_read_build_info(struct panthor_device *ptdev,
+				      const struct firmware *fw,
+				      struct panthor_fw_binary_iter *iter,
+				      u32 ehdr)
+{
+	struct panthor_fw_build_info_hdr hdr;
+	static const char git_sha_header[] = "git_sha: ";
+	const int header_len = sizeof(git_sha_header) - 1;
+	int ret;
+
+	ret = panthor_fw_binary_iter_read(ptdev, iter, &hdr, sizeof(hdr));
+	if (ret)
+		return ret;
+
+	if (hdr.meta_start > fw->size ||
+	    hdr.meta_size > fw->size - hdr.meta_start ||
+	    hdr.meta_size <= header_len) {
+		drm_err(&ptdev->base, "Firmware build info corrupt\n");
+		/* We don't need the build info, so continue */
+		return 0;
+	}
+
+	if (memcmp(git_sha_header, fw->data + hdr.meta_start, header_len)) {
+		/* Not the expected header, this isn't metadata we understand */
+		return 0;
+	}
+
+	/* Check that the git SHA is NULL terminated as expected */
+	if (fw->data[hdr.meta_start + hdr.meta_size - 1] != '\0') {
+		drm_warn(&ptdev->base, "Firmware's git sha is not NULL terminated\n");
+		/* Don't treat as fatal */
+		return 0;
+	}
+
+	drm_info(&ptdev->base, "Firmware git sha: %s\n",
+		 fw->data + hdr.meta_start + header_len);
+
+	return 0;
+}
+
 static void
 panthor_reload_fw_sections(struct panthor_device *ptdev, bool full_reload)
 {
@@ -636,7 +690,7 @@ panthor_reload_fw_sections(struct panthor_device *ptdev, bool full_reload)
 	list_for_each_entry(section, &ptdev->fw->sections, node) {
 		struct sg_table *sgt;
 
-		if (!full_reload && !(section->flags & CSF_FW_BINARY_IFACE_ENTRY_RD_WR))
+		if (!full_reload && !(section->flags & CSF_FW_BINARY_IFACE_ENTRY_WR))
 			continue;
 
 		panthor_fw_init_section_mem(ptdev, section);
@@ -672,6 +726,8 @@ static int panthor_fw_load_entry(struct panthor_device *ptdev,
 	switch (CSF_FW_BINARY_ENTRY_TYPE(ehdr)) {
 	case CSF_FW_BINARY_ENTRY_TYPE_IFACE:
 		return panthor_fw_load_section_entry(ptdev, fw, &eiter, ehdr);
+	case CSF_FW_BINARY_ENTRY_TYPE_BUILD_INFO_METADATA:
+		return panthor_fw_read_build_info(ptdev, fw, &eiter, ehdr);
 
 	/* FIXME: handle those entry types? */
 	case CSF_FW_BINARY_ENTRY_TYPE_CONFIG:
@@ -732,6 +788,7 @@ static int panthor_fw_load(struct panthor_device *ptdev)
 	}
 
 	if (hdr.size > iter.size) {
+		ret = -EINVAL;
 		drm_err(&ptdev->base, "Firmware image is truncated\n");
 		goto out;
 	}
@@ -759,18 +816,24 @@ out:
  * iface_fw_to_cpu_addr() - Turn an MCU address into a CPU address
  * @ptdev: Device.
  * @mcu_va: MCU address.
+ * @size: Size of the object pointed to by @mcu_va.
  *
- * Return: NULL if the address is not part of the shared section, non-NULL otherwise.
+ * Return: NULL if the object is not part of the shared section, non-NULL otherwise.
  */
-static void *iface_fw_to_cpu_addr(struct panthor_device *ptdev, u32 mcu_va)
+static void *iface_fw_to_cpu_addr(struct panthor_device *ptdev, u32 mcu_va, size_t size)
 {
 	u64 shared_mem_start = panthor_kernel_bo_gpuva(ptdev->fw->shared_section->mem);
-	u64 shared_mem_end = shared_mem_start +
-			     panthor_kernel_bo_size(ptdev->fw->shared_section->mem);
-	if (mcu_va < shared_mem_start || mcu_va >= shared_mem_end)
+	size_t shared_mem_size = panthor_kernel_bo_size(ptdev->fw->shared_section->mem);
+	u64 offset;
+
+	if (mcu_va < shared_mem_start)
 		return NULL;
 
-	return ptdev->fw->shared_section->mem->kmap + (mcu_va - shared_mem_start);
+	offset = mcu_va - shared_mem_start;
+	if (offset > shared_mem_size || size > shared_mem_size - offset)
+		return NULL;
+
+	return ptdev->fw->shared_section->mem->kmap + offset;
 }
 
 static int panthor_init_cs_iface(struct panthor_device *ptdev,
@@ -780,20 +843,23 @@ static int panthor_init_cs_iface(struct panthor_device *ptdev,
 	struct panthor_fw_csg_iface *csg_iface = panthor_fw_get_csg_iface(ptdev, csg_idx);
 	struct panthor_fw_cs_iface *cs_iface = &ptdev->fw->iface.streams[csg_idx][cs_idx];
 	u64 shared_section_sz = panthor_kernel_bo_size(ptdev->fw->shared_section->mem);
-	u32 iface_offset = CSF_GROUP_CONTROL_OFFSET +
-			   (csg_idx * glb_iface->control->group_stride) +
+	u64 iface_offset = CSF_GROUP_CONTROL_OFFSET +
+			   ((u64)csg_idx * glb_iface->control->group_stride) +
 			   CSF_STREAM_CONTROL_OFFSET +
-			   (cs_idx * csg_iface->control->stream_stride);
+			   ((u64)cs_idx * csg_iface->control->stream_stride);
 	struct panthor_fw_cs_iface *first_cs_iface =
 		panthor_fw_get_cs_iface(ptdev, 0, 0);
 
-	if (iface_offset + sizeof(*cs_iface) >= shared_section_sz)
+	if (iface_offset > shared_section_sz ||
+	    sizeof(*cs_iface->control) > shared_section_sz - iface_offset)
 		return -EINVAL;
 
 	spin_lock_init(&cs_iface->lock);
 	cs_iface->control = ptdev->fw->shared_section->mem->kmap + iface_offset;
-	cs_iface->input = iface_fw_to_cpu_addr(ptdev, cs_iface->control->input_va);
-	cs_iface->output = iface_fw_to_cpu_addr(ptdev, cs_iface->control->output_va);
+	cs_iface->input = iface_fw_to_cpu_addr(ptdev, cs_iface->control->input_va,
+					       sizeof(*cs_iface->input));
+	cs_iface->output = iface_fw_to_cpu_addr(ptdev, cs_iface->control->output_va,
+						sizeof(*cs_iface->output));
 
 	if (!cs_iface->input || !cs_iface->output) {
 		drm_err(&ptdev->base, "Invalid stream control interface input/output VA");
@@ -835,16 +901,20 @@ static int panthor_init_csg_iface(struct panthor_device *ptdev,
 	struct panthor_fw_global_iface *glb_iface = panthor_fw_get_glb_iface(ptdev);
 	struct panthor_fw_csg_iface *csg_iface = &ptdev->fw->iface.groups[csg_idx];
 	u64 shared_section_sz = panthor_kernel_bo_size(ptdev->fw->shared_section->mem);
-	u32 iface_offset = CSF_GROUP_CONTROL_OFFSET + (csg_idx * glb_iface->control->group_stride);
+	u64 iface_offset = CSF_GROUP_CONTROL_OFFSET +
+			   ((u64)csg_idx * glb_iface->control->group_stride);
 	unsigned int i;
 
-	if (iface_offset + sizeof(*csg_iface) >= shared_section_sz)
+	if (iface_offset > shared_section_sz ||
+	    sizeof(*csg_iface->control) > shared_section_sz - iface_offset)
 		return -EINVAL;
 
 	spin_lock_init(&csg_iface->lock);
 	csg_iface->control = ptdev->fw->shared_section->mem->kmap + iface_offset;
-	csg_iface->input = iface_fw_to_cpu_addr(ptdev, csg_iface->control->input_va);
-	csg_iface->output = iface_fw_to_cpu_addr(ptdev, csg_iface->control->output_va);
+	csg_iface->input = iface_fw_to_cpu_addr(ptdev, csg_iface->control->input_va,
+						sizeof(*csg_iface->input));
+	csg_iface->output = iface_fw_to_cpu_addr(ptdev, csg_iface->control->output_va,
+						 sizeof(*csg_iface->output));
 
 	if (csg_iface->control->stream_num < MIN_CS_PER_CSG ||
 	    csg_iface->control->stream_num > MAX_CS_PER_CSG)
@@ -888,9 +958,13 @@ static u32 panthor_get_instr_features(struct panthor_device *ptdev)
 static int panthor_fw_init_ifaces(struct panthor_device *ptdev)
 {
 	struct panthor_fw_global_iface *glb_iface = &ptdev->fw->iface.global;
+	u64 shared_section_sz = panthor_kernel_bo_size(ptdev->fw->shared_section->mem);
 	unsigned int i;
 
 	if (!ptdev->fw->shared_section->mem->kmap)
+		return -EINVAL;
+
+	if (sizeof(*glb_iface->control) > shared_section_sz)
 		return -EINVAL;
 
 	spin_lock_init(&glb_iface->lock);
@@ -901,8 +975,10 @@ static int panthor_fw_init_ifaces(struct panthor_device *ptdev)
 		return -EINVAL;
 	}
 
-	glb_iface->input = iface_fw_to_cpu_addr(ptdev, glb_iface->control->input_va);
-	glb_iface->output = iface_fw_to_cpu_addr(ptdev, glb_iface->control->output_va);
+	glb_iface->input = iface_fw_to_cpu_addr(ptdev, glb_iface->control->input_va,
+						sizeof(*glb_iface->input));
+	glb_iface->output = iface_fw_to_cpu_addr(ptdev, glb_iface->control->output_va,
+						 sizeof(*glb_iface->output));
 	if (!glb_iface->input || !glb_iface->output) {
 		drm_err(&ptdev->base, "Invalid global control interface input/output VA");
 		return -EINVAL;
@@ -921,7 +997,7 @@ static int panthor_fw_init_ifaces(struct panthor_device *ptdev)
 			return ret;
 	}
 
-	drm_info(&ptdev->base, "CSF FW v%d.%d.%d, Features %#x Instrumentation features %#x",
+	drm_info(&ptdev->base, "CSF FW using interface v%d.%d.%d, Features %#x Instrumentation features %#x",
 		 CSF_IFACE_VERSION_MAJOR(glb_iface->control->version),
 		 CSF_IFACE_VERSION_MINOR(glb_iface->control->version),
 		 CSF_IFACE_VERSION_PATCH(glb_iface->control->version),
@@ -965,6 +1041,8 @@ static void panthor_fw_init_global_iface(struct panthor_device *ptdev)
 
 static void panthor_job_irq_handler(struct panthor_device *ptdev, u32 status)
 {
+	gpu_write(ptdev, JOB_INT_CLEAR, status);
+
 	if (!ptdev->fw->booted && (status & JOB_INT_GLOBAL_IF))
 		ptdev->fw->booted = true;
 
@@ -1016,8 +1094,8 @@ static void panthor_fw_stop(struct panthor_device *ptdev)
 	u32 status;
 
 	gpu_write(ptdev, MCU_CONTROL, MCU_CONTROL_DISABLE);
-	if (readl_poll_timeout(ptdev->iomem + MCU_STATUS, status,
-			       status == MCU_STATUS_DISABLED, 10, 100000))
+	if (gpu_read_poll_timeout(ptdev, MCU_STATUS, status,
+				  status == MCU_STATUS_DISABLED, 10, 100000))
 		drm_err(&ptdev->base, "Failed to stop MCU");
 }
 
@@ -1034,7 +1112,7 @@ void panthor_fw_pre_reset(struct panthor_device *ptdev, bool on_hang)
 	/* Make sure we won't be woken up by a ping. */
 	cancel_delayed_work_sync(&ptdev->fw->watchdog.ping_work);
 
-	ptdev->fw->fast_reset = false;
+	ptdev->reset.fast = false;
 
 	if (!on_hang) {
 		struct panthor_fw_global_iface *glb_iface = panthor_fw_get_glb_iface(ptdev);
@@ -1042,21 +1120,17 @@ void panthor_fw_pre_reset(struct panthor_device *ptdev, bool on_hang)
 
 		panthor_fw_update_reqs(glb_iface, req, GLB_HALT, GLB_HALT);
 		gpu_write(ptdev, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
-		if (!readl_poll_timeout(ptdev->iomem + MCU_STATUS, status,
-					status == MCU_STATUS_HALT, 10, 100000) &&
-		    glb_iface->output->halt_status == PANTHOR_FW_HALT_OK) {
-			ptdev->fw->fast_reset = true;
+		if (!gpu_read_poll_timeout(ptdev, MCU_STATUS, status,
+					   status == MCU_STATUS_HALT, 10,
+					   100000)) {
+			ptdev->reset.fast = true;
 		} else {
 			drm_warn(&ptdev->base, "Failed to cleanly suspend MCU");
 		}
-
-		/* The FW detects 0 -> 1 transitions. Make sure we reset
-		 * the HALT bit before the FW is rebooted.
-		 */
-		panthor_fw_update_reqs(glb_iface, req, 0, GLB_HALT);
 	}
 
 	panthor_job_irq_suspend(&ptdev->fw->irq);
+	panthor_fw_stop(ptdev);
 }
 
 /**
@@ -1075,41 +1149,30 @@ int panthor_fw_post_reset(struct panthor_device *ptdev)
 	if (ret)
 		return ret;
 
-	/* If this is a fast reset, try to start the MCU without reloading
-	 * the FW sections. If it fails, go for a full reset.
-	 */
-	if (ptdev->fw->fast_reset) {
-		ret = panthor_fw_start(ptdev);
-		if (!ret)
-			goto out;
-
-		/* Forcibly reset the MCU and force a slow reset, so we get a
-		 * fresh boot on the next panthor_fw_start() call.
+	if (!ptdev->reset.fast) {
+		/* On a slow reset, reload all sections, including RO ones.
+		 * We're not supposed to end up here anyway, let's just assume
+		 * the overhead of reloading everything is acceptable.
 		 */
-		panthor_fw_stop(ptdev);
-		ptdev->fw->fast_reset = false;
-		drm_err(&ptdev->base, "FW fast reset failed, trying a slow reset");
+		panthor_reload_fw_sections(ptdev, true);
+	} else {
+		/* The FW detects 0 -> 1 transitions. Make sure we reset
+		 * the HALT bit before the FW is rebooted.
+		 * This is not needed on a slow reset because FW sections are
+		 * re-initialized.
+		 */
+		struct panthor_fw_global_iface *glb_iface = panthor_fw_get_glb_iface(ptdev);
 
-		ret = panthor_vm_flush_all(ptdev->fw->vm);
-		if (ret) {
-			drm_err(&ptdev->base, "FW slow reset failed (couldn't flush FW's AS l2cache)");
-			return ret;
-		}
+		panthor_fw_update_reqs(glb_iface, req, 0, GLB_HALT);
 	}
-
-	/* Reload all sections, including RO ones. We're not supposed
-	 * to end up here anyway, let's just assume the overhead of
-	 * reloading everything is acceptable.
-	 */
-	panthor_reload_fw_sections(ptdev, true);
 
 	ret = panthor_fw_start(ptdev);
 	if (ret) {
-		drm_err(&ptdev->base, "FW slow reset failed (couldn't start the FW )");
+		drm_err(&ptdev->base, "FW %s reset failed",
+			ptdev->reset.fast ?  "fast" : "slow");
 		return ret;
 	}
 
-out:
 	/* We must re-initialize the global interface even on fast-reset. */
 	panthor_fw_init_global_iface(ptdev);
 	return 0;
@@ -1133,11 +1196,13 @@ void panthor_fw_unplug(struct panthor_device *ptdev)
 
 	cancel_delayed_work_sync(&ptdev->fw->watchdog.ping_work);
 
-	/* Make sure the IRQ handler can be called after that point. */
-	if (ptdev->fw->irq.irq)
-		panthor_job_irq_suspend(&ptdev->fw->irq);
+	if (!IS_ENABLED(CONFIG_PM) || pm_runtime_active(ptdev->base.dev)) {
+		/* Make sure the IRQ handler cannot be called after that point. */
+		if (ptdev->fw->irq.irq)
+			panthor_job_irq_suspend(&ptdev->fw->irq);
 
-	panthor_fw_stop(ptdev);
+		panthor_fw_stop(ptdev);
+	}
 
 	list_for_each_entry(section, &ptdev->fw->sections, node)
 		panthor_kernel_bo_destroy(section->mem);
@@ -1150,7 +1215,8 @@ void panthor_fw_unplug(struct panthor_device *ptdev)
 	panthor_vm_put(ptdev->fw->vm);
 	ptdev->fw->vm = NULL;
 
-	panthor_gpu_power_off(ptdev, L2, ptdev->gpu_info.l2_present, 20000);
+	if (!IS_ENABLED(CONFIG_PM) || pm_runtime_active(ptdev->base.dev))
+		panthor_gpu_power_off(ptdev, L2, ptdev->gpu_info.l2_present, 20000);
 }
 
 /**
@@ -1368,3 +1434,8 @@ err_unplug_fw:
 }
 
 MODULE_FIRMWARE("arm/mali/arch10.8/mali_csffw.bin");
+MODULE_FIRMWARE("arm/mali/arch10.10/mali_csffw.bin");
+MODULE_FIRMWARE("arm/mali/arch10.12/mali_csffw.bin");
+MODULE_FIRMWARE("arm/mali/arch11.8/mali_csffw.bin");
+MODULE_FIRMWARE("arm/mali/arch12.8/mali_csffw.bin");
+MODULE_FIRMWARE("arm/mali/arch13.8/mali_csffw.bin");

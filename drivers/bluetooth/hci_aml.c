@@ -247,7 +247,7 @@ static int aml_download_firmware(struct hci_dev *hdev, const char *fw_name)
 	struct hci_uart *hu = hci_get_drvdata(hdev);
 	struct aml_serdev *amldev = serdev_device_get_drvdata(hu->serdev);
 	const struct firmware *firmware = NULL;
-	struct aml_fw_len *fw_len = NULL;
+	const struct aml_fw_len *fw_len = NULL;
 	u8 *iccm_start = NULL, *dccm_start = NULL;
 	u32 iccm_len, dccm_len;
 	u32 value = 0;
@@ -281,7 +281,21 @@ static int aml_download_firmware(struct hci_dev *hdev, const char *fw_name)
 		goto exit;
 	}
 
-	fw_len = (struct aml_fw_len *)firmware->data;
+	if (firmware->size < sizeof(*fw_len)) {
+		bt_dev_err(hdev, "Firmware is too small for its header");
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	fw_len = (const struct aml_fw_len *)firmware->data;
+	if (fw_len->iccm_len < amldev->aml_dev_data->iccm_offset ||
+	    fw_len->iccm_len > firmware->size - sizeof(*fw_len) ||
+	    fw_len->dccm_len > firmware->size - sizeof(*fw_len) -
+			fw_len->iccm_len) {
+		bt_dev_err(hdev, "Invalid firmware segment lengths");
+		ret = -EINVAL;
+		goto exit;
+	}
 
 	/* Download ICCM */
 	iccm_start = (u8 *)(firmware->data) + sizeof(struct aml_fw_len)
@@ -313,8 +327,7 @@ static int aml_download_firmware(struct hci_dev *hdev, const char *fw_name)
 		goto exit;
 
 exit:
-	if (firmware)
-		release_firmware(firmware);
+	release_firmware(firmware);
 	return ret;
 }
 
@@ -425,7 +438,7 @@ static int aml_check_bdaddr(struct hci_dev *hdev)
 
 	if (!bacmp(&paddr->bdaddr, AML_BDADDR_DEFAULT)) {
 		bt_dev_info(hdev, "amlbt using default bdaddr (%pM)", &paddr->bdaddr);
-		set_bit(HCI_QUIRK_INVALID_BDADDR, &hdev->quirks);
+		hci_set_quirk(hdev, HCI_QUIRK_INVALID_BDADDR);
 	}
 
 exit:
@@ -651,7 +664,7 @@ static int aml_recv(struct hci_uart *hu, const void *data, int count)
 	struct aml_data *aml_data = hu->priv;
 	int err;
 
-	aml_data->rx_skb = h4_recv_buf(hu->hdev, aml_data->rx_skb, data, count,
+	aml_data->rx_skb = h4_recv_buf(hu, aml_data->rx_skb, data, count,
 				       aml_recv_pkts,
 				       ARRAY_SIZE(aml_recv_pkts));
 	if (IS_ERR(aml_data->rx_skb)) {

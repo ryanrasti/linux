@@ -12,9 +12,6 @@
 
 #include <linux/io.h>
 
-/* Handy logging macro to save on line length */
-#define DBG(x, ...) pr_devel("%s: " x "\n", __func__, ##__VA_ARGS__)
-
 /* 32-bit word aware bit and mask macros */
 #define W0_MASK(h, l)  GENMASK((h) - 0,  (l) - 0)
 #define W1_MASK(h, l)  GENMASK((h) - 32, (l) - 32)
@@ -48,12 +45,16 @@ struct i3c_hci {
 	const struct hci_io_ops *io;
 	void *io_data;
 	const struct hci_cmd_ops *cmd;
+	spinlock_t lock;
+	bool irq_inactive;
+	struct mutex control_mutex;
 	atomic_t next_cmd_tid;
 	u32 caps;
 	unsigned int quirks;
 	unsigned int DAT_entries;
 	unsigned int DAT_entry_size;
 	void *DAT_data;
+	struct i3c_dev_desc **ibi_devs;
 	unsigned int DCT_entries;
 	unsigned int DCT_entry_size;
 	u8 version_major;
@@ -94,8 +95,7 @@ struct hci_xfer {
 		};
 		struct {
 			/* DMA specific */
-			dma_addr_t data_dma;
-			void *bounce_buf;
+			struct i3c_dma *dma;
 			int ring_number;
 			int ring_entry;
 		};
@@ -115,7 +115,7 @@ static inline void hci_free_xfer(struct hci_xfer *xfer, unsigned int n)
 
 /* This abstracts PIO vs DMA operations */
 struct hci_io_ops {
-	bool (*irq_handler)(struct i3c_hci *hci, unsigned int mask);
+	bool (*irq_handler)(struct i3c_hci *hci);
 	int (*queue_xfer)(struct i3c_hci *hci, struct hci_xfer *xfer, int n);
 	bool (*dequeue_xfer)(struct i3c_hci *hci, struct hci_xfer *xfer, int n);
 	int (*request_ibi)(struct i3c_hci *hci, struct i3c_dev_desc *dev,

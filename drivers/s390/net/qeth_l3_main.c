@@ -10,6 +10,7 @@
 #define KMSG_COMPONENT "qeth"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/bitops.h>
@@ -1413,6 +1414,11 @@ static int qeth_l3_arp_query(struct qeth_card *card, char __user *udata)
 	/* get size of userspace buffer and mask_bits -> 6 bytes */
 	if (copy_from_user(&qinfo, udata, 6)) {
 		rc = -EFAULT;
+		goto out;
+	}
+
+	if (qinfo.udata_len < QETH_QARP_ENTRIES_OFFSET) {
+		rc = -EINVAL;
 		goto out;
 	}
 	qinfo.udata = kzalloc(qinfo.udata_len, GFP_KERNEL);

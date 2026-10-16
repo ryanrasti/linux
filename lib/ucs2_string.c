@@ -8,7 +8,7 @@ ucs2_strnlen(const ucs2_char_t *s, size_t maxlength)
 {
         unsigned long length = 0;
 
-        while (*s++ != 0 && length < maxlength)
+	while (length < maxlength && *s++ != 0)
                 length++;
         return length;
 }
@@ -165,4 +165,5 @@ ucs2_as_utf8(u8 *dest, const ucs2_char_t *src, unsigned long maxlength)
 }
 EXPORT_SYMBOL(ucs2_as_utf8);
 
+MODULE_DESCRIPTION("UCS2 string handling");
 MODULE_LICENSE("GPL v2");

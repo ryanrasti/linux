@@ -61,7 +61,7 @@ struct smb_query_info {
 struct smb3_key_debug_info {
 	__u64	Suid;
 	__u16	cipher_type;
-	__u8	auth_key[16]; /* SMB2_NTLMV2_SESSKEY_SIZE */
+	__u8	auth_key[SMB2_NTLMV2_SESSKEY_SIZE];
 	__u8	smb3encryptionkey[SMB3_SIGN_KEY_SIZE];
 	__u8	smb3decryptionkey[SMB3_SIGN_KEY_SIZE];
 } __packed;
@@ -125,7 +125,7 @@ struct smb3_notify_info {
 
 static inline bool cifs_forced_shutdown(struct cifs_sb_info *sbi)
 {
-	if (CIFS_MOUNT_SHUTDOWN & sbi->mnt_cifs_flags)
+	if (CIFS_MOUNT_SHUTDOWN & cifs_sb_flags(sbi))
 		return true;
 	else
 		return false;

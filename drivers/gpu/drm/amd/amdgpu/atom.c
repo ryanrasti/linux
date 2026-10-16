@@ -59,6 +59,9 @@
 
 #define ATOM_CMD_TIMEOUT_SEC	20
 
+/* Limit ATOM command table recursion (calltable) to avoid kernel stack overflow. */
+#define ATOM_EXECUTE_MAX_DEPTH	32
+
 typedef struct {
 	struct atom_context *ctx;
 	uint32_t *ps, *ws;
@@ -1229,6 +1232,13 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 	if (!base)
 		return -EINVAL;
 
+	if (ctx->execute_depth >= ATOM_EXECUTE_MAX_DEPTH) {
+		DRM_ERROR("atombios command table nesting exceeded limit (%u)\n",
+			  ATOM_EXECUTE_MAX_DEPTH);
+		return -ELOOP;
+	}
+	ctx->execute_depth++;
+
 	len = CU16(base + ATOM_CT_SIZE_PTR);
 	ws = CU8(base + ATOM_CT_WS_PTR);
 	ps = CU8(base + ATOM_CT_PS_PTR) & ATOM_CT_PS_MASK;
@@ -1246,6 +1256,10 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 	ectx.last_jump_jiffies = 0;
 	if (ws) {
 		ectx.ws = kcalloc(4, ws, GFP_KERNEL);
+		if (!ectx.ws) {
+			ret = -ENOMEM;
+			goto free;
+		}
 		ectx.ws_size = ws;
 	} else {
 		ectx.ws = NULL;
@@ -1281,6 +1295,7 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 free:
 	if (ws)
 		kfree(ectx.ws);
+	ctx->execute_depth--;
 	return ret;
 }
 
@@ -1444,6 +1459,7 @@ static void atom_get_vbios_pn(struct atom_context *ctx)
 		if (vbios_str == NULL)
 			vbios_str += sizeof(BIOS_ATOM_PREFIX) - 1;
 	}
+	OPTIMIZER_HIDE_VAR(vbios_str);
 	if (vbios_str != NULL && *vbios_str == 0)
 		vbios_str++;
 
@@ -1491,6 +1507,28 @@ static void atom_get_vbios_version(struct atom_context *ctx)
 	} else {
 		ctx->vbios_ver_str[0] = '\0';
 	}
+}
+
+static void atom_get_vbios_build(struct atom_context *ctx)
+{
+	unsigned char *atom_rom_hdr;
+	unsigned char *str;
+	uint16_t base, len;
+
+	base = CU16(ATOM_ROM_TABLE_PTR);
+	atom_rom_hdr = CSTR(base);
+
+	str = CSTR(CU16(base + ATOM_ROM_CFG_PTR));
+	/* Skip config string */
+	while (str < atom_rom_hdr && *str++)
+		;
+	/* Skip change list string */
+	while (str < atom_rom_hdr && *str++)
+		;
+
+	len = min(atom_rom_hdr - str, STRLEN_NORMAL);
+	if (len)
+		strscpy(ctx->build_num, str, len);
 }
 
 struct atom_context *amdgpu_atom_parse(struct card_info *card, void *bios)
@@ -1553,6 +1591,7 @@ struct atom_context *amdgpu_atom_parse(struct card_info *card, void *bios)
 	atom_get_vbios_pn(ctx);
 	atom_get_vbios_date(ctx);
 	atom_get_vbios_version(ctx);
+	atom_get_vbios_build(ctx);
 
 	return ctx;
 }

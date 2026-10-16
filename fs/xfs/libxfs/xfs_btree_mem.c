@@ -18,6 +18,7 @@
 #include "xfs_ag.h"
 #include "xfs_buf_item.h"
 #include "xfs_trace.h"
+#include "xfs_rtgroup.h"
 
 /* Set the root of an in-memory btree. */
 void
@@ -57,10 +58,8 @@ xfbtree_dup_cursor(
 	ncur->bc_flags = cur->bc_flags;
 	ncur->bc_nlevels = cur->bc_nlevels;
 	ncur->bc_mem.xfbtree = cur->bc_mem.xfbtree;
-
-	if (cur->bc_mem.pag)
-		ncur->bc_mem.pag = xfs_perag_hold(cur->bc_mem.pag);
-
+	if (cur->bc_group)
+		ncur->bc_group = xfs_group_hold(cur->bc_group);
 	return ncur;
 }
 
@@ -118,6 +117,7 @@ xfbtree_init(
 	struct xfs_buftarg		*btp,
 	const struct xfs_btree_ops	*ops)
 {
+	unsigned long long		owner = xfbt->owner;
 	unsigned int			blocklen = xfbtree_rec_bytes(mp, ops);
 	unsigned int			keyptr_len;
 	int				error;
@@ -134,6 +134,7 @@ xfbtree_init(
 
 	memset(xfbt, 0, sizeof(*xfbt));
 	xfbt->target = btp;
+	xfbt->owner = owner;
 
 	/* Set up min/maxrecs for this btree. */
 	keyptr_len = ops->key_len + sizeof(__be64);

@@ -105,6 +105,22 @@ static void hci_devcd_free(struct hci_dev *hdev)
 	hci_devcd_reset(hdev);
 }
 
+void hci_devcd_shutdown(struct hci_dev *hdev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&hdev->dump.dump_q.lock, flags);
+	hdev->dump.supported = false;
+	spin_unlock_irqrestore(&hdev->dump.dump_q.lock, flags);
+
+	disable_work_sync(&hdev->dump.dump_rx);
+	disable_delayed_work_sync(&hdev->dump.dump_timeout);
+
+	hci_dev_lock(hdev);
+	hci_devcd_free(hdev);
+	hci_dev_unlock(hdev);
+}
+
 /* Call with hci_dev_lock only. */
 static int hci_devcd_alloc(struct hci_dev *hdev, u32 size)
 {
@@ -240,6 +256,26 @@ static void hci_devcd_handle_pkt_pattern(struct hci_dev *hdev,
 		bt_dev_dbg(hdev, "Failed to set pattern");
 }
 
+static void hci_devcd_dump(struct hci_dev *hdev)
+{
+	struct sk_buff *skb;
+	u32 size;
+
+	bt_dev_dbg(hdev, "state %d", hdev->dump.state);
+
+	size = hdev->dump.tail - hdev->dump.head;
+
+	/* Send a copy to monitor as a diagnostic packet */
+	skb = bt_skb_alloc(size, GFP_ATOMIC);
+	if (skb) {
+		skb_put_data(skb, hdev->dump.head, size);
+		hci_recv_diag(hdev, skb);
+	}
+
+	/* Emit a devcoredump with the available data */
+	dev_coredumpv(&hdev->dev, hdev->dump.head, size, GFP_KERNEL);
+}
+
 static void hci_devcd_handle_pkt_complete(struct hci_dev *hdev,
 					  struct sk_buff *skb)
 {
@@ -256,7 +292,7 @@ static void hci_devcd_handle_pkt_complete(struct hci_dev *hdev,
 	bt_dev_dbg(hdev, "complete with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 }
 
 static void hci_devcd_handle_pkt_abort(struct hci_dev *hdev,
@@ -275,8 +311,7 @@ static void hci_devcd_handle_pkt_abort(struct hci_dev *hdev,
 	bt_dev_dbg(hdev, "aborted with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	/* Emit a devcoredump with the available data */
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 }
 
 /* Bluetooth devcoredump state machine.
@@ -391,8 +426,7 @@ void hci_devcd_timeout(struct work_struct *work)
 	bt_dev_dbg(hdev, "timeout with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	/* Emit a devcoredump with the available data */
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 
 	hci_devcd_reset(hdev);
 
@@ -426,7 +460,29 @@ EXPORT_SYMBOL(hci_devcd_register);
 
 static inline bool hci_devcd_enabled(struct hci_dev *hdev)
 {
-	return hdev->dump.supported;
+	return READ_ONCE(hdev->dump.supported);
+}
+
+static int hci_devcd_queue(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	unsigned long flags;
+	int err = 0;
+
+	spin_lock_irqsave(&hdev->dump.dump_q.lock, flags);
+	if (!hdev->dump.supported)
+		err = -EOPNOTSUPP;
+	else
+		__skb_queue_tail(&hdev->dump.dump_q, skb);
+	spin_unlock_irqrestore(&hdev->dump.dump_q.lock, flags);
+
+	if (err) {
+		kfree_skb(skb);
+		return err;
+	}
+
+	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
+
+	return 0;
 }
 
 int hci_devcd_init(struct hci_dev *hdev, u32 dump_size)
@@ -443,10 +499,7 @@ int hci_devcd_init(struct hci_dev *hdev, u32 dump_size)
 	hci_dmp_cb(skb)->pkt_type = HCI_DEVCOREDUMP_PKT_INIT;
 	put_unaligned_le32(dump_size, skb_put(skb, 4));
 
-	skb_queue_tail(&hdev->dump.dump_q, skb);
-	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
-
-	return 0;
+	return hci_devcd_queue(hdev, skb);
 }
 EXPORT_SYMBOL(hci_devcd_init);
 
@@ -462,10 +515,7 @@ int hci_devcd_append(struct hci_dev *hdev, struct sk_buff *skb)
 
 	hci_dmp_cb(skb)->pkt_type = HCI_DEVCOREDUMP_PKT_SKB;
 
-	skb_queue_tail(&hdev->dump.dump_q, skb);
-	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
-
-	return 0;
+	return hci_devcd_queue(hdev, skb);
 }
 EXPORT_SYMBOL(hci_devcd_append);
 
@@ -487,10 +537,7 @@ int hci_devcd_append_pattern(struct hci_dev *hdev, u8 pattern, u32 len)
 	hci_dmp_cb(skb)->pkt_type = HCI_DEVCOREDUMP_PKT_PATTERN;
 	skb_put_data(skb, &p, sizeof(p));
 
-	skb_queue_tail(&hdev->dump.dump_q, skb);
-	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
-
-	return 0;
+	return hci_devcd_queue(hdev, skb);
 }
 EXPORT_SYMBOL(hci_devcd_append_pattern);
 
@@ -507,10 +554,7 @@ int hci_devcd_complete(struct hci_dev *hdev)
 
 	hci_dmp_cb(skb)->pkt_type = HCI_DEVCOREDUMP_PKT_COMPLETE;
 
-	skb_queue_tail(&hdev->dump.dump_q, skb);
-	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
-
-	return 0;
+	return hci_devcd_queue(hdev, skb);
 }
 EXPORT_SYMBOL(hci_devcd_complete);
 
@@ -527,9 +571,6 @@ int hci_devcd_abort(struct hci_dev *hdev)
 
 	hci_dmp_cb(skb)->pkt_type = HCI_DEVCOREDUMP_PKT_ABORT;
 
-	skb_queue_tail(&hdev->dump.dump_q, skb);
-	queue_work(hdev->workqueue, &hdev->dump.dump_rx);
-
-	return 0;
+	return hci_devcd_queue(hdev, skb);
 }
 EXPORT_SYMBOL(hci_devcd_abort);

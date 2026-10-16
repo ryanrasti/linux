@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/fault-inject.h>
 
 #include <drm/drm_managed.h>
 
@@ -224,7 +225,7 @@ __relay_get_transaction(struct xe_guc_relay *relay, bool incoming, u32 remote, u
 	 * with CTB lock held which is marked as used in the reclaim path.
 	 * Btw, that's one of the reason why we use mempool here!
 	 */
-	txn = mempool_alloc(&relay->pool, incoming ? GFP_ATOMIC : GFP_KERNEL);
+	txn = mempool_alloc(&relay->pool, incoming ? GFP_ATOMIC : GFP_NOWAIT);
 	if (!txn)
 		return ERR_PTR(-ENOMEM);
 
@@ -355,6 +356,7 @@ int xe_guc_relay_init(struct xe_guc_relay *relay)
 
 	return drmm_add_action_or_reset(&xe->drm, __fini_relay, relay);
 }
+ALLOW_ERROR_INJECTION(xe_guc_relay_init, ERRNO); /* See xe_pci_probe() */
 
 static u32 to_relay_error(int err)
 {
@@ -675,12 +677,17 @@ static int relay_action_handler(struct xe_guc_relay *relay, u32 origin,
 		return relay_testloop_action_handler(relay, origin, msg, len, response, size);
 
 	type = FIELD_GET(GUC_HXG_MSG_0_TYPE, msg[0]);
+	relay_assert(relay, guc_hxg_type_is_action(type));
 
-	if (IS_SRIOV_PF(relay_to_xe(relay)))
-		ret = xe_gt_sriov_pf_service_process_request(gt, origin, msg, len, response, size);
-	else
+	if (IS_SRIOV_PF(relay_to_xe(relay))) {
+		if (type == GUC_HXG_TYPE_REQUEST)
+			ret = xe_gt_sriov_pf_service_process_request(gt, origin, msg, len,
+								     response, size);
+		else
+			ret = -EOPNOTSUPP;
+	} else {
 		ret = -EOPNOTSUPP;
-
+	}
 	if (type == GUC_HXG_TYPE_EVENT)
 		relay_assert(relay, ret <= 0);
 

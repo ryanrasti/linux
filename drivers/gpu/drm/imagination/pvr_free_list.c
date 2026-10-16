@@ -8,6 +8,7 @@
 #include "pvr_vm.h"
 
 #include <drm/drm_gem.h>
+#include <drm/drm_print.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <uapi/drm/pvr_drm.h>
@@ -237,11 +238,10 @@ pvr_free_list_insert_pages_locked(struct pvr_free_list *free_list,
 		dma_addr_t dma_addr = sg_page_iter_dma_address(&dma_iter);
 		u64 dma_pfn = dma_addr >>
 			       ROGUE_BIF_PM_PHYSICAL_PAGE_ALIGNSHIFT;
-		u32 dma_addr_offset;
 
 		BUILD_BUG_ON(ROGUE_BIF_PM_PHYSICAL_PAGE_SIZE > PAGE_SIZE);
 
-		for (dma_addr_offset = 0; dma_addr_offset < PAGE_SIZE;
+		for (u32 dma_addr_offset = 0; dma_addr_offset < PAGE_SIZE;
 		     dma_addr_offset += ROGUE_BIF_PM_PHYSICAL_PAGE_SIZE) {
 			WARN_ON_ONCE(dma_pfn >> 32);
 
@@ -613,13 +613,21 @@ pvr_free_list_process_reconstruct_req(struct pvr_device *pvr_dev,
 	};
 	struct rogue_fwif_freelists_reconstruction_data *resp =
 		&resp_cmd.cmd_data.free_lists_reconstruction_data;
+	u32 count = min_t(u32, req->freelist_count,
+			  ARRAY_SIZE(req->freelist_ids));
 
-	for (u32 i = 0; i < req->freelist_count; i++)
+	if (count != req->freelist_count) {
+		drm_warn_once(from_pvr_device(pvr_dev),
+			      "Requested reconstruction of %u freelists, limiting to %u\n",
+			      req->freelist_count, count);
+	}
+
+	for (u32 i = 0; i < count; i++)
 		pvr_free_list_reconstruct(pvr_dev, req->freelist_ids[i]);
 
-	resp->freelist_count = req->freelist_count;
+	resp->freelist_count = count;
 	memcpy(resp->freelist_ids, req->freelist_ids,
-	       req->freelist_count * sizeof(resp->freelist_ids[0]));
+	       count * sizeof(resp->freelist_ids[0]));
 
 	WARN_ON(pvr_kccb_send_cmd(pvr_dev, &resp_cmd, NULL));
 }

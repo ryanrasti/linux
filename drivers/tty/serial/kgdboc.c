@@ -186,10 +186,13 @@ static void cleanup_kgdboc(void)
 	if (configured != 1)
 		return;
 
-	if (kgdb_unregister_nmi_console())
-		return;
 	kgdboc_unregister_kbd();
 	kgdb_unregister_io_module(&kgdboc_io_ops);
+
+	if (kgdb_tty_driver) {
+		tty_driver_kref_put(kgdb_tty_driver);
+		kgdb_tty_driver = NULL;
+	}
 }
 
 static int configure_kgdboc(void)
@@ -250,18 +253,16 @@ do_register:
 	if (err)
 		goto noconfig;
 
-	err = kgdb_register_nmi_console();
-	if (err)
-		goto nmi_con_failed;
-
 	configured = 1;
 
 	return 0;
 
-nmi_con_failed:
-	kgdb_unregister_io_module(&kgdboc_io_ops);
 noconfig:
 	kgdboc_unregister_kbd();
+	if (kgdb_tty_driver) {
+		tty_driver_kref_put(kgdb_tty_driver);
+		kgdb_tty_driver = NULL;
+	}
 	configured = 0;
 
 	return err;

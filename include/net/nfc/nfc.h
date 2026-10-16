@@ -86,6 +86,8 @@ struct nfc_ops {
  *	is a type A one. The %sens_res most significant byte must be byte 2
  *	as described by the NFC Forum digital specification (i.e. the platform
  *	configuration one) while %sens_res least significant byte is byte 1.
+ * @ats_len: length of Answer To Select in bytes
+ * @ats: Answer To Select returned by an ISO 14443 Type A target upon activation
  */
 struct nfc_target {
 	u32 idx;
@@ -105,6 +107,8 @@ struct nfc_target {
 	u8 is_iso15693;
 	u8 iso15693_dsfid;
 	u8 iso15693_uid[NFC_ISO15693_UID_MAXSIZE];
+	u8 ats_len;
+	u8 ats[NFC_ATS_MAXSIZE];
 };
 
 /**
@@ -215,6 +219,8 @@ static inline void nfc_free_device(struct nfc_dev *dev)
 
 int nfc_register_device(struct nfc_dev *dev);
 
+void nfc_unregister_rfkill(struct nfc_dev *dev);
+void nfc_remove_device(struct nfc_dev *dev);
 void nfc_unregister_device(struct nfc_dev *dev);
 
 /**
@@ -267,7 +273,8 @@ struct sk_buff *nfc_alloc_recv_skb(unsigned int size, gfp_t gfp);
 
 int nfc_set_remote_general_bytes(struct nfc_dev *dev,
 				 const u8 *gt, u8 gt_len);
-u8 *nfc_get_local_general_bytes(struct nfc_dev *dev, size_t *gb_len);
+u8 *nfc_get_local_general_bytes(struct nfc_dev *dev, u8 *out_gb,
+				size_t gb_max_len, size_t *gb_len);
 
 int nfc_fw_download_done(struct nfc_dev *dev, const char *firmware_name,
 			 u32 result);

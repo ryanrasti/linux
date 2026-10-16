@@ -405,6 +405,7 @@ static int meson_ao_cec_g12a_write(void *context, unsigned int addr,
 }
 
 static const struct regmap_config meson_ao_cec_g12a_cec_regmap_conf = {
+	.name = "core",
 	.reg_bits = 8,
 	.val_bits = 8,
 	.reg_read = meson_ao_cec_g12a_read,
@@ -778,7 +779,7 @@ MODULE_DEVICE_TABLE(of, meson_ao_cec_g12a_of_match);
 
 static struct platform_driver meson_ao_cec_g12a_driver = {
 	.probe   = meson_ao_cec_g12a_probe,
-	.remove_new = meson_ao_cec_g12a_remove,
+	.remove = meson_ao_cec_g12a_remove,
 	.driver  = {
 		.name = "meson-ao-cec-g12a",
 		.of_match_table = of_match_ptr(meson_ao_cec_g12a_of_match),

@@ -158,6 +158,7 @@ static void marvell_c22_pcs_disable(struct phylink_pcs *pcs)
 }
 
 static void marvell_c22_pcs_get_state(struct phylink_pcs *pcs,
+				      unsigned int neg_mode,
 				      struct phylink_link_state *state)
 {
 	struct marvell_c22_pcs *mpcs = pcs_to_marvell_c22_pcs(pcs);
@@ -274,7 +275,6 @@ static struct marvell_c22_pcs *marvell_c22_pcs_alloc(struct device *dev,
 	mpcs->mdio.bus = bus;
 	mpcs->mdio.addr = addr;
 	mpcs->phylink_pcs.ops = &marvell_c22_pcs_ops;
-	mpcs->phylink_pcs.neg_mode = true;
 
 	return mpcs;
 }
@@ -305,13 +305,16 @@ static bool mv88e6352_pcs_link_check(struct marvell_c22_pcs *mpcs)
 	struct mv88e6xxx_port *port = mpcs->port;
 	struct mv88e6xxx_chip *chip = port->chip;
 	u8 cmode;
+	int err;
 
 	/* Port 4 can be in auto-media mode. Check that the port is
 	 * associated with the mpcs.
 	 */
 	mv88e6xxx_reg_lock(chip);
-	chip->info->ops->port_get_cmode(chip, port->port, &cmode);
+	err = chip->info->ops->port_get_cmode(chip, port->port, &cmode);
 	mv88e6xxx_reg_unlock(chip);
+	if (err)
+		return false;
 
 	return cmode == MV88E6XXX_PORT_STS_CMODE_100BASEX ||
 	       cmode == MV88E6XXX_PORT_STS_CMODE_1000BASEX ||

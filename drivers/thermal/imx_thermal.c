@@ -361,7 +361,7 @@ static bool imx_should_bind(struct thermal_zone_device *tz,
 	return trip->type == THERMAL_TRIP_PASSIVE;
 }
 
-static struct thermal_zone_device_ops imx_tz_ops = {
+static const struct thermal_zone_device_ops imx_tz_ops = {
 	.should_bind = imx_should_bind,
 	.get_temp = imx_get_temp,
 	.change_mode = imx_change_mode,
@@ -832,12 +832,12 @@ static int imx_thermal_runtime_resume(struct device *dev)
 	ret = regmap_write(map, socdata->sensor_ctrl + REG_CLR,
 			   socdata->power_down_mask);
 	if (ret)
-		return ret;
+		goto disable_clk;
 
 	ret = regmap_write(map, socdata->sensor_ctrl + REG_SET,
 			   socdata->measure_temp_mask);
 	if (ret)
-		return ret;
+		goto disable_clk;
 
 	/*
 	 * According to the temp sensor designers, it may require up to ~17us
@@ -846,6 +846,11 @@ static int imx_thermal_runtime_resume(struct device *dev)
 	usleep_range(20, 50);
 
 	return 0;
+
+disable_clk:
+	clk_disable_unprepare(data->thermal_clk);
+
+	return ret;
 }
 
 static const struct dev_pm_ops imx_thermal_pm_ops = {
@@ -861,7 +866,7 @@ static struct platform_driver imx_thermal = {
 		.of_match_table = of_imx_thermal_match,
 	},
 	.probe		= imx_thermal_probe,
-	.remove_new	= imx_thermal_remove,
+	.remove		= imx_thermal_remove,
 };
 module_platform_driver(imx_thermal);
 

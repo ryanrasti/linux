@@ -738,7 +738,7 @@ MODULE_DEVICE_TABLE(of, hwicap_of_match);
 
 static struct platform_driver hwicap_platform_driver = {
 	.probe = hwicap_drv_probe,
-	.remove_new = hwicap_drv_remove,
+	.remove = hwicap_drv_remove,
 	.driver = {
 		.name = DRIVER_NAME,
 		.of_match_table = hwicap_of_match,
@@ -760,7 +760,7 @@ static int __init hwicap_module_init(void)
 					HWICAP_DEVICES,
 					DRIVER_NAME);
 	if (retval < 0)
-		return retval;
+		goto failed_class;
 
 	retval = platform_driver_register(&hwicap_platform_driver);
 	if (retval)
@@ -770,6 +770,9 @@ static int __init hwicap_module_init(void)
 
  failed:
 	unregister_chrdev_region(devt, HWICAP_DEVICES);
+
+ failed_class:
+	class_unregister(&icap_class);
 
 	return retval;
 }

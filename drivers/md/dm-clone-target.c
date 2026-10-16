@@ -1877,7 +1877,8 @@ static int clone_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	clone->hydration_offset = 0;
 	atomic_set(&clone->hydrations_in_flight, 0);
 
-	clone->wq = alloc_workqueue("dm-" DM_MSG_PREFIX, WQ_MEM_RECLAIM, 0);
+	clone->wq = alloc_workqueue("dm-" DM_MSG_PREFIX,
+				    WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 	if (!clone->wq) {
 		ti->error = "Failed to allocate workqueue";
 		r = -ENOMEM;
@@ -2020,7 +2021,7 @@ static void clone_resume(struct dm_target *ti)
 static void disable_passdown_if_not_supported(struct clone *clone)
 {
 	struct block_device *dest_dev = clone->dest_dev->bdev;
-	struct queue_limits *dest_limits = &bdev_get_queue(dest_dev)->limits;
+	struct queue_limits *dest_limits = bdev_limits(dest_dev);
 	const char *reason = NULL;
 
 	if (!test_bit(DM_CLONE_DISCARD_PASSDOWN, &clone->flags))
@@ -2041,7 +2042,7 @@ static void disable_passdown_if_not_supported(struct clone *clone)
 static void set_discard_limits(struct clone *clone, struct queue_limits *limits)
 {
 	struct block_device *dest_bdev = clone->dest_dev->bdev;
-	struct queue_limits *dest_limits = &bdev_get_queue(dest_bdev)->limits;
+	struct queue_limits *dest_limits = bdev_limits(dest_bdev);
 
 	if (!test_bit(DM_CLONE_DISCARD_PASSDOWN, &clone->flags)) {
 		/* No passdown is done so we set our own virtual limits */

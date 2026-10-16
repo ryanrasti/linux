@@ -1481,7 +1481,7 @@ static int gem_mdio_link_not_up(struct gem *gp)
 
 static void gem_link_timer(struct timer_list *t)
 {
-	struct gem *gp = from_timer(gp, t, link_timer);
+	struct gem *gp = timer_container_of(gp, t, link_timer);
 	struct net_device *dev = gp->dev;
 	int restart_aneg = 0;
 
@@ -2180,7 +2180,7 @@ static void gem_do_stop(struct net_device *dev, int wol)
 	gem_disable_ints(gp);
 
 	/* Stop the link timer */
-	del_timer_sync(&gp->link_timer);
+	timer_delete_sync(&gp->link_timer);
 
 	/* We cannot cancel the reset task while holding the
 	 * rtnl lock, we'd get an A->B / B->A deadlock stituation
@@ -2230,7 +2230,7 @@ static void gem_reset_task(struct work_struct *work)
 	}
 
 	/* Stop the link timer */
-	del_timer_sync(&gp->link_timer);
+	timer_delete_sync(&gp->link_timer);
 
 	/* Stop NAPI and tx */
 	gem_netif_stop(gp);
@@ -2610,7 +2610,7 @@ static int gem_set_link_ksettings(struct net_device *dev,
 
 	/* Apply settings and restart link process. */
 	if (netif_device_present(gp->dev)) {
-		del_timer_sync(&gp->link_timer);
+		timer_delete_sync(&gp->link_timer);
 		gem_begin_auto_negotiation(gp, cmd);
 	}
 
@@ -2626,7 +2626,7 @@ static int gem_nway_reset(struct net_device *dev)
 
 	/* Restart link process  */
 	if (netif_device_present(gp->dev)) {
-		del_timer_sync(&gp->link_timer);
+		timer_delete_sync(&gp->link_timer);
 		gem_begin_auto_negotiation(gp, NULL);
 	}
 
@@ -2986,10 +2986,10 @@ static int gem_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->max_mtu = GEM_MAX_MTU;
 
 	/* Register with kernel */
-	if (register_netdev(dev)) {
+	err = register_netdev(dev);
+	if (err) {
 		pr_err("Cannot register net device, aborting\n");
-		err = -ENOMEM;
-		goto err_out_free_consistent;
+		goto err_out_clear_drvdata;
 	}
 
 	/* Undo the get_cell with appropriate locking (we could use
@@ -3003,8 +3003,13 @@ static int gem_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		    dev->dev_addr);
 	return 0;
 
+err_out_clear_drvdata:
+	pci_set_drvdata(pdev, NULL);
+	netif_napi_del(&gp->napi);
+
 err_out_free_consistent:
-	gem_remove_one(pdev);
+	dma_free_coherent(&pdev->dev, sizeof(struct gem_init_block),
+			  gp->init_block, gp->gblock_dvma);
 err_out_iounmap:
 	gem_put_cell(gp);
 	iounmap(gp->regs);

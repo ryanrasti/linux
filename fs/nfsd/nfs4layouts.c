@@ -65,7 +65,7 @@ nfsd4_alloc_devid_map(const struct svc_fh *fhp)
 		return;
 
 	map->fsid_type = fh->fh_fsid_type;
-	memcpy(&map->fsid, fh->fh_fsid, fsid_len);
+	memcpy(&map->fsid, fh_fsid(fh), fsid_len);
 
 	spin_lock(&nfsd_devid_lock);
 	if (fhp->fh_export->ex_devid_map)
@@ -75,7 +75,7 @@ nfsd4_alloc_devid_map(const struct svc_fh *fhp)
 		list_for_each_entry(old, &nfsd_devid_hash[i], hash) {
 			if (old->fsid_type != fh->fh_fsid_type)
 				continue;
-			if (memcmp(old->fsid, fh->fh_fsid,
+			if (memcmp(old->fsid, fh_fsid(fh),
 					key_len(old->fsid_type)))
 				continue;
 
@@ -120,7 +120,6 @@ nfsd4_set_deviceid(struct nfsd4_deviceid *id, const struct svc_fh *fhp,
 
 	id->fsid_idx = fhp->fh_export->ex_devid_map->idx;
 	id->generation = device_generation;
-	id->pad = 0;
 	return 0;
 }
 
@@ -250,16 +249,20 @@ nfsd4_alloc_layout_stateid(struct nfsd4_compound_state *cstate,
 	nfsd4_init_cb(&ls->ls_recall, clp, &nfsd4_cb_layout_ops,
 			NFSPROC4_CLNT_CB_LAYOUT);
 
-	if (parent->sc_type == SC_TYPE_DELEG)
+	if (parent->sc_type == SC_TYPE_DELEG) {
+		spin_lock(&fp->fi_lock);
 		ls->ls_file = nfsd_file_get(fp->fi_deleg_file);
-	else
+		spin_unlock(&fp->fi_lock);
+	} else {
 		ls->ls_file = find_any_file(fp);
-	BUG_ON(!ls->ls_file);
+	}
+	if (!ls->ls_file) {
+		nfs4_put_stid(stp);
+		return NULL;
+	}
 
 	if (nfsd4_layout_setlease(ls)) {
-		nfsd_file_put(ls->ls_file);
-		put_nfs4_file(fp);
-		kmem_cache_free(nfs4_layout_stateid_cache, ls);
+		nfs4_put_stid(stp);
 		return NULL;
 	}
 
@@ -344,9 +347,10 @@ nfsd4_recall_file_layout(struct nfs4_layout_stateid *ls)
 	atomic_inc(&ls->ls_stid.sc_file->fi_lo_recalls);
 	trace_nfsd_layout_recall(&ls->ls_stid.sc_stateid);
 
-	refcount_inc(&ls->ls_stid.sc_count);
-	nfsd4_run_cb(&ls->ls_recall);
-
+	if (!test_and_set_bit(NFSD4_CALLBACK_RUNNING, &ls->ls_recall.cb_flags)) {
+		refcount_inc(&ls->ls_stid.sc_count);
+		nfsd4_run_cb(&ls->ls_recall);
+	}
 out_unlock:
 	spin_unlock(&ls->ls_lock);
 }

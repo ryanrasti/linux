@@ -202,8 +202,8 @@ static void rds_recv_hs_exthdrs(struct rds_header *hdr,
 	unsigned int pos = 0, type, len;
 	union {
 		struct rds_ext_header_version version;
-		u16 rds_npaths;
-		u32 rds_gen_num;
+		__be16 rds_npaths;
+		__be32 rds_gen_num;
 	} buffer;
 	u32 new_peer_gen_num = 0;
 
@@ -363,6 +363,21 @@ void rds_recv_incoming(struct rds_connection *conn, struct in6_addr *saddr,
 	rs = rds_find_bound(daddr, inc->i_hdr.h_dport, conn->c_bound_if);
 	if (!rs) {
 		rds_stats_inc(s_recv_drop_no_sock);
+		goto out;
+	}
+
+	/*
+	 * rds_find_bound() uses a global (netns-agnostic) hash table.
+	 * An RDS connection created in netns A can match a socket bound
+	 * in the init netns, delivering inc cross-netns with inc->i_conn
+	 * pointing into netns A.  When cleanup_net() then frees that conn,
+	 * any subsequent dereference of inc->i_conn is a use-after-free.
+	 * Drop the inc if the receiving socket lives in a different netns.
+	 */
+	if (!net_eq(sock_net(rds_rs_to_sk(rs)), rds_conn_net(conn))) {
+		rds_stats_inc(s_recv_drop_no_sock);
+		rds_sock_put(rs);
+		rs = NULL;
 		goto out;
 	}
 

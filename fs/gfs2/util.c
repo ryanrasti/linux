@@ -73,7 +73,7 @@ int check_journal_clean(struct gfs2_sbd *sdp, struct gfs2_jdesc *jd,
 			       "mount.\n");
 		goto out_unlock;
 	}
-	error = gfs2_find_jhead(jd, &head, false);
+	error = gfs2_find_jhead(jd, &head);
 	if (error) {
 		if (verbose)
 			fs_err(sdp, "Error parsing journal for spectator "
@@ -232,31 +232,22 @@ static void signal_our_withdraw(struct gfs2_sbd *sdp)
 	 */
 	ret = gfs2_glock_nq(&sdp->sd_live_gh);
 
-	/*
-	 * If we actually got the "live" lock in EX mode, there are no other
-	 * nodes available to replay our journal. So we try to replay it
-	 * ourselves. We hold the "live" glock to prevent other mounters
-	 * during recovery, then just dequeue it and reacquire it in our
-	 * normal SH mode. Just in case the problem that caused us to
-	 * withdraw prevents us from recovering our journal (e.g. io errors
-	 * and such) we still check if the journal is clean before proceeding
-	 * but we may wait forever until another mounter does the recovery.
-	 */
-	if (ret == 0) {
-		fs_warn(sdp, "No other mounters found. Trying to recover our "
-			"own journal jid %d.\n", sdp->sd_lockstruct.ls_jid);
-		if (gfs2_recover_journal(sdp->sd_jdesc, 1))
-			fs_warn(sdp, "Unable to recover our journal jid %d.\n",
-				sdp->sd_lockstruct.ls_jid);
-		gfs2_glock_dq_wait(&sdp->sd_live_gh);
-		gfs2_holder_reinit(LM_ST_SHARED,
-				   LM_FLAG_NOEXP | GL_EXACT | GL_NOPID,
-				   &sdp->sd_live_gh);
-		gfs2_glock_nq(&sdp->sd_live_gh);
-	}
-
 	gfs2_glock_put(live_gl); /* drop extra reference we acquired */
 	clear_bit(SDF_WITHDRAW_RECOVERY, &sdp->sd_flags);
+
+	/*
+	 * If we actually got the "live" lock in EX mode, there are no other
+	 * nodes available to replay our journal.
+	 */
+	if (ret == 0) {
+		fs_warn(sdp, "No other mounters found.\n");
+		/*
+		 * We are about to release the lockspace.  By keeping live_gl
+		 * locked here, we ensure that the next mounter coming along
+		 * will be a "first" mounter which will perform recovery.
+		 */
+		goto skip_recovery;
+	}
 
 	/*
 	 * At this point our journal is evicted, so we need to get a new inode
@@ -318,49 +309,54 @@ void gfs2_lm(struct gfs2_sbd *sdp, const char *fmt, ...)
 	va_end(args);
 }
 
-int gfs2_withdraw(struct gfs2_sbd *sdp)
+void gfs2_withdraw_func(struct work_struct *work)
 {
+	struct gfs2_sbd *sdp = container_of(work, struct gfs2_sbd, sd_withdraw_work);
 	struct lm_lockstruct *ls = &sdp->sd_lockstruct;
 	const struct lm_lockops *lm = ls->ls_ops;
 
+	if (test_bit(SDF_KILL, &sdp->sd_flags))
+		return;
+
+	BUG_ON(sdp->sd_args.ar_debug);
+
+	signal_our_withdraw(sdp);
+
+	kobject_uevent(&sdp->sd_kobj, KOBJ_OFFLINE);
+
+	if (!strcmp(sdp->sd_lockstruct.ls_ops->lm_proto_name, "lock_dlm"))
+		wait_for_completion(&sdp->sd_wdack);
+
+	if (lm->lm_unmount)
+		lm->lm_unmount(sdp, false);
+	fs_err(sdp, "file system withdrawn\n");
+	clear_bit(SDF_WITHDRAW_IN_PROG, &sdp->sd_flags);
+}
+
+void gfs2_withdraw(struct gfs2_sbd *sdp)
+{
 	if (sdp->sd_args.ar_errors == GFS2_ERRORS_WITHDRAW) {
 		unsigned long old = READ_ONCE(sdp->sd_flags), new;
 
 		do {
-			if (old & BIT(SDF_WITHDRAWN)) {
-				wait_on_bit(&sdp->sd_flags,
-					    SDF_WITHDRAW_IN_PROG,
-					    TASK_UNINTERRUPTIBLE);
-				return -1;
-			}
+			if (old & BIT(SDF_WITHDRAWN))
+				return;
 			new = old | BIT(SDF_WITHDRAWN) | BIT(SDF_WITHDRAW_IN_PROG);
 		} while (unlikely(!try_cmpxchg(&sdp->sd_flags, &old, new)));
 
-		fs_err(sdp, "about to withdraw this file system\n");
-		BUG_ON(sdp->sd_args.ar_debug);
-
-		signal_our_withdraw(sdp);
-
-		kobject_uevent(&sdp->sd_kobj, KOBJ_OFFLINE);
-
-		if (!strcmp(sdp->sd_lockstruct.ls_ops->lm_proto_name, "lock_dlm"))
-			wait_for_completion(&sdp->sd_wdack);
-
-		if (lm->lm_unmount) {
-			fs_err(sdp, "telling LM to unmount\n");
-			lm->lm_unmount(sdp);
-		}
-		fs_err(sdp, "File system withdrawn\n");
 		dump_stack();
-		clear_bit(SDF_WITHDRAW_IN_PROG, &sdp->sd_flags);
-		smp_mb__after_atomic();
-		wake_up_bit(&sdp->sd_flags, SDF_WITHDRAW_IN_PROG);
+		/*
+		 * There is no need to withdraw when the superblock hasn't been
+		 * fully initialized, yet.
+		 */
+		if (!(sdp->sd_vfs->s_flags & SB_BORN))
+			return;
+		fs_err(sdp, "about to withdraw this file system\n");
+		schedule_work(&sdp->sd_withdraw_work);
 	}
 
 	if (sdp->sd_args.ar_errors == GFS2_ERRORS_PANIC)
 		panic("GFS2: fsid=%s: panic requested\n", sdp->sd_fsname);
-
-	return -1;
 }
 
 /*
@@ -368,10 +364,9 @@ int gfs2_withdraw(struct gfs2_sbd *sdp)
  */
 
 void gfs2_assert_withdraw_i(struct gfs2_sbd *sdp, char *assertion,
-			    const char *function, char *file, unsigned int line,
-			    bool delayed)
+			    const char *function, char *file, unsigned int line)
 {
-	if (gfs2_withdrawing_or_withdrawn(sdp))
+	if (gfs2_withdrawn(sdp))
 		return;
 
 	fs_err(sdp,
@@ -379,17 +374,7 @@ void gfs2_assert_withdraw_i(struct gfs2_sbd *sdp, char *assertion,
 	       "function = %s, file = %s, line = %u\n",
 	       assertion, function, file, line);
 
-	/*
-	 * If errors=panic was specified on mount, it won't help to delay the
-	 * withdraw.
-	 */
-	if (sdp->sd_args.ar_errors == GFS2_ERRORS_PANIC)
-		delayed = false;
-
-	if (delayed)
-		gfs2_withdraw_delayed(sdp);
-	else
-		gfs2_withdraw(sdp);
+	gfs2_withdraw(sdp);
 	dump_stack();
 }
 
@@ -482,46 +467,36 @@ void gfs2_consist_rgrpd_i(struct gfs2_rgrpd *rgd,
 
 /*
  * gfs2_meta_check_ii - Flag a magic number consistency error and withdraw
- * Returns: -1 if this call withdrew the machine,
- *          -2 if it was already withdrawn
  */
 
-int gfs2_meta_check_ii(struct gfs2_sbd *sdp, struct buffer_head *bh,
-		       const char *function, char *file,
-		       unsigned int line)
+void gfs2_meta_check_ii(struct gfs2_sbd *sdp, struct buffer_head *bh,
+			const char *function, char *file,
+			unsigned int line)
 {
-	int me;
-
 	gfs2_lm(sdp,
 		"fatal: invalid metadata block - "
 		"bh = %llu (bad magic number), "
 		"function = %s, file = %s, line = %u\n",
 		(unsigned long long)bh->b_blocknr,
 		function, file, line);
-	me = gfs2_withdraw(sdp);
-	return (me) ? -1 : -2;
+	gfs2_withdraw(sdp);
 }
 
 /*
  * gfs2_metatype_check_ii - Flag a metadata type consistency error and withdraw
- * Returns: -1 if this call withdrew the machine,
- *          -2 if it was already withdrawn
  */
 
-int gfs2_metatype_check_ii(struct gfs2_sbd *sdp, struct buffer_head *bh,
-			   u16 type, u16 t, const char *function,
-			   char *file, unsigned int line)
+void gfs2_metatype_check_ii(struct gfs2_sbd *sdp, struct buffer_head *bh,
+			    u16 type, u16 t, const char *function,
+			    char *file, unsigned int line)
 {
-	int me;
-
 	gfs2_lm(sdp,
 		"fatal: invalid metadata block - "
 		"bh = %llu (type: exp=%u, found=%u), "
 		"function = %s, file = %s, line = %u\n",
 		(unsigned long long)bh->b_blocknr, type, t,
 		function, file, line);
-	me = gfs2_withdraw(sdp);
-	return (me) ? -1 : -2;
+	gfs2_withdraw(sdp);
 }
 
 /*
@@ -530,14 +505,14 @@ int gfs2_metatype_check_ii(struct gfs2_sbd *sdp, struct buffer_head *bh,
  *          0 if it was already withdrawn
  */
 
-int gfs2_io_error_i(struct gfs2_sbd *sdp, const char *function, char *file,
-		    unsigned int line)
+void gfs2_io_error_i(struct gfs2_sbd *sdp, const char *function, char *file,
+		     unsigned int line)
 {
 	gfs2_lm(sdp,
 		"fatal: I/O error - "
 		"function = %s, file = %s, line = %u\n",
 		function, file, line);
-	return gfs2_withdraw(sdp);
+	gfs2_withdraw(sdp);
 }
 
 /*
@@ -549,7 +524,7 @@ void gfs2_io_error_bh_i(struct gfs2_sbd *sdp, struct buffer_head *bh,
 			const char *function, char *file, unsigned int line,
 			bool withdraw)
 {
-	if (gfs2_withdrawing_or_withdrawn(sdp))
+	if (gfs2_withdrawn(sdp))
 		return;
 
 	fs_err(sdp, "fatal: I/O error - "

@@ -119,6 +119,9 @@ xfs_exchrange_reserve_quota(
 	int				ip1_error = 0;
 	int				error;
 
+	ASSERT(!xfs_is_metadir_inode(req->ip1));
+	ASSERT(!xfs_is_metadir_inode(req->ip2));
+
 	/*
 	 * Don't bother with a quota reservation if we're not enforcing them
 	 * or the two inodes have the same dquots.
@@ -217,7 +220,7 @@ xfs_exchrange_mappings(
 	 * length in @fxr are safe to round up.
 	 */
 	if (xfs_inode_has_bigrtalloc(ip2))
-		req.blockcount = xfs_rtb_roundup_rtx(mp, req.blockcount);
+		req.blockcount = xfs_blen_roundup_rtx(mp, req.blockcount);
 
 	error = xfs_exchrange_estimate(&req);
 	if (error)
@@ -287,17 +290,20 @@ retry:
 		goto out_unlock;
 
 	/*
-	 * If the caller wanted us to exchange the contents of two complete
-	 * files of unequal length, exchange the incore sizes now.  This should
-	 * be safe because we flushed both files' page caches, exchanged all
-	 * the mappings, and updated the ondisk sizes.
+	 * If the caller wanted, set each file's size to that file's exchange
+	 * offset + length exchanged from the other file because the ranges in
+	 * each file might be different lengths.  This should be safe because
+	 * we flushed both files' page caches, exchanged all the mappings, and
+	 * updated the ondisk sizes.
 	 */
 	if (fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF) {
-		loff_t	temp;
+		loff_t	old_ip1_size = i_size_read(VFS_I(ip1));
+		loff_t	old_ip2_size = i_size_read(VFS_I(ip2));
 
-		temp = i_size_read(VFS_I(ip2));
-		i_size_write(VFS_I(ip2), i_size_read(VFS_I(ip1)));
-		i_size_write(VFS_I(ip1), temp);
+		i_size_write(VFS_I(ip2), fxr->file2_offset +
+				(old_ip1_size - fxr->file1_offset));
+		i_size_write(VFS_I(ip1), fxr->file1_offset +
+				(old_ip2_size - fxr->file2_offset));
 	}
 
 out_unlock:
@@ -326,22 +332,6 @@ out_trans_cancel:
  * successfully but before locks are dropped.
  */
 
-/* Verify that we have security clearance to perform this operation. */
-static int
-xfs_exchange_range_verify_area(
-	struct xfs_exchrange	*fxr)
-{
-	int			ret;
-
-	ret = remap_verify_area(fxr->file1, fxr->file1_offset, fxr->length,
-			true);
-	if (ret)
-		return ret;
-
-	return remap_verify_area(fxr->file2, fxr->file2_offset, fxr->length,
-			true);
-}
-
 /*
  * Performs necessary checks before doing a range exchange, having stabilized
  * mutable inode attributes via i_rwsem.
@@ -352,11 +342,13 @@ xfs_exchange_range_checks(
 	unsigned int		alloc_unit)
 {
 	struct inode		*inode1 = file_inode(fxr->file1);
+	loff_t			size1 = i_size_read(inode1);
 	struct inode		*inode2 = file_inode(fxr->file2);
+	loff_t			size2 = i_size_read(inode2);
 	uint64_t		allocmask = alloc_unit - 1;
 	int64_t			test_len;
 	uint64_t		blen;
-	loff_t			size1, size2, tmp;
+	loff_t			tmp;
 	int			error;
 
 	/* Don't touch certain kinds of inodes */
@@ -365,24 +357,25 @@ xfs_exchange_range_checks(
 	if (IS_SWAPFILE(inode1) || IS_SWAPFILE(inode2))
 		return -ETXTBSY;
 
-	size1 = i_size_read(inode1);
-	size2 = i_size_read(inode2);
-
 	/* Ranges cannot start after EOF. */
 	if (fxr->file1_offset > size1 || fxr->file2_offset > size2)
 		return -EINVAL;
 
-	/*
-	 * If the caller said to exchange to EOF, we set the length of the
-	 * request large enough to cover everything to the end of both files.
-	 */
 	if (fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF) {
+		/*
+		 * If the caller said to exchange to EOF, we set the length of
+		 * the request large enough to cover everything to the end of
+		 * both files.
+		 */
 		fxr->length = max_t(int64_t, size1 - fxr->file1_offset,
 					     size2 - fxr->file2_offset);
-
-		error = xfs_exchange_range_verify_area(fxr);
-		if (error)
-			return error;
+	} else {
+		/*
+		 * Otherwise we require both ranges to end within EOF.
+		 */
+		if (fxr->file1_offset + fxr->length > size1 ||
+		    fxr->file2_offset + fxr->length > size2)
+			return -EINVAL;
 	}
 
 	/*
@@ -396,15 +389,6 @@ xfs_exchange_range_checks(
 	/* Ensure offsets don't wrap. */
 	if (check_add_overflow(fxr->file1_offset, fxr->length, &tmp) ||
 	    check_add_overflow(fxr->file2_offset, fxr->length, &tmp))
-		return -EINVAL;
-
-	/*
-	 * We require both ranges to end within EOF, unless we're exchanging
-	 * to EOF.
-	 */
-	if (!(fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF) &&
-	    (fxr->file1_offset + fxr->length > size1 ||
-	     fxr->file2_offset + fxr->length > size2))
 		return -EINVAL;
 
 	/*
@@ -464,6 +448,30 @@ xfs_exchange_range_checks(
 	return blen == fxr->length ? 0 : -EINVAL;
 }
 
+/* Flush all relevant dirty pagecache near the range to be exchanged. */
+static inline int
+xfs_exchange_range_flush(
+	struct xfs_inode		*ip,
+	const struct xfs_exchrange	*fxr,
+	loff_t				offset)
+{
+	/*
+	 * If TO_EOF is set, the ondisk file size update logic depends on the
+	 * ondisk file size matching the incore file size.  Flush everything.
+	 */
+	if (fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF)
+		return filemap_write_and_wait(VFS_I(ip)->i_mapping);
+
+	/*
+	 * Because we're updating the ondisk mappings, flush all dirty data
+	 * between the ondisk size and the exchange offset to reduce the chance
+	 * of zeroed file contents in that gap after a crash.
+	 */
+	return filemap_write_and_wait_range(VFS_I(ip)->i_mapping,
+			min(offset, ip->i_disk_size),
+			offset + fxr->length - 1);
+}
+
 /*
  * Check that the two inodes are eligible for range exchanges, the ranges make
  * sense, and then flush all dirty data.  Caller must ensure that the inodes
@@ -489,15 +497,11 @@ xfs_exchange_range_prep(
 	if (!same_inode)
 		inode_dio_wait(inode2);
 
-	error = filemap_write_and_wait_range(inode1->i_mapping,
-			fxr->file1_offset,
-			fxr->file1_offset + fxr->length - 1);
+	error = xfs_exchange_range_flush(XFS_I(inode1), fxr, fxr->file1_offset);
 	if (error)
 		return error;
 
-	error = filemap_write_and_wait_range(inode2->i_mapping,
-			fxr->file2_offset,
-			fxr->file2_offset + fxr->length - 1);
+	error = xfs_exchange_range_flush(XFS_I(inode2), fxr, fxr->file2_offset);
 	if (error)
 		return error;
 
@@ -522,6 +526,9 @@ xfs_exchange_range_finish(
 	struct xfs_exchrange	*fxr)
 {
 	int			error;
+
+	if (fxr->flags & XFS_EXCHANGE_RANGE_DRY_RUN)
+		return 0;
 
 	error = file_remove_privs(fxr->file1);
 	if (error)
@@ -649,6 +656,9 @@ xfs_exchrange_prep(
 	if (error)
 		return error;
 
+	if (fxr->flags & XFS_EXCHANGE_RANGE_DRY_RUN)
+		return 0;
+
 	trace_xfs_exchrange_flush(fxr, ip1, ip2);
 
 	/* Flush the relevant ranges of both files. */
@@ -725,9 +735,11 @@ xfs_exchrange_contents(
 	 * other file write would do.  This may involve turning on support for
 	 * logged xattrs if either file has security capabilities.
 	 */
-	error = xfs_exchange_range_finish(fxr);
-	if (error)
-		goto out_unlock;
+	if (!(fxr->flags & XFS_EXCHANGE_RANGE_DRY_RUN)) {
+		error = xfs_exchange_range_finish(fxr);
+		if (error)
+			goto out_unlock;
+	}
 
 out_unlock:
 	xfs_iunlock2_io_mmap(ip1, ip2);
@@ -744,6 +756,7 @@ xfs_exchange_range(
 {
 	struct inode		*inode1 = file_inode(fxr->file1);
 	struct inode		*inode2 = file_inode(fxr->file2);
+	loff_t			check_len = fxr->length;
 	int			ret;
 
 	BUILD_BUG_ON(XFS_EXCHANGE_RANGE_ALL_FLAGS &
@@ -776,14 +789,18 @@ xfs_exchange_range(
 		return -EBADF;
 
 	/*
-	 * If we're not exchanging to EOF, we can check the areas before
-	 * stabilizing both files' i_size.
+	 * If we're exchanging to EOF we can't calculate the length until taking
+	 * the iolock.  Pass a 0 length to remap_verify_area similar to the
+	 * FICLONE and FICLONERANGE ioctls that support cloning to EOF as well.
 	 */
-	if (!(fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF)) {
-		ret = xfs_exchange_range_verify_area(fxr);
-		if (ret)
-			return ret;
-	}
+	if (fxr->flags & XFS_EXCHANGE_RANGE_TO_EOF)
+		check_len = 0;
+	ret = remap_verify_area(fxr->file1, fxr->file1_offset, check_len, true);
+	if (ret)
+		return ret;
+	ret = remap_verify_area(fxr->file2, fxr->file2_offset, check_len, true);
+	if (ret)
+		return ret;
 
 	/* Update cmtime if the fd/inode don't forbid it. */
 	if (!(fxr->file1->f_mode & FMODE_NOCMTIME) && !IS_NOCMTIME(inode1))
@@ -797,9 +814,12 @@ xfs_exchange_range(
 	if (ret)
 		return ret;
 
-	fsnotify_modify(fxr->file1);
-	if (fxr->file2 != fxr->file1)
-		fsnotify_modify(fxr->file2);
+	if (!(fxr->flags & XFS_EXCHANGE_RANGE_DRY_RUN)) {
+		fsnotify_modify(fxr->file1);
+		if (fxr->file2 != fxr->file1)
+			fsnotify_modify(fxr->file2);
+	}
+
 	return 0;
 }
 
@@ -813,8 +833,6 @@ xfs_ioc_exchange_range(
 		.file2			= file,
 	};
 	struct xfs_exchange_range	args;
-	struct fd			file1;
-	int				error;
 
 	if (copy_from_user(&args, argp, sizeof(args)))
 		return -EFAULT;
@@ -828,14 +846,12 @@ xfs_ioc_exchange_range(
 	fxr.length		= args.length;
 	fxr.flags		= args.flags;
 
-	file1 = fdget(args.file1_fd);
-	if (!fd_file(file1))
+	CLASS(fd, file1)(args.file1_fd);
+	if (fd_empty(file1))
 		return -EBADF;
 	fxr.file1 = fd_file(file1);
 
-	error = xfs_exchange_range(&fxr);
-	fdput(file1);
-	return error;
+	return xfs_exchange_range(&fxr);
 }
 
 /* Opaque freshness blob for XFS_IOC_COMMIT_RANGE */
@@ -858,7 +874,7 @@ xfs_ioc_start_commit(
 	struct xfs_commit_range __user	*argp)
 {
 	struct xfs_commit_range		args = { };
-	struct timespec64		ts;
+	struct kstat			kstat = { };
 	struct xfs_commit_range_fresh	*kern_f;
 	struct xfs_commit_range_fresh	__user *user_f;
 	struct inode			*inode2 = file_inode(file);
@@ -875,12 +891,12 @@ xfs_ioc_start_commit(
 	memcpy(&kern_f->fsid, ip2->i_mount->m_fixedfsid, sizeof(xfs_fsid_t));
 
 	xfs_ilock(ip2, lockflags);
-	ts = inode_get_ctime(inode2);
-	kern_f->file2_ctime		= ts.tv_sec;
-	kern_f->file2_ctime_nsec	= ts.tv_nsec;
-	ts = inode_get_mtime(inode2);
-	kern_f->file2_mtime		= ts.tv_sec;
-	kern_f->file2_mtime_nsec	= ts.tv_nsec;
+	/* Force writing of a distinct ctime if any writes happen. */
+	fill_mg_cmtime(&kstat, STATX_CTIME | STATX_MTIME, inode2);
+	kern_f->file2_ctime		= kstat.ctime.tv_sec;
+	kern_f->file2_ctime_nsec	= kstat.ctime.tv_nsec;
+	kern_f->file2_mtime		= kstat.mtime.tv_sec;
+	kern_f->file2_mtime_nsec	= kstat.mtime.tv_nsec;
 	kern_f->file2_ino		= ip2->i_ino;
 	kern_f->file2_gen		= inode2->i_generation;
 	kern_f->magic			= XCR_FRESH_MAGIC;
@@ -909,14 +925,12 @@ xfs_ioc_commit_range(
 	struct xfs_commit_range_fresh	*kern_f;
 	struct xfs_inode		*ip2 = XFS_I(file_inode(file));
 	struct xfs_mount		*mp = ip2->i_mount;
-	struct fd			file1;
-	int				error;
 
 	kern_f = (struct xfs_commit_range_fresh *)&args.file2_freshness;
 
 	if (copy_from_user(&args, argp, sizeof(args)))
 		return -EFAULT;
-	if (args.flags & ~XFS_EXCHANGE_RANGE_ALL_FLAGS)
+	if (args.pad || (args.flags & ~XFS_EXCHANGE_RANGE_ALL_FLAGS))
 		return -EINVAL;
 	if (kern_f->magic != XCR_FRESH_MAGIC)
 		return -EBUSY;
@@ -934,12 +948,10 @@ xfs_ioc_commit_range(
 	fxr.file2_ctime.tv_sec	= kern_f->file2_ctime;
 	fxr.file2_ctime.tv_nsec	= kern_f->file2_ctime_nsec;
 
-	file1 = fdget(args.file1_fd);
+	CLASS(fd, file1)(args.file1_fd);
 	if (fd_empty(file1))
 		return -EBADF;
 	fxr.file1 = fd_file(file1);
 
-	error = xfs_exchange_range(&fxr);
-	fdput(file1);
-	return error;
+	return xfs_exchange_range(&fxr);
 }

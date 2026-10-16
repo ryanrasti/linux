@@ -122,17 +122,19 @@ static const struct vm_operations_struct ext2_dax_vm_ops = {
 	.pfn_mkwrite	= ext2_dax_fault,
 };
 
-static int ext2_file_mmap(struct file *file, struct vm_area_struct *vma)
+static int ext2_file_mmap_prepare(struct vm_area_desc *desc)
 {
+	struct file *file = desc->file;
+
 	if (!IS_DAX(file_inode(file)))
-		return generic_file_mmap(file, vma);
+		return generic_file_mmap_prepare(desc);
 
 	file_accessed(file);
-	vma->vm_ops = &ext2_dax_vm_ops;
+	desc->vm_ops = &ext2_dax_vm_ops;
 	return 0;
 }
 #else
-#define ext2_file_mmap	generic_file_mmap
+#define ext2_file_mmap_prepare	generic_file_mmap_prepare
 #endif
 
 /*
@@ -262,12 +264,15 @@ static ssize_t ext2_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		endbyte = pos + status - 1;
 		ret2 = filemap_write_and_wait_range(inode->i_mapping, pos,
 						    endbyte);
-		if (!ret2)
+		if (!ret2) {
 			invalidate_mapping_pages(inode->i_mapping,
 						 pos >> PAGE_SHIFT,
 						 endbyte >> PAGE_SHIFT);
-		if (ret > 0)
-			generic_write_sync(iocb, ret);
+			if (ret > 0)
+				ret = generic_write_sync(iocb, ret);
+		} else {
+			ret = ret2;
+		}
 	}
 
 out_unlock:
@@ -316,7 +321,7 @@ const struct file_operations ext2_file_operations = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ext2_compat_ioctl,
 #endif
-	.mmap		= ext2_file_mmap,
+	.mmap_prepare	= ext2_file_mmap_prepare,
 	.open		= ext2_file_open,
 	.release	= ext2_release_file,
 	.fsync		= ext2_fsync,

@@ -905,8 +905,7 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 
 	return 0;
 err_free_status_page_and_wr_log:
-	if (c4iw_wr_log && rdev->wr_log)
-		kfree(rdev->wr_log);
+	kfree(rdev->wr_log);
 	free_page((unsigned long)rdev->status_page);
 destroy_ocqp_pool:
 	c4iw_ocqp_pool_destroy(rdev);
@@ -935,6 +934,7 @@ static void c4iw_rdev_close(struct c4iw_rdev *rdev)
 
 void c4iw_dealloc(struct uld_ctx *ctx)
 {
+	debugfs_remove_recursive(ctx->dev->debugfs_root);
 	c4iw_rdev_close(&ctx->dev->rdev);
 	WARN_ON(!xa_empty(&ctx->dev->cqs));
 	WARN_ON(!xa_empty(&ctx->dev->qps));
@@ -953,7 +953,12 @@ void c4iw_dealloc(struct uld_ctx *ctx)
 static void c4iw_remove(struct uld_ctx *ctx)
 {
 	pr_debug("c4iw_dev %p\n", ctx->dev);
-	debugfs_remove_recursive(ctx->dev->debugfs_root);
+
+	/* c4iw_register_device() may still be using ctx->dev. */
+	cancel_work_sync(&ctx->reg_work);
+	if (!ctx->dev)
+		return;
+
 	c4iw_unregister_device(ctx->dev);
 	c4iw_dealloc(ctx);
 }
@@ -1114,8 +1119,10 @@ static inline struct sk_buff *copy_gl_to_skb_pkt(const struct pkt_gl *gl,
 	 * The math here assumes sizeof cpl_pass_accept_req >= sizeof
 	 * cpl_rx_pkt.
 	 */
-	skb = alloc_skb(gl->tot_len + sizeof(struct cpl_pass_accept_req) +
-			sizeof(struct rss_header) - pktshift, GFP_ATOMIC);
+	skb = alloc_skb(size_add(gl->tot_len,
+				 sizeof(struct cpl_pass_accept_req) +
+				 sizeof(struct rss_header)) - pktshift,
+			GFP_ATOMIC);
 	if (unlikely(!skb))
 		return NULL;
 
@@ -1227,9 +1234,8 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 		if (!ctx->dev) {
 			ctx->dev = c4iw_alloc(&ctx->lldi);
 			if (IS_ERR(ctx->dev)) {
-				pr_err("%s: initialization failed: %ld\n",
-				       pci_name(ctx->lldi.pdev),
-				       PTR_ERR(ctx->dev));
+				pr_err("%s: initialization failed: %pe\n",
+				       pci_name(ctx->lldi.pdev), ctx->dev);
 				ctx->dev = NULL;
 				break;
 			}

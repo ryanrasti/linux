@@ -30,6 +30,7 @@
 #define OTX2_UNSUPP_LSE_DEPTH		GENMASK(6, 4)
 
 #define MCAST_INVALID_GRP		(-1U)
+#define RATE_MANTISSA_BITS		8
 
 struct otx2_tc_flow_stats {
 	u64 bytes;
@@ -77,10 +78,12 @@ static void otx2_get_egress_burst_cfg(struct otx2_nic *nic, u32 burst,
 	if (burst) {
 		*burst_exp = ilog2(burst) ? ilog2(burst) - 1 : 0;
 		tmp = burst - rounddown_pow_of_two(burst);
-		if (burst < max_mantissa)
+		if (burst <= max_mantissa) {
 			*burst_mantissa = tmp * 2;
-		else
+		} else {
+			WARN_ON(*burst_exp < 7);
 			*burst_mantissa = tmp / (1ULL << (*burst_exp - 7));
+		}
 	} else {
 		*burst_exp = MAX_BURST_EXPONENT;
 		*burst_mantissa = max_mantissa;
@@ -90,28 +93,30 @@ static void otx2_get_egress_burst_cfg(struct otx2_nic *nic, u32 burst,
 static void otx2_get_egress_rate_cfg(u64 maxrate, u32 *exp,
 				     u32 *mantissa, u32 *div_exp)
 {
-	u64 tmp;
-
 	/* Rate calculation by hardware
 	 *
 	 * PIR_ADD = ((256 + mantissa) << exp) / 256
 	 * rate = (2 * PIR_ADD) / ( 1 << div_exp)
 	 * The resultant rate is in Mbps.
+	 *
+	 * Use div_exp = 0 and compute exp/mantissa for maxrate / 2; the
+	 * leading factor of two yields the full rate. Rates below 2 Mbps
+	 * are floored to the smallest step (exp = 0, mantissa = 0).
 	 */
 
-	/* 2Mbps to 100Gbps can be expressed with div_exp = 0.
-	 * Setting this to '0' will ease the calculation of
-	 * exponent and mantissa.
-	 */
 	*div_exp = 0;
-
 	if (maxrate) {
-		*exp = ilog2(maxrate) ? ilog2(maxrate) - 1 : 0;
-		tmp = maxrate - rounddown_pow_of_two(maxrate);
-		if (maxrate < MAX_RATE_MANTISSA)
-			*mantissa = tmp * 2;
-		else
-			*mantissa = tmp / (1ULL << (*exp - 7));
+		maxrate = maxrate / 2;
+		if (!maxrate) {
+			/* Rates below 2 Mbps map to the smallest step */
+			*exp = 0;
+			*mantissa = 0;
+		} else {
+			*exp = ilog2(maxrate);
+			/* Clear MSB and derive fractional bits */
+			maxrate &= ~BIT(*exp);
+			*mantissa = (maxrate << RATE_MANTISSA_BITS) >> *exp;
+		}
 	} else {
 		/* Instead of disabling rate limiting, set all values to max */
 		*exp = MAX_RATE_EXPONENT;
@@ -443,6 +448,7 @@ static int otx2_tc_parse_actions(struct otx2_nic *nic,
 	struct flow_action_entry *act;
 	struct net_device *target;
 	struct otx2_nic *priv;
+	struct rep_dev *rdev;
 	u32 burst, mark = 0;
 	u8 nr_police = 0;
 	u8 num_intf = 1;
@@ -464,14 +470,19 @@ static int otx2_tc_parse_actions(struct otx2_nic *nic,
 			return 0;
 		case FLOW_ACTION_REDIRECT_INGRESS:
 			target = act->dev;
-			priv = netdev_priv(target);
-			/* npc_install_flow_req doesn't support passing a target pcifunc */
-			if (rvu_get_pf(nic->pcifunc) != rvu_get_pf(priv->pcifunc)) {
-				NL_SET_ERR_MSG_MOD(extack,
-						   "can't redirect to other pf/vf");
-				return -EOPNOTSUPP;
+			if (target->dev.parent) {
+				priv = netdev_priv(target);
+				if (rvu_get_pf(nic->pdev, nic->pcifunc) !=
+					rvu_get_pf(nic->pdev, priv->pcifunc)) {
+					NL_SET_ERR_MSG_MOD(extack,
+							   "can't redirect to other pf/vf");
+					return -EOPNOTSUPP;
+				}
+				req->vf = priv->pcifunc & RVU_PFVF_FUNC_MASK;
+			} else {
+				rdev = netdev_priv(target);
+				req->vf = rdev->pcifunc & RVU_PFVF_FUNC_MASK;
 			}
-			req->vf = priv->pcifunc & RVU_PFVF_FUNC_MASK;
 
 			/* if op is already set; avoid overwriting the same */
 			if (!req->op)
@@ -1300,6 +1311,7 @@ static int otx2_tc_add_flow(struct otx2_nic *nic,
 	req->channel = nic->hw.rx_chan_base;
 	req->entry = flow_cfg->flow_ent[mcam_idx];
 	req->intf = NIX_INTF_RX;
+	req->vf = nic->pcifunc;
 	req->set_cntr = 1;
 	new_node->entry = req->entry;
 
@@ -1319,7 +1331,6 @@ static int otx2_tc_add_flow(struct otx2_nic *nic,
 
 free_leaf:
 	otx2_tc_del_from_flow_list(flow_cfg, new_node);
-	kfree_rcu(new_node, rcu);
 	if (new_node->is_act_police) {
 		mutex_lock(&nic->mbox.lock);
 
@@ -1339,6 +1350,7 @@ free_leaf:
 
 		mutex_unlock(&nic->mbox.lock);
 	}
+	kfree_rcu(new_node, rcu);
 
 	return rc;
 }
@@ -1400,8 +1412,8 @@ static int otx2_tc_get_flow_stats(struct otx2_nic *nic,
 	return 0;
 }
 
-static int otx2_setup_tc_cls_flower(struct otx2_nic *nic,
-				    struct flow_cls_offload *cls_flower)
+int otx2_setup_tc_cls_flower(struct otx2_nic *nic,
+			     struct flow_cls_offload *cls_flower)
 {
 	switch (cls_flower->command) {
 	case FLOW_CLS_REPLACE:
@@ -1414,6 +1426,7 @@ static int otx2_setup_tc_cls_flower(struct otx2_nic *nic,
 		return -EOPNOTSUPP;
 	}
 }
+EXPORT_SYMBOL(otx2_setup_tc_cls_flower);
 
 static int otx2_tc_ingress_matchall_install(struct otx2_nic *nic,
 					    struct tc_cls_matchall_offload *cls)

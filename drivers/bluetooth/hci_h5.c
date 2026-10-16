@@ -149,7 +149,7 @@ static void h5_timed_event(struct timer_list *t)
 {
 	const unsigned char sync_req[] = { 0x01, 0x7e };
 	unsigned char conf_req[3] = { 0x03, 0xfc };
-	struct h5 *h5 = from_timer(h5, t, timer);
+	struct h5 *h5 = timer_container_of(h5, t, timer);
 	struct hci_uart *hu = h5->hu;
 	struct sk_buff *skb;
 	unsigned long flags;
@@ -197,7 +197,7 @@ static void h5_peer_reset(struct hci_uart *hu)
 
 	h5->state = H5_UNINITIALIZED;
 
-	del_timer(&h5->timer);
+	timer_delete(&h5->timer);
 
 	skb_queue_purge(&h5->rel);
 	skb_queue_purge(&h5->unrel);
@@ -254,7 +254,7 @@ static int h5_close(struct hci_uart *hu)
 {
 	struct h5 *h5 = hu->priv;
 
-	del_timer_sync(&h5->timer);
+	timer_delete_sync(&h5->timer);
 
 	skb_queue_purge(&h5->unack);
 	skb_queue_purge(&h5->rel);
@@ -318,7 +318,7 @@ static void h5_pkt_cull(struct h5 *h5)
 	}
 
 	if (skb_queue_empty(&h5->unack))
-		del_timer(&h5->timer);
+		timer_delete(&h5->timer);
 
 unlock:
 	spin_unlock_irqrestore(&h5->unack.lock, flags);
@@ -987,8 +987,10 @@ static void h5_btrtl_open(struct h5 *h5)
 
 static void h5_btrtl_close(struct h5 *h5)
 {
-	if (!test_bit(H5_WAKEUP_DISABLE, &h5->flags))
+	if (!test_bit(H5_WAKEUP_DISABLE, &h5->flags)) {
+		pm_runtime_dont_use_autosuspend(&h5->hu->serdev->dev);
 		pm_runtime_disable(&h5->hu->serdev->dev);
+	}
 
 	gpiod_set_value_cansleep(h5->device_wake_gpio, 0);
 	gpiod_set_value_cansleep(h5->enable_gpio, 0);

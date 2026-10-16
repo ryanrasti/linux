@@ -333,6 +333,14 @@ static int _sci_clk_build(struct sci_clk_provider *provider,
 
 	init.ops = &sci_clk_ops;
 	init.num_parents = sci_clk->num_parents;
+
+	/*
+	 * A clock rate query to the SCI firmware will return 0 if either the
+	 * clock itself is disabled or the attached device/consumer is disabled.
+	 * This makes it inherently unsuitable for the caching of the clk
+	 * framework.
+	 */
+	init.flags = CLK_GET_RATE_NOCACHE;
 	sci_clk->hw.init = &init;
 
 	ret = devm_clk_hw_register(provider->dev, &sci_clk->hw);
@@ -480,12 +488,9 @@ static int ti_sci_scan_clocks_from_fw(struct sci_clk_provider *provider)
 		num_clks++;
 	}
 
-	provider->clocks = devm_kmalloc_array(dev, num_clks, sizeof(sci_clk),
-					      GFP_KERNEL);
+	provider->clocks = devm_kmemdup_array(dev, clks, num_clks, sizeof(sci_clk), GFP_KERNEL);
 	if (!provider->clocks)
 		return -ENOMEM;
-
-	memcpy(provider->clocks, clks, num_clks * sizeof(sci_clk));
 
 	provider->num_clocks = num_clks;
 

@@ -11,7 +11,9 @@
 #include <linux/bitfield.h>
 #include <linux/cleanup.h>
 #include <linux/device.h>
+#include <linux/dmi.h>
 #include <linux/errno.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/gpio/property.h>
 #include <linux/mfd/cs42l43.h>
@@ -229,6 +231,131 @@ static size_t cs42l43_spi_max_length(struct spi_device *spi)
 	return CS42L43_SPI_MAX_LENGTH;
 }
 
+/*
+ * Workaround needed for two speaker ID pins in one ACPI GpioIo() but
+ * the Linux-specific _DSD property only contains one pin.
+ * Create a temporary acpi_gpio_mapping pointing at both pins.
+ */
+static const struct acpi_gpio_params cs42l43_2bit_speaker_id_from_one_gpioio_params[] = {
+	[0] = {
+		.crs_entry_index = 0,
+		.line_index = 0,
+	},
+	[1] = {
+		.crs_entry_index = 0,
+		.line_index = 1,
+	},
+};
+
+static const struct acpi_gpio_mapping cs42l43_2bit_speaker_id_from_one_gpioio_mapping[] = {
+	{
+		.name = "spk-id-quirk-gpios",
+		.data = cs42l43_2bit_speaker_id_from_one_gpioio_params,
+		.size = ARRAY_SIZE(cs42l43_2bit_speaker_id_from_one_gpioio_params),
+	},
+	{ }
+};
+
+static int cs42l43_get_2bit_speaker_id_from_one_gpioio(struct cs42l43_spi *priv, int *result)
+{
+	struct fwnode_reference_args args;
+	struct acpi_device *adev;
+	struct gpio_desc *desc;
+	u32 spkid = 0;
+	int i, ret;
+
+	/* Use the _DSD property to get the node containing the GpioIo() */
+	ret = fwnode_property_get_reference_args(dev_fwnode(priv->dev), "spk-id-gpios",
+						 NULL, 3, 0, &args);
+	if (ret)
+		return ret;
+
+	struct fwnode_handle *fwnode __free(fwnode_handle) = args.fwnode;
+
+	/* An acpi_gpio_mapping must be added to the node that contains the GpioIo() */
+	adev = to_acpi_device_node(fwnode);
+	if (!adev)
+		return -EINVAL;
+
+	ret = acpi_dev_add_driver_gpios(adev, cs42l43_2bit_speaker_id_from_one_gpioio_mapping);
+	if (ret)
+		return ret;
+
+	/* gpiod_get_array() can't read from a mapping in a child node */
+	for (i = 0; i < ARRAY_SIZE(cs42l43_2bit_speaker_id_from_one_gpioio_params); i++) {
+		desc = fwnode_gpiod_get_index(fwnode, "spk-id-quirk", i, GPIOD_IN,
+					      dev_name(priv->dev));
+		if (IS_ERR(desc)) {
+			ret = PTR_ERR(desc);
+			goto out;
+		}
+
+		ret = gpiod_get_value_cansleep(desc);
+		gpiod_put(desc);
+		if (ret < 0)
+			goto out;
+
+		spkid |= (u32)ret << i;
+	}
+
+	dev_dbg(priv->dev, "spk-id-gpios = %u\n", spkid);
+	*result = spkid;
+	ret = 0;
+out:
+	acpi_dev_remove_driver_gpios(adev);
+
+	return ret;
+}
+
+static const struct dmi_system_id cs42l43_spk_id_quirks[] = {
+	{
+		.ident = "Dell XPS 13 DX13260",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_SKU, "0E53"),
+		},
+		.driver_data = cs42l43_get_2bit_speaker_id_from_one_gpioio,
+	},
+	{ }
+};
+
+static int cs42l43_get_speaker_id_gpios(struct cs42l43_spi *priv, int *result)
+{
+	const struct dmi_system_id *dmi_id;
+	struct gpio_descs *descs;
+	u32 spkid;
+	int i, ret;
+
+	dmi_id = dmi_first_match(cs42l43_spk_id_quirks);
+	if (dmi_id) {
+		int (*get_speaker_id)(struct cs42l43_spi *priv, int *result) = dmi_id->driver_data;
+
+		return get_speaker_id(priv, result);
+	}
+
+	descs = gpiod_get_array_optional(priv->dev, "spk-id", GPIOD_IN);
+	if (!descs)
+		return 0;
+	else if (IS_ERR(descs))
+		return PTR_ERR(descs);
+
+	spkid = 0;
+	for (i = 0; i < descs->ndescs; i++) {
+		ret = gpiod_get_value_cansleep(descs->desc[i]);
+		if (ret < 0)
+			goto err;
+
+		spkid |= (ret << i);
+	}
+
+	dev_dbg(priv->dev, "spk-id-gpios = %d\n", spkid);
+	*result = spkid;
+err:
+	gpiod_put_array(descs);
+
+	return ret;
+}
+
 static struct fwnode_handle *cs42l43_find_xu_node(struct fwnode_handle *fwnode)
 {
 	static const u32 func_smart_amp = 0x1;
@@ -265,7 +392,7 @@ static struct spi_board_info *cs42l43_create_bridge_amp(struct cs42l43_spi *priv
 	struct spi_board_info *info;
 
 	if (spkid >= 0) {
-		props = devm_kmalloc(priv->dev, sizeof(*props), GFP_KERNEL);
+		props = devm_kcalloc(priv->dev, 2, sizeof(*props), GFP_KERNEL);
 		if (!props)
 			return NULL;
 
@@ -306,6 +433,7 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 	struct fwnode_handle *fwnode = dev_fwnode(cs42l43->dev);
 	struct fwnode_handle *xu_fwnode __free(fwnode_handle) = cs42l43_find_xu_node(fwnode);
 	int nsidecars = 0;
+	int spkid = -EINVAL;
 	int ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
@@ -360,6 +488,18 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 	fwnode_property_read_u32(xu_fwnode, "01fa-sidecar-instances", &nsidecars);
 
 	if (nsidecars) {
+		ret = fwnode_property_read_u32(xu_fwnode, "01fa-spk-id-val", &spkid);
+		if (!ret) {
+			dev_dbg(priv->dev, "01fa-spk-id-val = %d\n", spkid);
+		} else if (ret != -EINVAL) {
+			return dev_err_probe(priv->dev, ret, "Failed to get spk-id-val\n");
+		} else {
+			ret = cs42l43_get_speaker_id_gpios(priv, &spkid);
+			if (ret < 0)
+				return dev_err_probe(priv->dev, ret,
+						     "Failed to get spk-id-gpios\n");
+		}
+
 		ret = software_node_register(&cs42l43_gpiochip_swnode);
 		if (ret)
 			return dev_err_probe(priv->dev, ret,
@@ -385,11 +525,6 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 	if (nsidecars) {
 		struct spi_board_info *ampl_info;
 		struct spi_board_info *ampr_info;
-		int spkid = -EINVAL;
-
-		fwnode_property_read_u32(xu_fwnode, "01fa-spk-id-val", &spkid);
-
-		dev_dbg(priv->dev, "Found speaker ID %d\n", spkid);
 
 		ampl_info = cs42l43_create_bridge_amp(priv, "cs35l56-left", 0, spkid);
 		if (!ampl_info)
@@ -426,7 +561,7 @@ static struct platform_driver cs42l43_spi_driver = {
 };
 module_platform_driver(cs42l43_spi_driver);
 
-MODULE_IMPORT_NS(GPIO_SWNODE);
+MODULE_IMPORT_NS("GPIO_SWNODE");
 MODULE_DESCRIPTION("CS42L43 SPI Driver");
 MODULE_AUTHOR("Lucas Tanure <tanureal@opensource.cirrus.com>");
 MODULE_AUTHOR("Maciej Strozek <mstrozek@opensource.cirrus.com>");

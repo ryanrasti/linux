@@ -452,17 +452,12 @@ static irqreturn_t omap_dsi_irq_handler(int irq, void *arg)
 
 #ifdef DSI_CATCH_MISSING_TE
 	if (irqstatus & DSI_IRQ_TE_TRIGGER)
-		del_timer(&dsi->te_timer);
+		timer_delete(&dsi->te_timer);
 #endif
 
-	/* make a copy and unlock, so that isrs can unregister
-	 * themselves */
-	memcpy(&dsi->isr_tables_copy, &dsi->isr_tables,
-		sizeof(dsi->isr_tables));
+	dsi_handle_isrs(&dsi->isr_tables, irqstatus, vcstatus, ciostatus);
 
 	spin_unlock(&dsi->irq_lock);
-
-	dsi_handle_isrs(&dsi->isr_tables_copy, irqstatus, vcstatus, ciostatus);
 
 	dsi_handle_irq_errors(dsi, irqstatus, vcstatus, ciostatus);
 
@@ -4617,6 +4612,7 @@ static const struct component_ops dsi_component_ops = {
  */
 
 static int dsi_bridge_attach(struct drm_bridge *bridge,
+			     struct drm_encoder *encoder,
 			     enum drm_bridge_attach_flags flags)
 {
 	struct dsi_data *dsi = drm_bridge_to_dsi(bridge);
@@ -4624,7 +4620,7 @@ static int dsi_bridge_attach(struct drm_bridge *bridge,
 	if (!(flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR))
 		return -EINVAL;
 
-	return drm_bridge_attach(bridge->encoder, dsi->output.next_bridge,
+	return drm_bridge_attach(encoder, dsi->output.next_bridge,
 				 bridge, flags);
 }
 
@@ -4700,7 +4696,6 @@ static const struct drm_bridge_funcs dsi_bridge_funcs = {
 
 static void dsi_bridge_init(struct dsi_data *dsi)
 {
-	dsi->bridge.funcs = &dsi_bridge_funcs;
 	dsi->bridge.of_node = dsi->host.dev->of_node;
 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
 
@@ -4893,9 +4888,9 @@ static int dsi_probe(struct platform_device *pdev)
 	unsigned int i;
 	int r;
 
-	dsi = devm_kzalloc(dev, sizeof(*dsi), GFP_KERNEL);
-	if (!dsi)
-		return -ENOMEM;
+	dsi = devm_drm_bridge_alloc(dev, struct dsi_data, bridge, &dsi_bridge_funcs);
+	if (IS_ERR(dsi))
+		return PTR_ERR(dsi);
 
 	dsi->dev = dev;
 	dev_set_drvdata(dev, dsi);
@@ -5093,7 +5088,7 @@ static const struct dev_pm_ops dsi_pm_ops = {
 
 struct platform_driver omap_dsihw_driver = {
 	.probe		= dsi_probe,
-	.remove_new	= dsi_remove,
+	.remove		= dsi_remove,
 	.driver         = {
 		.name   = "omapdss_dsi",
 		.pm	= &dsi_pm_ops,

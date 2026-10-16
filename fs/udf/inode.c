@@ -181,19 +181,23 @@ static void udf_write_failed(struct address_space *mapping, loff_t to)
 	}
 }
 
-static int udf_adinicb_writepage(struct folio *folio,
-				 struct writeback_control *wbc, void *data)
+static int udf_adinicb_writepages(struct address_space *mapping,
+		      struct writeback_control *wbc)
 {
-	struct inode *inode = folio->mapping->host;
+	struct inode *inode = mapping->host;
 	struct udf_inode_info *iinfo = UDF_I(inode);
+	struct folio *folio = NULL;
+	int error = 0;
 
-	BUG_ON(!folio_test_locked(folio));
-	BUG_ON(folio->index != 0);
-	memcpy_from_file_folio(iinfo->i_data + iinfo->i_lenEAttr, folio, 0,
-		       i_size_read(inode));
-	folio_unlock(folio);
+	while ((folio = writeback_iter(mapping, wbc, folio, &error))) {
+		BUG_ON(!folio_test_locked(folio));
+		BUG_ON(folio->index != 0);
+		memcpy_from_file_folio(iinfo->i_data + iinfo->i_lenEAttr, folio,
+				0, i_size_read(inode));
+		folio_unlock(folio);
+	}
+
 	mark_inode_dirty(inode);
-
 	return 0;
 }
 
@@ -203,9 +207,9 @@ static int udf_writepages(struct address_space *mapping,
 	struct inode *inode = mapping->host;
 	struct udf_inode_info *iinfo = UDF_I(inode);
 
-	if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB)
-		return mpage_writepages(mapping, wbc, udf_get_block_wb);
-	return write_cache_pages(mapping, wbc, udf_adinicb_writepage, NULL);
+	if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_IN_ICB)
+		return udf_adinicb_writepages(mapping, wbc);
+	return mpage_writepages(mapping, wbc, udf_get_block_wb);
 }
 
 static void udf_adinicb_read_folio(struct folio *folio)
@@ -244,10 +248,12 @@ static void udf_readahead(struct readahead_control *rac)
 	mpage_readahead(rac, udf_get_block);
 }
 
-static int udf_write_begin(struct file *file, struct address_space *mapping,
+static int udf_write_begin(const struct kiocb *iocb,
+			   struct address_space *mapping,
 			   loff_t pos, unsigned len,
 			   struct folio **foliop, void **fsdata)
 {
+	struct file *file = iocb->ki_filp;
 	struct udf_inode_info *iinfo = UDF_I(file_inode(file));
 	struct folio *folio;
 	int ret;
@@ -271,15 +277,16 @@ static int udf_write_begin(struct file *file, struct address_space *mapping,
 	return 0;
 }
 
-static int udf_write_end(struct file *file, struct address_space *mapping,
+static int udf_write_end(const struct kiocb *iocb,
+			 struct address_space *mapping,
 			 loff_t pos, unsigned len, unsigned copied,
 			 struct folio *folio, void *fsdata)
 {
-	struct inode *inode = file_inode(file);
+	struct inode *inode = file_inode(iocb->ki_filp);
 	loff_t last_pos;
 
 	if (UDF_I(inode)->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB)
-		return generic_write_end(file, mapping, pos, len, copied, folio,
+		return generic_write_end(iocb, mapping, pos, len, copied, folio,
 					 fsdata);
 	last_pos = pos + copied;
 	if (last_pos > inode->i_size)
@@ -329,65 +336,6 @@ const struct address_space_operations udf_aops = {
 	.bmap		= udf_bmap,
 	.migrate_folio	= buffer_migrate_folio,
 };
-
-/*
- * Expand file stored in ICB to a normal one-block-file
- *
- * This function requires i_mutex held
- */
-int udf_expand_file_adinicb(struct inode *inode)
-{
-	struct folio *folio;
-	struct udf_inode_info *iinfo = UDF_I(inode);
-	int err;
-
-	WARN_ON_ONCE(!inode_is_locked(inode));
-	if (!iinfo->i_lenAlloc) {
-		down_write(&iinfo->i_data_sem);
-		if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
-			iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
-		else
-			iinfo->i_alloc_type = ICBTAG_FLAG_AD_LONG;
-		up_write(&iinfo->i_data_sem);
-		mark_inode_dirty(inode);
-		return 0;
-	}
-
-	folio = __filemap_get_folio(inode->i_mapping, 0,
-			FGP_LOCK | FGP_ACCESSED | FGP_CREAT, GFP_KERNEL);
-	if (IS_ERR(folio))
-		return PTR_ERR(folio);
-
-	if (!folio_test_uptodate(folio))
-		udf_adinicb_read_folio(folio);
-	down_write(&iinfo->i_data_sem);
-	memset(iinfo->i_data + iinfo->i_lenEAttr, 0x00,
-	       iinfo->i_lenAlloc);
-	iinfo->i_lenAlloc = 0;
-	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
-		iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
-	else
-		iinfo->i_alloc_type = ICBTAG_FLAG_AD_LONG;
-	folio_mark_dirty(folio);
-	folio_unlock(folio);
-	up_write(&iinfo->i_data_sem);
-	err = filemap_fdatawrite(inode->i_mapping);
-	if (err) {
-		/* Restore everything back so that we don't lose data... */
-		folio_lock(folio);
-		down_write(&iinfo->i_data_sem);
-		memcpy_from_folio(iinfo->i_data + iinfo->i_lenEAttr,
-				folio, 0, inode->i_size);
-		folio_unlock(folio);
-		iinfo->i_alloc_type = ICBTAG_FLAG_AD_IN_ICB;
-		iinfo->i_lenAlloc = inode->i_size;
-		up_write(&iinfo->i_data_sem);
-	}
-	folio_put(folio);
-	mark_inode_dirty(inode);
-
-	return err;
-}
 
 #define UDF_MAP_CREATE		0x01	/* Mapping can allocate new blocks */
 #define UDF_MAP_NOPREALLOC	0x02	/* Do not preallocate blocks */
@@ -447,6 +395,76 @@ out_read:
 	ret = inode_getblk(inode, map);
 	up_write(&iinfo->i_data_sem);
 	return ret;
+}
+
+/*
+ * Expand file stored in ICB to a normal one-block-file
+ *
+ * This function requires i_mutex held
+ */
+int udf_expand_file_adinicb(struct inode *inode)
+{
+	struct folio *folio;
+	struct udf_inode_info *iinfo = UDF_I(inode);
+	struct udf_map_rq map = {
+		.lblk = 0,
+		.iflags = UDF_MAP_CREATE,
+	};
+	int err;
+
+	WARN_ON_ONCE(!inode_is_locked(inode));
+	if (!iinfo->i_lenAlloc) {
+		down_write(&iinfo->i_data_sem);
+		if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
+			iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
+		else
+			iinfo->i_alloc_type = ICBTAG_FLAG_AD_LONG;
+		up_write(&iinfo->i_data_sem);
+		mark_inode_dirty(inode);
+		return 0;
+	}
+
+	folio = __filemap_get_folio(inode->i_mapping, 0,
+			FGP_LOCK | FGP_ACCESSED | FGP_CREAT, GFP_KERNEL);
+	if (IS_ERR(folio))
+		return PTR_ERR(folio);
+
+	if (!folio_test_uptodate(folio))
+		udf_adinicb_read_folio(folio);
+	down_write(&iinfo->i_data_sem);
+	memset(iinfo->i_data + iinfo->i_lenEAttr, 0x00,
+	       iinfo->i_lenAlloc);
+	iinfo->i_lenAlloc = 0;
+	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
+		iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
+	else
+		iinfo->i_alloc_type = ICBTAG_FLAG_AD_LONG;
+	up_write(&iinfo->i_data_sem);
+
+	/* Allocate the block underlying the data */
+	err = udf_map_block(inode, &map);
+	if (err < 0)
+		goto restore;
+
+	folio_mark_dirty(folio);
+	folio_unlock(folio);
+	err = filemap_fdatawrite(inode->i_mapping);
+	if (err) {
+		/* Restore everything back so that we don't lose data... */
+		folio_lock(folio);
+restore:
+		down_write(&iinfo->i_data_sem);
+		memcpy_from_folio(iinfo->i_data + iinfo->i_lenEAttr,
+				folio, 0, inode->i_size);
+		iinfo->i_alloc_type = ICBTAG_FLAG_AD_IN_ICB;
+		iinfo->i_lenAlloc = inode->i_size;
+		up_write(&iinfo->i_data_sem);
+		folio_unlock(folio);
+	}
+	folio_put(folio);
+	mark_inode_dirty(inode);
+
+	return err;
 }
 
 static int __udf_get_block(struct inode *inode, sector_t block,
@@ -525,7 +543,7 @@ static int udf_do_extend_file(struct inode *inode,
 			  sb->s_blocksize - 1) & ~(sb->s_blocksize - 1));
 		iinfo->i_lenExtents =
 			(iinfo->i_lenExtents + sb->s_blocksize - 1) &
-			~(sb->s_blocksize - 1);
+			~((u64)sb->s_blocksize - 1);
 	}
 
 	add = 0;
@@ -810,6 +828,7 @@ static int inode_getblk(struct inode *inode, struct udf_map_rq *map)
 		}
 		map->oflags = UDF_BLK_MAPPED;
 		map->pblk = udf_get_lb_pblock(inode->i_sb, &eloc, offset);
+		ret = 0;
 		goto out_free;
 	}
 
@@ -2263,6 +2282,9 @@ int udf_current_aext(struct inode *inode, struct extent_position *epos,
 		ptr = epos->bh->b_data + epos->offset;
 		if (check_add_overflow(sizeof(struct allocExtDesc),
 				le32_to_cpu(header->lengthAllocDescs), &alen))
+			return -1;
+
+		if (alen > epos->bh->b_size)
 			return -1;
 	}
 

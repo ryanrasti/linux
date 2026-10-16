@@ -38,7 +38,7 @@ int cs35l45_apply_patch(struct cs35l45_private *cs35l45)
 	return regmap_register_patch(cs35l45->regmap, cs35l45_patch,
 				     ARRAY_SIZE(cs35l45_patch));
 }
-EXPORT_SYMBOL_NS_GPL(cs35l45_apply_patch, SND_SOC_CS35L45);
+EXPORT_SYMBOL_NS_GPL(cs35l45_apply_patch, "SND_SOC_CS35L45");
 
 static const struct reg_default cs35l45_defaults[] = {
 	{ CS35L45_BLOCK_ENABLES,		0x00003323 },
@@ -66,22 +66,6 @@ static const struct reg_default cs35l45_defaults[] = {
 	{ CS35L45_ASPTX3_INPUT,			0x00000020 },
 	{ CS35L45_ASPTX4_INPUT,			0x00000028 },
 	{ CS35L45_ASPTX5_INPUT,			0x00000048 },
-	{ CS35L45_DSP1_RX1_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX2_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX3_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX4_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX5_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX6_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX7_RATE,		0x00000001 },
-	{ CS35L45_DSP1_RX8_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX1_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX2_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX3_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX4_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX5_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX6_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX7_RATE,		0x00000001 },
-	{ CS35L45_DSP1_TX8_RATE,		0x00000001 },
 	{ CS35L45_DSP1RX1_INPUT,		0x00000008 },
 	{ CS35L45_DSP1RX2_INPUT,		0x00000009 },
 	{ CS35L45_DSP1RX3_INPUT,		0x00000018 },
@@ -114,6 +98,22 @@ static const struct reg_default cs35l45_defaults[] = {
 	{ CS35L45_GPIO1_CTRL1,			0x81000001 },
 	{ CS35L45_GPIO2_CTRL1,			0x81000001 },
 	{ CS35L45_GPIO3_CTRL1,			0x81000001 },
+	{ CS35L45_DSP1_RX1_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX2_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX3_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX4_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX5_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX6_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX7_RATE,		0x00000001 },
+	{ CS35L45_DSP1_RX8_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX1_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX2_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX3_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX4_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX5_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX6_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX7_RATE,		0x00000001 },
+	{ CS35L45_DSP1_TX8_RATE,		0x00000001 },
 };
 
 static bool cs35l45_readable_reg(struct device *dev, unsigned int reg)
@@ -260,7 +260,7 @@ const struct regmap_config cs35l45_i2c_regmap = {
 	.readable_reg = cs35l45_readable_reg,
 	.cache_type = REGCACHE_MAPLE,
 };
-EXPORT_SYMBOL_NS_GPL(cs35l45_i2c_regmap, SND_SOC_CS35L45);
+EXPORT_SYMBOL_NS_GPL(cs35l45_i2c_regmap, "SND_SOC_CS35L45");
 
 const struct regmap_config cs35l45_spi_regmap = {
 	.reg_bits = 32,
@@ -276,7 +276,7 @@ const struct regmap_config cs35l45_spi_regmap = {
 	.readable_reg = cs35l45_readable_reg,
 	.cache_type = REGCACHE_MAPLE,
 };
-EXPORT_SYMBOL_NS_GPL(cs35l45_spi_regmap, SND_SOC_CS35L45);
+EXPORT_SYMBOL_NS_GPL(cs35l45_spi_regmap, "SND_SOC_CS35L45");
 
 static const struct {
 	u8 cfg_id;
@@ -329,4 +329,4 @@ int cs35l45_get_clk_freq_id(unsigned int freq)
 
 	return -EINVAL;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l45_get_clk_freq_id, SND_SOC_CS35L45);
+EXPORT_SYMBOL_NS_GPL(cs35l45_get_clk_freq_id, "SND_SOC_CS35L45");
