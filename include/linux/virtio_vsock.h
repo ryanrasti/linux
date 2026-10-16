@@ -190,7 +190,6 @@ ssize_t
 virtio_transport_seqpacket_dequeue(struct vsock_sock *vsk,
 				   struct msghdr *msg,
 				   int flags);
-s64 virtio_transport_dgram_has_data(struct vsock_sock *vsk);
 s64 virtio_transport_stream_has_data(struct vsock_sock *vsk);
 s64 virtio_transport_stream_has_space(struct vsock_sock *vsk);
 u32 virtio_transport_seqpacket_has_data(struct vsock_sock *vsk);
@@ -233,9 +232,9 @@ void virtio_transport_notify_buffer_size(struct vsock_sock *vsk, u64 *val);
 u64 virtio_transport_stream_rcvhiwat(struct vsock_sock *vsk);
 bool virtio_transport_stream_is_active(struct vsock_sock *vsk);
 bool virtio_transport_stream_allow(u32 cid, u32 port);
-int virtio_transport_dgram_get_cid(struct sk_buff *skb, unsigned int *cid);
-int virtio_transport_dgram_get_port(struct sk_buff *skb, unsigned int *port);
-int virtio_transport_dgram_get_length(struct sk_buff *skb, size_t *len);
+int virtio_transport_dgram_bind(struct vsock_sock *vsk,
+				struct sockaddr_vm *addr);
+bool virtio_transport_dgram_allow(u32 cid, u32 port);
 
 int virtio_transport_connect(struct vsock_sock *vsk);
 
@@ -264,8 +263,4 @@ void virtio_transport_deliver_tap_pkt(struct sk_buff *skb);
 int virtio_transport_purge_skbs(void *vsk, struct sk_buff_head *list);
 int virtio_transport_read_skb(struct vsock_sock *vsk, skb_read_actor_t read_actor);
 int virtio_transport_notify_set_rcvlowat(struct vsock_sock *vsk, int val);
-void virtio_transport_init_dgram_bind_tables(void);
-int virtio_transport_dgram_get_cid(struct sk_buff *skb, unsigned int *cid);
-int virtio_transport_dgram_get_port(struct sk_buff *skb, unsigned int *port);
-int virtio_transport_dgram_get_length(struct sk_buff *skb, size_t *len);
 #endif /* _LINUX_VIRTIO_VSOCK_H */

@@ -118,7 +118,6 @@ static int __vsock_bind(struct sock *sk, struct sockaddr_vm *addr);
 static void vsock_sk_destruct(struct sock *sk);
 static int vsock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb);
 
-static bool sock_type_connectible(u16 type);
 /* Protocol family. */
 struct proto vsock_proto = {
 	.name = "AF_VSOCK",
@@ -184,7 +183,6 @@ struct list_head vsock_connected_table[VSOCK_HASH_SIZE];
 EXPORT_SYMBOL_GPL(vsock_connected_table);
 DEFINE_SPINLOCK(vsock_table_lock);
 EXPORT_SYMBOL_GPL(vsock_table_lock);
-static struct list_head vsock_dgram_bind_table[VSOCK_HASH_SIZE];
 
 /* Autobind this socket to the local address if necessary. */
 static int vsock_auto_bind(struct vsock_sock *vsk)
@@ -207,9 +205,6 @@ static void vsock_init_tables(void)
 
 	for (i = 0; i < ARRAY_SIZE(vsock_connected_table); i++)
 		INIT_LIST_HEAD(&vsock_connected_table[i]);
-
-	for (i = 0; i < ARRAY_SIZE(vsock_dgram_bind_table); i++)
-		INIT_LIST_HEAD(&vsock_dgram_bind_table[i]);
 }
 
 static void __vsock_insert_bound(struct list_head *list,
@@ -238,12 +233,11 @@ static void __vsock_remove_connected(struct vsock_sock *vsk)
 	sock_put(&vsk->sk);
 }
 
-static struct sock *vsock_find_bound_socket_common(struct sockaddr_vm *addr,
-						   struct list_head *bind_table)
+static struct sock *__vsock_find_bound_socket(struct sockaddr_vm *addr)
 {
 	struct vsock_sock *vsk;
 
-	list_for_each_entry(vsk, bind_table, bound_table) {
+	list_for_each_entry(vsk, vsock_bound_sockets(addr), bound_table) {
 		if (vsock_addr_equals_addr(addr, &vsk->local_addr))
 			return sk_vsock(vsk);
 
@@ -254,28 +248,6 @@ static struct sock *vsock_find_bound_socket_common(struct sockaddr_vm *addr,
 	}
 
 	return NULL;
-}
-
-struct sock *
-vsock_find_bound_dgram_socket(struct sockaddr_vm *addr)
-{
-	struct sock *sk;
-
-	spin_lock_bh(&vsock_table_lock);
-	sk = vsock_find_bound_socket_common(addr,
-					    &vsock_dgram_bind_table[VSOCK_HASH(addr)]);
-	if (sk)
-		sock_hold(sk);
-
-	spin_unlock_bh(&vsock_table_lock);
-
-	return sk;
-}
-EXPORT_SYMBOL_GPL(vsock_find_bound_dgram_socket);
-
-static struct sock *__vsock_find_bound_socket(struct sockaddr_vm *addr)
-{
-	return vsock_find_bound_socket_common(addr, vsock_bound_sockets(addr));
 }
 
 static struct sock *__vsock_find_connected_socket(struct sockaddr_vm *src,
@@ -453,34 +425,6 @@ static void vsock_deassign_transport(struct vsock_sock *vsk)
 	vsk->transport = NULL;
 }
 
-static const struct vsock_transport *
-vsock_connectible_lookup_transport(unsigned int cid, __u8 flags)
-{
-	const struct vsock_transport *transport;
-
-	if (vsock_use_local_transport(cid))
-		transport = transport_local;
-	else if (cid <= VMADDR_CID_HOST || !transport_h2g ||
-		 (flags & VMADDR_FLAG_TO_HOST))
-		transport = transport_g2h;
-	else
-		transport = transport_h2g;
-
-	return transport;
-}
-
-static const struct vsock_transport *
-vsock_dgram_lookup_transport(unsigned int cid, __u8 flags)
-{
-	const struct vsock_transport *transport;
-
-	transport = vsock_connectible_lookup_transport(cid, flags);
-	if (transport)
-		return transport;
-
-	return transport_dgram;
-}
-
 /* Assign a transport to a socket and call the .init transport callback.
  *
  * Note: for connection oriented socket this must be called when vsk->remote_addr
@@ -517,13 +461,17 @@ int vsock_assign_transport(struct vsock_sock *vsk, struct vsock_sock *psk)
 
 	switch (sk->sk_type) {
 	case SOCK_DGRAM:
-		new_transport = vsock_dgram_lookup_transport(remote_cid,
-							     remote_flags);
+		new_transport = transport_dgram;
 		break;
 	case SOCK_STREAM:
 	case SOCK_SEQPACKET:
-		new_transport = vsock_connectible_lookup_transport(remote_cid,
-								   remote_flags);
+		if (vsock_use_local_transport(remote_cid))
+			new_transport = transport_local;
+		else if (remote_cid <= VMADDR_CID_HOST || !transport_h2g ||
+			 (remote_flags & VMADDR_FLAG_TO_HOST))
+			new_transport = transport_g2h;
+		else
+			new_transport = transport_h2g;
 		break;
 	default:
 		return -ESOCKTNOSUPPORT;
@@ -677,16 +625,11 @@ out:
 
 /**** SOCKET OPERATIONS ****/
 
-static int vsock_bind_common(struct vsock_sock *vsk,
-			     struct sockaddr_vm *addr,
-			     struct list_head *bind_table,
-			     size_t table_size)
+static int __vsock_bind_connectible(struct vsock_sock *vsk,
+				    struct sockaddr_vm *addr)
 {
 	static u32 port;
 	struct sockaddr_vm new_addr;
-
-	if (table_size < VSOCK_HASH_SIZE)
-		return -1;
 
 	if (!port)
 		port = get_random_u32_above(LAST_RESERVED_PORT);
@@ -703,8 +646,7 @@ static int vsock_bind_common(struct vsock_sock *vsk,
 
 			new_addr.svm_port = port++;
 
-			if (!vsock_find_bound_socket_common(&new_addr,
-							    &bind_table[VSOCK_HASH(addr)])) {
+			if (!__vsock_find_bound_socket(&new_addr)) {
 				found = true;
 				break;
 			}
@@ -721,8 +663,7 @@ static int vsock_bind_common(struct vsock_sock *vsk,
 			return -EACCES;
 		}
 
-		if (vsock_find_bound_socket_common(&new_addr,
-						   &bind_table[VSOCK_HASH(addr)]))
+		if (__vsock_find_bound_socket(&new_addr))
 			return -EADDRINUSE;
 	}
 
@@ -734,31 +675,14 @@ static int vsock_bind_common(struct vsock_sock *vsk,
 	 * by AF_UNIX.
 	 */
 	__vsock_remove_bound(vsk);
-	__vsock_insert_bound(&bind_table[VSOCK_HASH(&vsk->local_addr)], vsk);
+	__vsock_insert_bound(vsock_bound_sockets(&vsk->local_addr), vsk);
 
 	return 0;
 }
 
-static int __vsock_bind_connectible(struct vsock_sock *vsk,
-				    struct sockaddr_vm *addr)
+static int __vsock_bind_dgram(struct vsock_sock *vsk,
+			      struct sockaddr_vm *addr)
 {
-	return vsock_bind_common(vsk, addr, vsock_bind_table, VSOCK_HASH_SIZE + 1);
-}
-
-static int vsock_bind_dgram(struct vsock_sock *vsk,
-			    struct sockaddr_vm *addr)
-{
-	if (!vsk->transport || !vsk->transport->dgram_bind) {
-		int retval;
-
-		spin_lock_bh(&vsock_table_lock);
-		retval = vsock_bind_common(vsk, addr, vsock_dgram_bind_table,
-					   VSOCK_HASH_SIZE);
-		spin_unlock_bh(&vsock_table_lock);
-
-		return retval;
-	}
-
 	return vsk->transport->dgram_bind(vsk, addr);
 }
 
@@ -788,7 +712,7 @@ static int __vsock_bind(struct sock *sk, struct sockaddr_vm *addr)
 		break;
 
 	case SOCK_DGRAM:
-		retval = vsock_bind_dgram(vsk, addr);
+		retval = __vsock_bind_dgram(vsk, addr);
 		break;
 
 	default:
@@ -949,15 +873,6 @@ s64 vsock_stream_has_data(struct vsock_sock *vsk)
 	return vsk->transport->stream_has_data(vsk);
 }
 EXPORT_SYMBOL_GPL(vsock_stream_has_data);
-
-s64 vsock_dgram_has_data(struct vsock_sock *vsk)
-{
-	if (WARN_ON(!vsk->transport))
-		return 0;
-
-	return vsk->transport->dgram_has_data(vsk);
-}
-EXPORT_SYMBOL_GPL(vsock_dgram_has_data);
 
 s64 vsock_connectible_has_data(struct vsock_sock *vsk)
 {
@@ -1252,24 +1167,19 @@ static int vsock_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	lock_sock(sk);
 
+	transport = vsk->transport;
+
+	err = vsock_auto_bind(vsk);
+	if (err)
+		goto out;
+
+
 	/* If the provided message contains an address, use that.  Otherwise
 	 * fall back on the socket's remote handle (if it has been connected).
 	 */
 	if (msg->msg_name &&
 	    vsock_addr_cast(msg->msg_name, msg->msg_namelen,
 			    &remote_addr) == 0) {
-		transport = vsock_dgram_lookup_transport(remote_addr->svm_cid,
-							 remote_addr->svm_flags);
-		if (!transport) {
-			err = -EINVAL;
-			goto out;
-		}
-
-		if (!try_module_get(transport->module)) {
-			err = -ENODEV;
-			goto out;
-		}
-
 		/* Ensure this address is of the right type and is a valid
 		 * destination.
 		 */
@@ -1278,27 +1188,11 @@ static int vsock_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
 			remote_addr->svm_cid = transport->get_local_cid();
 
 		if (!vsock_addr_bound(remote_addr)) {
-			module_put(transport->module);
 			err = -EINVAL;
 			goto out;
 		}
-
-		if (!transport->dgram_allow(remote_addr->svm_cid,
-					    remote_addr->svm_port)) {
-			module_put(transport->module);
-			err = -EINVAL;
-			goto out;
-		}
-
-		err = transport->dgram_enqueue(vsk, remote_addr, msg, len);
-		module_put(transport->module);
 	} else if (sock->state == SS_CONNECTED) {
 		remote_addr = &vsk->remote_addr;
-		transport = vsk->transport;
-
-		err = vsock_auto_bind(vsk);
-		if (err)
-			goto out;
 
 		if (remote_addr->svm_cid == VMADDR_CID_ANY)
 			remote_addr->svm_cid = transport->get_local_cid();
@@ -1306,22 +1200,22 @@ static int vsock_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
 		/* XXX Should connect() or this function ensure remote_addr is
 		 * bound?
 		 */
-		if (!vsock_addr_bound(remote_addr)) {
+		if (!vsock_addr_bound(&vsk->remote_addr)) {
 			err = -EINVAL;
 			goto out;
 		}
-
-		if (!transport->dgram_allow(remote_addr->svm_cid,
-					    remote_addr->svm_port)) {
-			err = -EINVAL;
-			goto out;
-		}
-
-		err = transport->dgram_enqueue(vsk, remote_addr, msg, len);
 	} else {
 		err = -EINVAL;
 		goto out;
 	}
+
+	if (!transport->dgram_allow(remote_addr->svm_cid,
+				    remote_addr->svm_port)) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	err = transport->dgram_enqueue(vsk, remote_addr, msg, len);
 
 out:
 	release_sock(sk);
@@ -1356,18 +1250,13 @@ static int vsock_dgram_connect(struct socket *sock,
 	if (err)
 		goto out;
 
-	memcpy(&vsk->remote_addr, remote_addr, sizeof(vsk->remote_addr));
-
-	err = vsock_assign_transport(vsk, NULL);
-	if (err)
-		goto out;
-
 	if (!vsk->transport->dgram_allow(remote_addr->svm_cid,
 					 remote_addr->svm_port)) {
 		err = -EINVAL;
 		goto out;
 	}
 
+	memcpy(&vsk->remote_addr, remote_addr, sizeof(vsk->remote_addr));
 	sock->state = SS_CONNECTED;
 
 	/* sock map disallows redirection of non-TCP sockets with sk_state !=
@@ -1388,62 +1277,10 @@ out:
 int __vsock_dgram_recvmsg(struct socket *sock, struct msghdr *msg,
 			  size_t len, int flags)
 {
-	const struct vsock_transport *transport;
-	struct vsock_sock *vsk;
-	struct sk_buff *skb;
-	size_t payload_len;
-	struct sock *sk;
-	int err;
+	struct sock *sk = sock->sk;
+	struct vsock_sock *vsk = vsock_sk(sk);
 
-	sk = sock->sk;
-	vsk = vsock_sk(sk);
-
-	if (flags & MSG_OOB || flags & MSG_ERRQUEUE)
-		return -EOPNOTSUPP;
-
-	transport = vsk->transport;
-
-	/* Retrieve the head sk_buff from the socket's receive queue. */
-	err = 0;
-	skb = skb_recv_datagram(sk_vsock(vsk), flags, &err);
-	if (!skb)
-		return err;
-
-	err = transport->dgram_get_length(skb, &payload_len);
-	if (err)
-		goto out;
-
-	if (payload_len > len) {
-		payload_len = len;
-		msg->msg_flags |= MSG_TRUNC;
-	}
-
-	/* Place the datagram payload in the user's iovec. */
-	err = skb_copy_datagram_msg(skb, transport->dgram_payload_offset, msg, payload_len);
-	if (err)
-		goto out;
-
-	if (msg->msg_name) {
-		/* Provide the address of the sender. */
-		DECLARE_SOCKADDR(struct sockaddr_vm *, vm_addr, msg->msg_name);
-		unsigned int cid, port;
-
-		err = transport->dgram_get_cid(skb, &cid);
-		if (err)
-			goto out;
-
-		err = transport->dgram_get_port(skb, &port);
-		if (err)
-			goto out;
-
-		vsock_addr_init(vm_addr, cid, port);
-		msg->msg_namelen = sizeof(*vm_addr);
-	}
-	err = payload_len;
-
-out:
-	skb_free_datagram(&vsk->sk, skb);
-	return err;
+	return vsk->transport->dgram_dequeue(vsk, msg, len, flags);
 }
 
 int vsock_dgram_recvmsg(struct socket *sock, struct msghdr *msg,
@@ -1472,32 +1309,6 @@ static int vsock_do_ioctl(struct socket *sock, unsigned int cmd,
 	vsk = vsock_sk(sk);
 
 	switch (cmd) {
-	case SIOCINQ: {
-		ssize_t n_bytes;
-
-		if (!vsk->transport) {
-			ret = -EOPNOTSUPP;
-			break;
-		}
-
-		if (sock_type_connectible(sk->sk_type) &&
-		    sk->sk_state == TCP_LISTEN) {
-			ret = -EINVAL;
-			break;
-		}
-
-		if (sk->sk_type == SOCK_DGRAM)
-			n_bytes = vsock_dgram_has_data(vsk);
-		else
-			n_bytes = vsock_stream_has_data(vsk);
-
-		if (n_bytes < 0) {
-			ret = n_bytes;
-			break;
-		}
-		ret = put_user(n_bytes, arg);
-		break;
-	}
 	case SIOCOUTQ: {
 		ssize_t n_bytes;
 
