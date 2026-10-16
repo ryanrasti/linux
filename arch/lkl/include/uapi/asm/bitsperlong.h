@@ -10,7 +10,7 @@
 #endif
 
 /* (wasm32: as riscv32, no stat64 calls: statx; see asm/unistd.h) */
-#ifndef __wasm__
+#ifndef LKL_CONFIG_WASM
 #define __ARCH_WANT_STAT64
 #endif
 

@@ -4,7 +4,9 @@
  * renameat of their own), the ABI its programs are built for. LKL's other
  * hosts keep the rest.
  */
-#ifndef __wasm__
+#include <asm/config.h>
+
+#ifndef LKL_CONFIG_WASM
 #define __ARCH_WANT_SYSCALL_NO_AT
 #define __ARCH_WANT_SYSCALL_DEPRECATED
 #define __ARCH_WANT_SYSCALL_NO_FLAGS

@@ -42,6 +42,8 @@ void __init setup_arch(char **cl)
 {
 	*cl = cmd_line;
 	panic_blink = lkl_panic_blink;
+	if (IS_ENABLED(CONFIG_LKL_WASM))
+		wasm_layout_check();
 	parse_early_param();
 	bootmem_init(mem_size);
 }
