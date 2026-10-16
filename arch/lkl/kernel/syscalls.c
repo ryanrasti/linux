@@ -18,6 +18,7 @@
 #include <asm/syscalls_32.h>
 #include <asm/cpu.h>
 #include <asm/sched.h>
+#include <asm/hostsock.h>
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 typedef long (*syscall_handler_t)(const long *args);
@@ -69,6 +70,9 @@ static long run_syscall(long no, long *params)
 
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
+	/* AF_INET(6) sockets, local or the host's (drivers/hostsock.c) */
+	if (no == __NR_socket)
+		params[0] = hostsock_family(params[0], params[1]);
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 	ret = handler(params);

@@ -9,3 +9,4 @@ obj-$(CONFIG_LKL_HOSTBLK) += hostblk.o
 obj-$(CONFIG_LKL_HOSTFUSE) += hostfuse.o
 CFLAGS_hostfuse.o := -I$(srctree)/fs/fuse
 obj-$(CONFIG_LKL_HOSTVSOCK) += hostvsock.o
+obj-$(CONFIG_LKL_HOSTSOCK) += hostsock.o
