@@ -1,3 +1,10 @@
+/*
+ * wasm32: Linux's generic 32-bit ABI as riscv32 has it, and no more (no
+ * 32-bit time; statx, prlimit64, renameat2 rather than stat, rlimit and
+ * renameat of their own), the ABI its programs are built for. LKL's other
+ * hosts keep the rest.
+ */
+#ifndef __wasm__
 #define __ARCH_WANT_SYSCALL_NO_AT
 #define __ARCH_WANT_SYSCALL_DEPRECATED
 #define __ARCH_WANT_SYSCALL_NO_FLAGS
@@ -5,6 +12,7 @@
 #define __ARCH_WANT_NEW_STAT
 #define __ARCH_WANT_SET_GET_RLIMIT
 #define __ARCH_WANT_TIME32_SYSCALLS
+#endif
 
 #include <asm/bitsperlong.h>
 
