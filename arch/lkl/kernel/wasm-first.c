@@ -53,36 +53,47 @@ PLACE("__ext_sched_class");
 PLACE("__idle_sched_class");
 MARK(__sched_class_lowest, "__sched_class_lowest");
 
+/*
+ * The symbol's address, hidden from the optimizer: these are distinct
+ * objects to C, which may then fold their comparisons, and loops from one
+ * to another, away.
+ */
+#define ADDR(sym) ({ unsigned long a = (unsigned long)(sym); OPTIMIZER_HIDE_VAR(a); a; })
+
 /* the first of a range's bad, or NULL: none */
 static const char *__init layout_wrong(void)
 {
-	initcall_entry_t *bounds[] = {
-		__initcall_start, __initcall0_start, __initcall1_start,
-		__initcall2_start, __initcall3_start, __initcall4_start,
-		__initcall5_start, __initcallrootfs_start, __initcall6_start,
-		__initcall7_start, __initcall_end,
+	unsigned long bounds[] = {
+		ADDR(__initcall_start), ADDR(__initcall0_start),
+		ADDR(__initcall1_start), ADDR(__initcall2_start),
+		ADDR(__initcall3_start), ADDR(__initcall4_start),
+		ADDR(__initcall5_start), ADDR(__initcallrootfs_start),
+		ADDR(__initcall6_start), ADDR(__initcall7_start),
+		ADDR(__initcall_end),
 	};
-	const char *setup = (const char *)__setup_start;
-	const char *setup_end = (const char *)__setup_end;
-	const struct obs_kernel_param *p;
-	initcall_entry_t *fn;
+	unsigned long con = ADDR(__con_initcall_start), con_end = ADDR(__con_initcall_end);
+	unsigned long setup = ADDR(__setup_start), setup_end = ADDR(__setup_end);
+	unsigned long a;
 
 	for (int i = 1; i < ARRAY_SIZE(bounds); i++)
 		if (bounds[i] < bounds[i - 1])
 			return "initcall levels out of order";
-	for (fn = __initcall_start; fn < __initcall_end; fn++)
-		if (!initcall_from_entry(fn))
+	for (a = bounds[0]; a < bounds[ARRAY_SIZE(bounds) - 1]; a += sizeof(initcall_entry_t))
+		if (!initcall_from_entry((initcall_entry_t *)a))
 			return "an initcall that isn't one";
-	if (__con_initcall_end < __con_initcall_start)
+	if (con_end < con)
 		return "console initcalls' bounds";
-	for (fn = __con_initcall_start; fn < __con_initcall_end; fn++)
-		if (!initcall_from_entry(fn))
+	for (a = con; a < con_end; a += sizeof(initcall_entry_t))
+		if (!initcall_from_entry((initcall_entry_t *)a))
 			return "a console initcall that isn't one";
-	if (setup_end < setup || (setup_end - setup) % sizeof(*p))
+	if (setup_end < setup || (setup_end - setup) % sizeof(struct obs_kernel_param))
 		return "__setup's bounds";
-	for (p = __setup_start; p < __setup_end; p++)
+	for (a = setup; a < setup_end; a += sizeof(struct obs_kernel_param)) {
+		const struct obs_kernel_param *p = (const void *)a;
+
 		if (!p->str || !p->setup_func)
 			return "a __setup entry that isn't one";
+	}
 	return NULL;
 }
 
