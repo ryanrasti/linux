@@ -9,11 +9,14 @@
  * filesystem TAG.
  *
  * Requests may be sent where they can't be ended (see virtio_fs.c), so a
- * worker sends them. The host answers synchronously, as for hostblk.
+ * worker submits them; the host returns at once, and works meanwhile. As
+ * each completes it raises the connection's interrupt, whose work item ends
+ * it: the kernel goes on while the host's filesystem works.
  */
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/highmem.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
@@ -22,9 +25,12 @@
 
 struct hostfuse {
 	int conn;			/* the host's handle */
+	int irq;			/* raised as requests complete */
 	spinlock_t lock;
 	struct list_head queue;		/* requests to send, in order */
-	struct work_struct work;
+	struct list_head sent;		/* ...and those the host has */
+	struct work_struct work;	/* sends */
+	struct work_struct done;	/* ends those completed */
 };
 
 /* seg: len bytes of a request's pages, a piece each; returns how many */
@@ -125,19 +131,74 @@ static void hostfuse_send(struct hostfuse *hf, struct fuse_req *req)
 		}
 	}
 
-	ret = lkl_ops->fuse_request(hf->conn, in, in_n, out, out_n);
-	kfree(in);
-	if (!reply)
-		goto end;
-	if (ret < (long)sizeof(req->out.h)) {
-		req->out.h.error = ret < 0 ? ret : -EIO;
-		goto end;
+	if (reply) {
+		spin_lock(&hf->lock);
+		list_add_tail(&req->list, &hf->sent);
+		spin_unlock(&hf->lock);
 	}
-	ret = hostfuse_reply(req, ret - sizeof(req->out.h));
+	ret = lkl_ops->fuse_submit(hf->conn, reply ? (unsigned long)req : 0,
+				   in, in_n, out, reply ? out_n : 0);
+	kfree(in);
+	if (!ret && reply)
+		return;		/* hostfuse_done ends it */
+	if (reply) {
+		spin_lock(&hf->lock);
+		list_del_init(&req->list);
+		spin_unlock(&hf->lock);
+	}
 	if (ret)
 		req->out.h.error = ret;
 end:
 	fuse_request_end(req);
+}
+
+/* the host's reply to req, ret bytes or a negative errno, in place */
+static void hostfuse_end(struct fuse_req *req, long ret)
+{
+	if (ret < (long)sizeof(req->out.h))
+		req->out.h.error = ret < 0 ? ret : -EIO;
+	else {
+		ret = hostfuse_reply(req, ret - sizeof(req->out.h));
+		if (ret)
+			req->out.h.error = ret;
+	}
+	fuse_request_end(req);
+}
+
+static void hostfuse_done(struct work_struct *work)
+{
+	struct hostfuse *hf = container_of(work, struct hostfuse, done);
+	unsigned long id;
+	long ret;
+
+	while (lkl_ops->fuse_complete(hf->conn, &id, &ret) > 0) {
+		struct fuse_req *req, *found = NULL;
+
+		spin_lock(&hf->lock);
+		list_for_each_entry(req, &hf->sent, list)
+			if ((unsigned long)req == id) {
+				list_del_init(&req->list);
+				found = req;
+				break;
+			}
+		spin_unlock(&hf->lock);
+		if (found)
+			hostfuse_end(found, ret);
+	}
+}
+
+static irqreturn_t hostfuse_interrupt(int irq, void *dev_id)
+{
+	struct hostfuse *hf = dev_id;
+
+	schedule_work(&hf->done);
+	return IRQ_HANDLED;
+}
+
+/* from the host, on a thread of its own: requests have completed */
+static void hostfuse_notify(void *arg)
+{
+	lkl_trigger_irq(((struct hostfuse *)arg)->irq);
 }
 
 static void hostfuse_work(struct work_struct *work)
@@ -190,11 +251,11 @@ static void hostfuse_send_forget(struct fuse_iqueue *fiq,
 
 	struct lkl_fuse_seg seg = { &req, sizeof(req) };
 
-	lkl_ops->fuse_request(hf->conn, &seg, 1, NULL, 0);
+	lkl_ops->fuse_submit(hf->conn, 0, &seg, 1, NULL, 0);
 	kfree(link);
 }
 
-/* the host answers each request in one go: nothing to interrupt */
+/* the host can't stop a request it's working on: nothing to interrupt */
 static void hostfuse_send_interrupt(struct fuse_iqueue *fiq,
 				    struct fuse_req *req)
 {
@@ -204,9 +265,13 @@ static void hostfuse_release(struct fuse_iqueue *fiq)
 {
 	struct hostfuse *hf = fiq->priv;
 
+	/* (every request has been answered: DESTROY's reply came last) */
 	flush_work(&hf->work);
+	flush_work(&hf->done);
 	if (lkl_ops->fuse_disconnect)
 		lkl_ops->fuse_disconnect(hf->conn);
+	free_irq(hf->irq, hf);
+	lkl_put_irq(hf->irq, "hostfuse");
 	kfree(hf);
 }
 
@@ -262,25 +327,30 @@ static int hostfuse_get_tree(struct fs_context *fsc)
 
 	if (!fsc->source)
 		return invalf(fsc, "hostfuse: no filesystem named");
-	conn = lkl_ops->fuse_connect(fsc->source);
-	if (conn < 0)
-		return conn;
 
 	hf = kzalloc(sizeof(*hf), GFP_KERNEL);
 	fc = kzalloc(sizeof(*fc), GFP_KERNEL);
 	fm = kzalloc(sizeof(*fm), GFP_KERNEL);
-	if (!hf || !fc || !fm) {
-		kfree(hf);
-		kfree(fc);
-		kfree(fm);
-		if (lkl_ops->fuse_disconnect)
-			lkl_ops->fuse_disconnect(conn);
-		return -ENOMEM;
-	}
-	hf->conn = conn;
+	err = -ENOMEM;
+	if (!hf || !fc || !fm)
+		goto out_free;
 	spin_lock_init(&hf->lock);
 	INIT_LIST_HEAD(&hf->queue);
+	INIT_LIST_HEAD(&hf->sent);
 	INIT_WORK(&hf->work, hostfuse_work);
+	INIT_WORK(&hf->done, hostfuse_done);
+	hf->irq = lkl_get_free_irq("hostfuse");
+	err = hf->irq;
+	if (hf->irq < 0)
+		goto out_free;
+	err = request_irq(hf->irq, hostfuse_interrupt, 0, "hostfuse", hf);
+	if (err)
+		goto out_irq;
+	conn = lkl_ops->fuse_connect(fsc->source, hostfuse_notify, hf);
+	err = conn;
+	if (conn < 0)
+		goto out_request;
+	hf->conn = conn;
 
 	fuse_conn_init(fc, fm, fsc->user_ns, &hostfuse_fiq_ops, hf);
 	fc->release = fuse_free_conn;
@@ -304,7 +374,18 @@ static int hostfuse_get_tree(struct fs_context *fsc)
 	sb->s_flags |= SB_ACTIVE;
 	fsc->root = dget(sb->s_root);
 	return 0;
+
+out_request:
+	free_irq(hf->irq, hf);
+out_irq:
+	lkl_put_irq(hf->irq, "hostfuse");
+out_free:
+	kfree(hf);
+	kfree(fc);
+	kfree(fm);
+	return err;
 }
+
 
 static void hostfuse_free_fsc(struct fs_context *fsc)
 {
@@ -339,7 +420,7 @@ static struct file_system_type hostfuse_type = {
 
 static int __init hostfuse_init(void)
 {
-	if (!lkl_ops->fuse_connect || !lkl_ops->fuse_request)
+	if (!lkl_ops->fuse_connect || !lkl_ops->fuse_submit)
 		return 0;
 	return register_filesystem(&hostfuse_type);
 }

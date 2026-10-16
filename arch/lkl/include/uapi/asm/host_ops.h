@@ -149,13 +149,17 @@ enum lkl_prot {
  * @blk_flush - make completed writes durable; returns 0 or a negative errno
  *
  * @fuse_connect - connect to the host's filesystem named tag, served with the
- * FUSE protocol (mount -t hostfuse TAG DIR, fs/fuse/hostfuse.c): a handle
- * >= 0, or a negative errno (-ENOENT: no such filesystem)
- * @fuse_request - a FUSE request on connection conn: the in_n pieces at in,
- * in order, its header first. If out_n, the request has a reply: wait for it,
- * write it across the out_n pieces at out, in order (its header first; at
- * most their total), and return its length; otherwise return 0. A negative
- * errno if the request couldn't be handled.
+ * FUSE protocol (mount -t hostfuse TAG DIR, arch/lkl/drivers/hostfuse.c): a
+ * handle >= 0, or a negative errno (-ENOENT: no such filesystem). The host
+ * calls notify(arg), on a thread of its own, when requests have completed.
+ * @fuse_submit - a FUSE request on connection conn: the in_n pieces at in,
+ * in order, its header first (read before it returns). If out_n, the request
+ * has a reply, written across the out_n pieces at out, in order (its header
+ * first; at most their total), which stay the kernel's until the request
+ * completes (fuse_complete: id). Returns at once: 0, or a negative errno if
+ * the request can't be handled.
+ * @fuse_complete - a request of conn's that has completed since: its id, and
+ * its reply's length or a negative errno; returns 1, or 0 if none has
  * @fuse_disconnect - the connection's filesystem was unmounted
  *
  * @vsock_init - the host's end of vsock (arch/lkl/drivers/hostvsock.c):
@@ -224,7 +228,7 @@ enum lkl_prot {
  * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
  * would (see asm/archrandom.h). Optional.
  */
-/* a piece of a FUSE request or reply, in the kernel's memory (fuse_request) */
+/* a piece of a FUSE request or reply, in the kernel's memory (fuse_submit) */
 struct lkl_fuse_seg {
 	void *base;
 	unsigned long len;
@@ -296,9 +300,12 @@ struct lkl_host_operations {
 		      unsigned long len);
 	int (*blk_flush)(int disk);
 
-	int (*fuse_connect)(const char *tag);
-	long (*fuse_request)(int conn, const struct lkl_fuse_seg *in, int in_n,
-			     const struct lkl_fuse_seg *out, int out_n);
+	int (*fuse_connect)(const char *tag, void (*notify)(void *arg),
+			    void *arg);
+	int (*fuse_submit)(int conn, unsigned long id,
+			   const struct lkl_fuse_seg *in, int in_n,
+			   const struct lkl_fuse_seg *out, int out_n);
+	int (*fuse_complete)(int conn, unsigned long *id, long *ret);
 	void (*fuse_disconnect)(int conn);
 
 	unsigned int (*vsock_init)(void (*notify)(void));
