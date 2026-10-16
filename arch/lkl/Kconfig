@@ -67,6 +67,15 @@ config LKL_HOSTBLK
 	  blk_* host operations, which copy data directly to and from kernel
 	  buffers. The disks show up as /dev/hostblk<N>.
 
+config LKL_HOSTFUSE
+	bool "FUSE filesystems served by the host"
+	depends on FUSE_FS=y
+	default n
+	help
+	  Mount filesystems that the host serves with the FUSE protocol, as
+	  virtio-fs's are, through the fuse_* host operations, without a
+	  virtio device: mount -t hostfuse TAG.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER
