@@ -322,7 +322,8 @@ static int hostsock_release(struct socket *sock)
 }
 
 /* (the address is the inner socket's: a REMOTE socket's host picks its own) */
-static int hostsock_bind(struct socket *sock, struct sockaddr *addr, int len)
+static int hostsock_bind(struct socket *sock, struct sockaddr_unsized *addr,
+			 int len)
 {
 	struct hsock *hs = hs_sk(sock->sk);
 

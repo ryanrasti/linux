@@ -75,6 +75,8 @@ void threads_cleanup(void);
 /* a host task running a process: gets signals on the way back from syscalls */
 #define TIF_USER_TASK			10
 
+#define _TIF_NEED_RESCHED		(1 << TIF_NEED_RESCHED)
+
 #define __HAVE_THREAD_FUNCTIONS
 
 #define task_thread_info(task)	((struct thread_info *)(task)->stack)

@@ -33,16 +33,16 @@ struct hostfuse {
 	struct work_struct done;	/* ends those completed */
 };
 
-/* seg: len bytes of a request's pages, a piece each; returns how many */
+/* seg: len bytes of a request's folios, a piece each; returns how many */
 static int hostfuse_page_segs(struct fuse_args_pages *ap,
 			      struct lkl_fuse_seg *seg, unsigned int len)
 {
 	unsigned int i, n;
 	int segs = 0;
 
-	for (i = 0; i < ap->num_pages && len; i++) {
+	for (i = 0; i < ap->num_folios && len; i++) {
 		n = min(ap->descs[i].length, len);
-		seg[segs].base = page_address(ap->pages[i]) + ap->descs[i].offset;
+		seg[segs].base = folio_address(ap->folios[i]) + ap->descs[i].offset;
 		seg[segs++].len = n;
 		len -= n;
 	}
@@ -51,7 +51,7 @@ static int hostfuse_page_segs(struct fuse_args_pages *ap,
 
 /*
  * The reply's arguments, len bytes, already in place: their sizes (as
- * fuse_dev_do_write sets them), and a short read's pages zeroed past it
+ * fuse_dev_do_write sets them), and a short read's folios zeroed past it
  */
 static int hostfuse_reply(struct fuse_req *req, unsigned int len)
 {
@@ -70,11 +70,11 @@ static int hostfuse_reply(struct fuse_req *req, unsigned int len)
 		if (i == last && args->out_pages && args->page_zeroing) {
 			unsigned int j, rest = n;
 
-			for (j = 0; j < ap->num_pages; j++) {
+			for (j = 0; j < ap->num_folios; j++) {
 				unsigned int dl = ap->descs[j].length;
 
 				if (rest < dl)
-					zero_user_segment(ap->pages[j],
+					folio_zero_segment(ap->folios[j],
 						ap->descs[j].offset + rest,
 						ap->descs[j].offset + dl);
 				rest -= min(rest, dl);
@@ -93,7 +93,7 @@ static void hostfuse_send(struct hostfuse *hf, struct fuse_req *req)
 	bool reply = test_bit(FR_ISREPLY, &req->flags);
 	/* (a header and the arguments each way, and the pages) */
 	unsigned int i, max = 2 + args->in_numargs + args->out_numargs +
-		(args->in_pages || args->out_pages ? ap->num_pages : 0);
+		(args->in_pages || args->out_pages ? ap->num_folios : 0);
 	struct lkl_fuse_seg *in, *out;
 	int in_n = 0, out_n = 0;
 	long ret;
