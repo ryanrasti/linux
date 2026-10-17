@@ -223,8 +223,3 @@ void init_IRQ(void)
 
 	pr_info("lkl: irqs initialized\n");
 }
-
-void cpu_yield_to_irqs(void)
-{
-	cpu_relax();
-}

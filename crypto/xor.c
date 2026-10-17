@@ -14,7 +14,6 @@
 #include <linux/raid/xor.h>
 #include <linux/jiffies.h>
 #include <linux/preempt.h>
-#include <linux/cpu.h>
 #include <asm/xor.h>
 
 #ifndef XOR_SELECT_TEMPLATE
@@ -101,7 +100,6 @@ do_xor_speed(struct xor_block_template *tmpl, void *b1, void *b2)
 		mb(); /* prevent loop optimization */
 		tmpl->do_2(BENCH_SIZE, b1, b2);
 		mb();
-		cpu_yield_to_irqs();
 	} while (reps++ < REPS || (t0 = ktime_get()) == start);
 	min = ktime_sub(t0, start);
 

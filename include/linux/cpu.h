@@ -180,8 +180,6 @@ void arch_tick_broadcast_enter(void);
 void arch_tick_broadcast_exit(void);
 void __noreturn arch_cpu_idle_dead(void);
 
-void cpu_yield_to_irqs(void);
-
 #ifdef CONFIG_ARCH_HAS_CPU_FINALIZE_INIT
 void arch_cpu_finalize_init(void);
 #else

@@ -3173,11 +3173,6 @@ void __init boot_cpu_hotplug_init(void)
 	this_cpu_write(cpuhp_state.target, CPUHP_ONLINE);
 }
 
-void __weak cpu_yield_to_irqs(void)
-{
-}
-EXPORT_SYMBOL(cpu_yield_to_irqs);
-
 #ifdef CONFIG_CPU_MITIGATIONS
 /*
  * All except the cross-thread attack vector are mitigated by default.

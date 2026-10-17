@@ -1278,7 +1278,7 @@ static void print_fatal_signal(int signr)
 			current->comm, signr);
 	}
 
-#ifdef CONFIG_X86_32
+#if defined(__i386__) && !defined(__arch_um__)
 	pr_info("code at %08lx: ", regs->ip);
 	{
 		int i;

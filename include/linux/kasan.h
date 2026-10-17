@@ -671,7 +671,7 @@ static inline void kasan_vrealloc(const void *start, unsigned long old_size,
 #endif /* CONFIG_KASAN_VMALLOC */
 
 #if (defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)) && \
-	!defined(CONFIG_KASAN_VMALLOC) && defined(CONFIG_MODULE)
+		!defined(CONFIG_KASAN_VMALLOC)
 
 /*
  * These functions allocate and free shadow memory for kernel modules.
