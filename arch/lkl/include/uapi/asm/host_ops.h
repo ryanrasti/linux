@@ -144,9 +144,16 @@ enum lkl_prot {
  *
  * @blk_count - number of host block devices (see arch/lkl/drivers/hostblk.c)
  * @blk_capacity - size of a host block device in bytes
- * @blk_rw - read or write len bytes at the given 512-byte sector, directly to
- * or from buf; returns 0 or a negative errno
- * @blk_flush - make completed writes durable; returns 0 or a negative errno
+ * @blk_connect - the host calls notify(arg), on a thread of its own, when
+ * requests to disk have completed; 0 or a negative errno
+ * @blk_submit - a request to disk: op (LKL_BLK_*: read, write or flush, and
+ * maybe LKL_BLK_FUA), at the 512-byte sector, its data the n pieces at seg,
+ * in order (a read's to fill, a write's to send), which stay the kernel's
+ * until it completes (blk_complete: id). Returns at once: 0, 1 if it's
+ * done already (successfully: there's no blk_complete for it), or a
+ * negative errno if the request can't be handled.
+ * @blk_complete - a request to disk that has completed since: its id, and 0
+ * or a negative errno; returns 1, or 0 if none has
  *
  * @fuse_connect - connect to the host's filesystem named tag, served with the
  * FUSE protocol (mount -t hostfuse TAG DIR, arch/lkl/drivers/hostfuse.c): a
@@ -260,6 +267,19 @@ enum lkl_prot {
 #define LKL_SOCK_ACCEPTABLE	64	/* a listener's connections wait */
 #define LKL_SOCK_ERRNO_SHIFT	16
 
+/* blk_submit's op: one of these, maybe with LKL_BLK_FUA */
+#define LKL_BLK_READ	0
+#define LKL_BLK_WRITE	1
+#define LKL_BLK_FLUSH	2
+/* (a write that's durable before it completes) */
+#define LKL_BLK_FUA	4
+
+/* a piece of a disk request's data, in the kernel's memory (blk_submit) */
+struct lkl_blk_seg {
+	void *base;
+	unsigned long len;
+};
+
 /* a piece of a FUSE request or reply, in the kernel's memory (fuse_submit) */
 struct lkl_fuse_seg {
 	void *base;
@@ -328,9 +348,11 @@ struct lkl_host_operations {
 
 	int (*blk_count)(void);
 	unsigned long long (*blk_capacity)(int disk);
-	int (*blk_rw)(int disk, int write, unsigned long long sector, void *buf,
-		      unsigned long len);
-	int (*blk_flush)(int disk);
+	int (*blk_connect)(int disk, void (*notify)(void *arg), void *arg);
+	int (*blk_submit)(int disk, unsigned long id, int op,
+			  unsigned long long sector,
+			  const struct lkl_blk_seg *seg, int n);
+	int (*blk_complete)(int disk, unsigned long *id, long *ret);
 
 	int (*fuse_connect)(const char *tag, void (*notify)(void *arg),
 			    void *arg);
