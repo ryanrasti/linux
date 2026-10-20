@@ -5,6 +5,7 @@ int syscalls_init(void);
 void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
 bool wakeup_idle_host_task(void);
+bool others_runnable(void);
 long lkl_sys_halt(void);
 
 #define sys_mmap sys_mmap_pgoff

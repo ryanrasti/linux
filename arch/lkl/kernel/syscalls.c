@@ -1,3 +1,4 @@
+#include "../../../kernel/sched/sched.h"
 #include <linux/stat.h>
 #include <linux/irq.h>
 #include <linux/sched.h>
@@ -403,6 +404,24 @@ int copy_user_thread(struct task_struct *p,
 }
 
 static struct task_struct *idle_host_task;
+
+/*
+ * Whether a task other than current (and the idle host task, which only
+ * stands for host tasks being in user mode) is runnable: then a host task
+ * leaving the kernel lets it run (lkl_cpu_put). Counting the idle host task
+ * made a host task that kept making syscalls switch to it and back at
+ * every one, once it had been left queued (an interrupt that put the CPU
+ * while the host task was in user mode, current still).
+ */
+bool others_runnable(void)
+{
+	unsigned int n = this_rq()->nr_running;
+
+	if (idle_host_task && current != idle_host_task &&
+	    task_on_rq_queued(idle_host_task))
+		n--;
+	return n > 1;
+}
 
 /*
  * called from idle, don't failed, don't block; returns false if there is no

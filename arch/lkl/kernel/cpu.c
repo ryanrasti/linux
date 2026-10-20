@@ -129,7 +129,7 @@ void lkl_cpu_put(void)
 	}
 
 	if (test_ti_thread_flag(current_thread_info(), TIF_HOST_THREAD) &&
-	    !single_task_running() && cpu.count == 1) {
+	    others_runnable() && cpu.count == 1) {
 		if (in_interrupt())
 			lkl_bug("%s: in interrupt\n", __func__);
 		lkl_ops->mutex_unlock(cpu.lock);
