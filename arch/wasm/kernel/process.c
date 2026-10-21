@@ -35,6 +35,24 @@ struct task_struct *__switch_to(struct task_struct *from,
 	BUG_ON(current != from);
 	BUG_ON(cpu < 0 || cpu != get_current_cpu());
 
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * One CPU, one event loop: hand it to the next task's coroutine and
+	 * suspend this one until a switch back to it resumes it.
+	 */
+	BUG_ON(atomic_read(&to_info->running_cpu) >= 0);
+	atomic_set(&to_info->running_cpu, cpu);
+	if (wasm_get_thread_done())
+		wasm_kernel_jspi_exit(to);
+	wasm_kernel_jspi_switch(from, to);
+	cpu = atomic_read(&from_info->running_cpu);
+	BUG_ON(cpu < 0 || cpu >= nr_cpu_ids || cpu != from_info->cpu);
+	set_current_cpu(cpu);
+	prev = get_current_task_on(cpu);
+	set_current_task(current);
+	return prev;
+#endif
+
 	/*
 	 * Give the current cpu to the new worker. A remote request may have
 	 * changed PARKED to REMOTE_WAKE concurrently; either negative state is
@@ -101,6 +119,35 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	return prev;
 }
+
+#ifdef CONFIG_WASM_JSPI
+#include <setjmp.h>
+
+/*
+ * Enter user code through the kernel's own function table: no JavaScript
+ * frame between a syscall and the task's suspension. An exec from a syscall
+ * longjmps back here (wasm_syscall), and the new program starts.
+ */
+static void wasm_user_enter(void)
+{
+	struct thread_info *ti = current_thread_info();
+	jmp_buf jb;
+
+	ti->user_jb = &jb;
+	setjmp(jb);
+	if (ti->clone_fn) {
+		u32 fn = ti->clone_fn;
+
+		ti->clone_fn = 0;
+		/* (musl's clone_entry: int (void *)) */
+		((int (*)(u32))(uintptr_t)wasm_user_func(fn))(ti->clone_arg);
+	} else {
+		((void (*)(void))(uintptr_t)wasm_user_entry())();
+	}
+	ti->user_jb = NULL;
+}
+#define wasm_user_call wasm_user_enter
+#endif
 
 static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args)
 {
@@ -190,6 +237,11 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	memset(childregs, 0, sizeof(struct pt_regs));
 
 	atomic_set(&task_thread_info(p)->running_cpu, WASM_CPU_PARKED);
+#ifdef CONFIG_WASM_JSPI
+	task_thread_info(p)->clone_fn = 0;
+	task_thread_info(p)->exec_restart = 0;
+	task_thread_info(p)->user_jb = NULL;
+#endif
 	if (args->flags & CLONE_SETTLS)
 		task_thread_info(p)->tp_value = args->tls;
 

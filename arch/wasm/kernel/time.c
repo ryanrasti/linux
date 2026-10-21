@@ -24,6 +24,10 @@ void calibrate_delay(void)
 
 void __delay(unsigned long cycles)
 {
+#ifdef CONFIG_WASM_JSPI
+	/* no hardware to give time to; blocking would stop the event loop */
+	return;
+#endif
 	static int zero = 0;
 	int ret = __builtin_wasm_memory_atomic_wait32(&zero, 0, cycles);
 	BUG_ON(ret != 2); // 2 means timeout

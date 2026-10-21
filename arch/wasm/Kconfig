@@ -24,6 +24,15 @@ config WASM
 	select SMP
 	select THREAD_INFO_IN_TASK
 
+config WASM_JSPI
+	bool "Run every task on one JavaScript event loop (JSPI)"
+	help
+	  One CPU, and every task a coroutine on the host's event loop: a task
+	  blocks by suspending through JavaScript Promise Integration, not by
+	  waiting on an atomic in a worker of its own. The kernel enters user
+	  code through its own function table (call_indirect), so no
+	  JavaScript frame is between a task's syscall and its suspension.
+
 config CMDLINE
 	string "Kernel command string to append"
 	default ""

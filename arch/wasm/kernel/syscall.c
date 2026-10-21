@@ -3,6 +3,9 @@
 #include <linux/syscalls.h>
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
+#ifdef CONFIG_WASM_JSPI
+#include <setjmp.h>
+#endif
 
 #define sys_sigaltstack sys_wasm_sigaltstack
 #undef __SYSCALL
@@ -64,6 +67,13 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		syscall_exit_to_user_mode(regs);
 		regs->user_mode = 1;
 
+#ifdef CONFIG_WASM_JSPI
+		if (current_thread_info()->exec_restart) {
+			current_thread_info()->exec_restart = 0;
+			if (current_thread_info()->user_jb)
+				longjmp(current_thread_info()->user_jb, 1);
+		}
+#endif
 		if (regs->restart_syscall_nr < 0)
 			return regs->syscall_return;
 		nr = regs->restart_syscall_nr;

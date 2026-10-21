@@ -20,3 +20,7 @@ obj-y += \
 	time.o
 
 obj-$(CONFIG_SMP) += smp.o
+obj-$(CONFIG_WASM_JSPI) += sjlj.o sjlj_asm.o
+# (the lowering declares the runtime itself)
+CFLAGS_REMOVE_sjlj.o += -mllvm -wasm-enable-sjlj
+

@@ -64,8 +64,12 @@ void __cpuidle arch_cpu_idle(void)
 		timeout_ns = deadline - now;
 	}
 
+#ifdef CONFIG_WASM_JSPI
+	ret = wasm_kernel_jspi_idle(&pending->summary.counter, timeout_ns);
+#else
 	ret = __builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
 						  timeout_ns);
+#endif
 
 	if (ret == 2 /* timeout reached */) {
 		__this_cpu_write(timer_deadline_ns, 0);
@@ -115,6 +119,18 @@ void wasm_timer_check(void)
 
 void cpu_relax(void)
 {
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * One CPU and no preemption: a condition that an interrupt changes only
+	 * changes if the host's event loop runs, so let it, then take any
+	 * interrupt that arrived.
+	 */
+	unsigned long flags;
+
+	local_irq_save(flags);
+	wasm_kernel_jspi_yield();
+	local_irq_restore(flags);
+#else
 	unsigned long flags;
 	struct pending_irqs *pending;
 	local_irq_save(flags);
@@ -122,6 +138,7 @@ void cpu_relax(void)
 	__builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
 					    CPU_RELAX_TIMEOUT_NS);
 	local_irq_restore(flags);
+#endif
 }
 
 static void run_irq(irq_hw_number_t hwirq)
