@@ -49,6 +49,8 @@ struct task_struct *__switch_to(struct task_struct *from,
 		/* (one instance for every task: the next one isn't done) */
 		wasm_set_thread_done(0);
 		wasm_kernel_jspi_exit(to);
+		/* (a trap: no cleanup in a program's frames below can catch it) */
+		__builtin_trap();
 	}
 	{
 		/*
@@ -137,39 +139,60 @@ struct task_struct *__switch_to(struct task_struct *from,
 }
 
 #ifdef CONFIG_WASM_JSPI
-#include <setjmp.h>
-
 /*
  * Enter user code through the kernel's own function table: no JavaScript
  * frame between a syscall and the task's suspension. An exec from a syscall
- * longjmps back here (wasm_syscall), and the new program starts.
+ * leaves the old program by a trap, and the host runs the task again at
+ * user_restart (below), into the new one.
  */
 static void wasm_user_enter(void)
 {
 	struct thread_info *ti = current_thread_info();
-	jmp_buf jb;
 
-	ti->user_jb = &jb;
-	setjmp(jb);
+	ti->user_entered = 1;
+	/*
+	 * What the program is entered at: a clone child's function, else
+	 * _start (after exec too); kept, for a fork's rewind into the same
+	 * frames (a fork child inherits it with the rest of thread_info).
+	 */
+	if (ti->clone_fn) {
+		ti->entry_fn = ti->clone_fn;
+		ti->entry_arg = ti->clone_arg;
+		ti->clone_fn = 0;
+	} else if (!ti->rewinding_entry) {
+		ti->entry_fn = 0;
+	}
+	ti->rewinding_entry = 0;
 	do {
 		/* (a trap from here on is the program's: see exobox/fault.c) */
 		current_pt_regs()->user_mode = 1;
-		if (ti->clone_fn) {
-			u32 fn = ti->clone_fn;
-
-			ti->clone_fn = 0;
+		if (ti->entry_fn)
 			/* (musl's clone_entry: int (void *)) */
-			((int (*)(u32))(uintptr_t)wasm_user_func(fn))(ti->clone_arg);
-		} else {
+			((int (*)(u32))(uintptr_t)wasm_user_func(ti->entry_fn))(ti->entry_arg);
+		else
 			((void (*)(void))(uintptr_t)wasm_user_entry())();
-		}
 #ifdef CONFIG_EXOBOX
 	/* (it returned because it unwound for fork: on into the rewind) */
 	} while (exobox_fork_unwound());
 #else
 	} while (0);
 #endif
-	ti->user_jb = NULL;
+	ti->user_entered = 0;
+}
+
+static void noinline_for_stack __noreturn user_restart_inner(void)
+{
+	wasm_user_enter();
+	/* (its entry returned without exiting) */
+	local_irq_enable();
+	do_exit(SIGSEGV);
+}
+
+/* exec's restart (wasm_syscall): the task's new program, on its kernel stack from the top */
+__attribute__((export_name("user_restart"))) void wasm_user_restart(void)
+{
+	set_stack_pointer(task_pt_regs(current) - 1);
+	user_restart_inner();
 }
 #define wasm_user_call wasm_user_enter
 #endif
@@ -265,7 +288,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 #ifdef CONFIG_WASM_JSPI
 	task_thread_info(p)->clone_fn = 0;
 	task_thread_info(p)->exec_restart = 0;
-	task_thread_info(p)->user_jb = NULL;
+	task_thread_info(p)->user_entered = 0;
 #endif
 	if (args->flags & CLONE_SETTLS)
 		task_thread_info(p)->tp_value = args->tls;

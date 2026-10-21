@@ -35,10 +35,14 @@ struct thread_info {
 #ifdef CONFIG_WASM_JSPI
 	/* a clone child's entry (user table index, 0: _start) and argument */
 	u32 clone_fn, clone_arg;
-	/* set by exec: the syscall returns to the new program's entry instead */
+	/* what the program was entered at (wasm_user_enter), and with what */
+	u32 entry_fn, entry_arg;
+	/* a fork child: rewinding into its parent's entry_fn, not starting anew */
+	int rewinding_entry;
+	/* set by exec: the syscall's task restarts at the new program instead */
 	int exec_restart;
-	/* where that return goes (struct jmp_buf_impl, in wasm_user_enter) */
-	void *user_jb;
+	/* in a program (wasm_user_enter): an exec leaves it */
+	int user_entered;
 #endif
 #ifdef CONFIG_EXOBOX
 	/* fork: the program is unwinding for it (arch/wasm/exobox/fork.c) */

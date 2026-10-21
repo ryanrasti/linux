@@ -3,9 +3,6 @@
 #include <linux/syscalls.h>
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
-#ifdef CONFIG_WASM_JSPI
-#include <setjmp.h>
-#endif
 #ifdef CONFIG_EXOBOX
 #include <asm/exobox.h>
 #endif
@@ -82,8 +79,9 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 #ifdef CONFIG_WASM_JSPI
 		if (current_thread_info()->exec_restart) {
 			current_thread_info()->exec_restart = 0;
-			if (current_thread_info()->user_jb)
-				longjmp(current_thread_info()->user_jb, 1);
+			/* out of the old program by a trap, into the new at user_restart */
+			wasm_kernel_jspi_restart();
+			__builtin_trap();
 		}
 #endif
 		if (regs->restart_syscall_nr < 0)

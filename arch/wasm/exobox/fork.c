@@ -56,6 +56,7 @@ int exobox_fork_child(void *unused)
 	struct thread_info *ti = current_thread_info();
 
 	/* its program, a copy of the parent's, rewinds to return 0 from clone */
+	ti->rewinding_entry = 1;	/* (into the parent's entry_fn, inherited) */
 	ti->rewinding = 1;
 	ti->rewind_ret = 0;
 	wasm_user_start_rewind();

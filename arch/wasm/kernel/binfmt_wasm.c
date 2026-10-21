@@ -418,7 +418,7 @@ compiled:
 	 * set), it returns to the new program's start instead (wasm_syscall).
 	 * A kernel thread's exec (init's) enters it when its function returns.
 	 */
-	if (current_thread_info()->user_jb)
+	if (current_thread_info()->user_entered)
 		current_thread_info()->exec_restart = 1;
 #endif
 	/*
