@@ -6,6 +6,9 @@
 #ifdef CONFIG_WASM_JSPI
 #include <setjmp.h>
 #endif
+#ifdef CONFIG_EXOBOX
+#include <asm/exobox.h>
+#endif
 
 #define sys_sigaltstack sys_wasm_sigaltstack
 #undef __SYSCALL
@@ -30,6 +33,15 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 {
 	struct pt_regs *regs = current_pt_regs();
 
+#ifdef CONFIG_EXOBOX
+	{
+		unsigned long args[6] = { arg0, arg1, arg2, arg3, arg4, arg5 };
+		long ret;
+
+		if (exobox_syscall_enter(nr, args, &ret))
+			return ret;
+	}
+#endif
 	regs->syscall_args[0] = arg0;
 	regs->syscall_args[1] = arg1;
 	regs->syscall_args[2] = arg2;

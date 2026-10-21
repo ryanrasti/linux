@@ -7,6 +7,9 @@
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
+#ifdef CONFIG_EXOBOX
+#include <asm/exobox.h>
+#endif
 
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -148,15 +151,22 @@ static void wasm_user_enter(void)
 
 	ti->user_jb = &jb;
 	setjmp(jb);
-	if (ti->clone_fn) {
-		u32 fn = ti->clone_fn;
+	do {
+		if (ti->clone_fn) {
+			u32 fn = ti->clone_fn;
 
-		ti->clone_fn = 0;
-		/* (musl's clone_entry: int (void *)) */
-		((int (*)(u32))(uintptr_t)wasm_user_func(fn))(ti->clone_arg);
-	} else {
-		((void (*)(void))(uintptr_t)wasm_user_entry())();
-	}
+			ti->clone_fn = 0;
+			/* (musl's clone_entry: int (void *)) */
+			((int (*)(u32))(uintptr_t)wasm_user_func(fn))(ti->clone_arg);
+		} else {
+			((void (*)(void))(uintptr_t)wasm_user_entry())();
+		}
+#ifdef CONFIG_EXOBOX
+	/* (it returned because it unwound for fork: on into the rewind) */
+	} while (exobox_fork_unwound());
+#else
+	} while (0);
+#endif
 	ti->user_jb = NULL;
 }
 #define wasm_user_call wasm_user_enter
@@ -276,6 +286,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (args->fn == wasm_call_clone_fn)
 		user_memory = args->flags & CLONE_VM ?
 			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
+#ifdef CONFIG_EXOBOX
+	if (args->fn == exobox_fork_child)
+		user_memory = WASM_USER_MEMORY_COPY;
+#endif
 	if (user_memory != WASM_USER_MEMORY_NONE)
 		task_thread_info(p)->context_mm = p->mm;
 

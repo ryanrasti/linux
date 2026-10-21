@@ -84,6 +84,15 @@ u32 wasm_import(user, entry)(void);
 u32 wasm_import(user, func)(u32 fn);
 #endif
 
+#ifdef CONFIG_EXOBOX
+/* fork: the current program's Asyncify (can_fork: whether it has it) */
+int wasm_import(user, can_fork)(void);
+void wasm_import(user, start_unwind)(void);
+void wasm_import(user, stop_unwind)(void);
+void wasm_import(user, start_rewind)(void);
+void wasm_import(user, stop_rewind)(void);
+#endif
+
 #ifdef CONFIG_WASM_HOST_DEVICES
 void wasm_import(kernel, console_write)(const u8 *buf, size_t len);
 /* bytes the host has for the console, up to len; 0: none */

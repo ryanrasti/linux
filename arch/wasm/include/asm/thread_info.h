@@ -40,6 +40,14 @@ struct thread_info {
 	/* where that return goes (struct jmp_buf_impl, in wasm_user_enter) */
 	void *user_jb;
 #endif
+#ifdef CONFIG_EXOBOX
+	/* fork: the program is unwinding for it (arch/wasm/exobox/fork.c) */
+	int forking;
+	unsigned long fork_flags, fork_ptid, fork_ctid, fork_tls;
+	/* ...or rewinding into the clone call, which then returns rewind_ret */
+	int rewinding;
+	long rewind_ret;
+#endif
 };
 
 #ifndef current_thread_info
