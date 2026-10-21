@@ -117,7 +117,9 @@ void __init setup_arch(char **cmdline_p)
 		pr_warn("failed to read '/chosen/ncpus', defaulting to 1: %d\n", ret);
 		ncpus = 1;
 	}
+#ifdef CONFIG_SMP
 	smp_init_cpus(ncpus);
+#endif
 
 	memblock_dump_all();
 }
