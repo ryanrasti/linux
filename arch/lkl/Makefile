@@ -17,6 +17,9 @@ LINUXINCLUDE := -isystem arch/lkl/include/system $(LINUXINCLUDE)
 KBUILD_CFLAGS += -mno-ms-bitfields -D__DISABLE_EXPORTS
 else ifeq ($(exec_format),wasm)
 # wasm32: built to vmlinux.a only; linked by wasm-ld outside kbuild
+# uname -m: the machine programs run on (as config.guess, Python's
+# platform.machine() see it), not how the kernel is built
+UTS_MACHINE := wasm32
 # no modules, and EXPORT_SYMBOL emits ELF-only section asm
 KBUILD_CFLAGS += -D__DISABLE_EXPORTS
 # wasm can't inspect its own call stack or take label addresses; use a
