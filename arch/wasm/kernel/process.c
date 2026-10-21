@@ -42,14 +42,27 @@ struct task_struct *__switch_to(struct task_struct *from,
 	 */
 	BUG_ON(atomic_read(&to_info->running_cpu) >= 0);
 	atomic_set(&to_info->running_cpu, cpu);
-	if (wasm_get_thread_done())
+	if (wasm_get_thread_done()) {
+		/* (one instance for every task: the next one isn't done) */
+		wasm_set_thread_done(0);
 		wasm_kernel_jspi_exit(to);
-	wasm_kernel_jspi_switch(from, to);
+	}
+	{
+		/*
+		 * Every task runs on the same instance, so its globals are the
+		 * last task's when it resumes: its stack pointer (a wasm local
+		 * here, kept on its own JSPI stack), cpu and task are its own.
+		 */
+		void *sp = get_stack_pointer();
+
+		wasm_kernel_jspi_switch(from, to);
+		set_stack_pointer(sp);
+	}
 	cpu = atomic_read(&from_info->running_cpu);
 	BUG_ON(cpu < 0 || cpu >= nr_cpu_ids || cpu != from_info->cpu);
 	set_current_cpu(cpu);
 	prev = get_current_task_on(cpu);
-	set_current_task(current);
+	set_current_task(from);
 	return prev;
 #endif
 
