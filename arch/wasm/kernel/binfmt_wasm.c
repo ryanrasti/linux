@@ -339,6 +339,28 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	if (!chunk)
 		return -ENOMEM;
 
+#ifdef CONFIG_WASM_JSPI
+	{
+		/*
+		 * The host may have this file compiled already (same device,
+		 * inode, size and mtime): then nothing is read or sent, and it
+		 * has the module and its memory ready, as compile_end would.
+		 */
+		struct inode *inode = file_inode(bprm->file);
+		struct timespec64 mtime = inode_get_mtime(inode);
+		char key[96];
+		int len = snprintf(key, sizeof(key), "%u:%lu:%lld:%lld.%ld",
+				   inode->i_sb->s_dev, inode->i_ino, filesize,
+				   (long long)mtime.tv_sec, mtime.tv_nsec);
+
+		ret = wasm_user_compile_cached(key, len, user_memory_limit_pages());
+		if (ret < 0)
+			goto err;
+		if (ret == 0)
+			goto compiled;
+		/* (1: not cached; compile_end caches it under this key) */
+	}
+#endif
 	ret = wasm_user_compile_begin((u32)filesize);
 	if (ret)
 		goto err;
@@ -366,6 +388,9 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	ret = wasm_user_compile_end(user_memory_limit_pages());
 	if (ret)
 		goto err;
+#ifdef CONFIG_WASM_JSPI
+compiled:
+#endif
 
 	kfree(chunk);
 	chunk = NULL;

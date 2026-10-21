@@ -76,6 +76,8 @@ void wasm_import(kernel, jspi_exit)(void *to);
 int wasm_import(kernel, jspi_idle)(void *word, long long timeout_ns);
 /* lets the event loop run (an irq may arrive); a no-op outside a task */
 void wasm_import(kernel, jspi_yield)(void);
+/* 0: the host has key's module compiled, and its memory ready; 1: compile it (compile_begin...) */
+int wasm_import(user, compile_cached)(const char *key, u32 key_len, u32 maximum_memory_pages);
 /* the kernel table's index of the current program's _start */
 u32 wasm_import(user, entry)(void);
 /* the kernel table's index of the current program's table[fn] */
