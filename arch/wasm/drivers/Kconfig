@@ -7,3 +7,13 @@ config VIRTIO_WASM
 config FB_WASM
 	tristate
 	depends on FB
+
+config WASM_HOST_DEVICES
+	bool "Console and disks as direct host calls"
+	default WASM_JSPI
+	select HVC_DRIVER
+	select HVC_IRQ
+	help
+	  hvc0 and /dev/vd[a-z] backed by host imports (kernel.console_*,
+	  kernel.blk_*), called synchronously: no virtqueues. A disk request
+	  completes in the call that submits it.
