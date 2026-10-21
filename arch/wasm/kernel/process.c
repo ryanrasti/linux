@@ -152,6 +152,8 @@ static void wasm_user_enter(void)
 	ti->user_jb = &jb;
 	setjmp(jb);
 	do {
+		/* (a trap from here on is the program's: see exobox/fault.c) */
+		current_pt_regs()->user_mode = 1;
 		if (ti->clone_fn) {
 			u32 fn = ti->clone_fn;
 

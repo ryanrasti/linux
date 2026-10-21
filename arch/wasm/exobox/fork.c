@@ -32,10 +32,12 @@ bool exobox_syscall_enter(long nr, const unsigned long args[6], long *ret)
 	if (nr != __NR_clone || args[0] || (args[2] & CLONE_VM))
 		return false;
 	/*
-	 * The copy is of one memory at one moment: not while another task
-	 * shares it (as a thread), which could run before the child does.
+	 * The copy is of one memory at one moment, which other threads of the
+	 * process can't change meanwhile: one CPU, and the program unwinds
+	 * without a syscall (no switch) until the copy. The child is a copy
+	 * of this thread, as fork from a thread is everywhere.
 	 */
-	if (!wasm_user_can_fork() || atomic_read(&current->mm->mm_users) > 1) {
+	if (!wasm_user_can_fork()) {
 		*ret = -ENOSYS;
 		return true;
 	}

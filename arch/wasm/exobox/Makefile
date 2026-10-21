@@ -1,1 +1,1 @@
-obj-y += fork.o
+obj-y += fault.o fork.o
