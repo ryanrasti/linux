@@ -68,6 +68,11 @@ int ramfs_nommu_expand_for_mapping(struct inode *inode, size_t newsize)
 	int ret;
 	gfp_t gfp = mapping_gfp_mask(inode->i_mapping);
 
+	/* nothing to allocate for an empty file (get_order(0) is undefined):
+	 * shmem_file_setup() of size 0, as memfd_create() does */
+	if (!newsize)
+		return 0;
+
 	/* make various checks */
 	order = get_order(newsize);
 	if (unlikely(order > MAX_PAGE_ORDER))
