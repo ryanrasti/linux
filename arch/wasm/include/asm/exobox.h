@@ -3,6 +3,7 @@
 #ifndef _WASM_EXOBOX_H
 #define _WASM_EXOBOX_H
 
+#include <linux/jiffies.h>
 #include <linux/types.h>
 
 /*
@@ -12,6 +13,14 @@
 bool exobox_syscall_enter(long nr, unsigned long args[6], long *ret);
 /* ...fork's part: its rewind's end, and its start (fork.c) */
 bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret);
+/* a syscall's preemption point, past a time slice: the host's event loop turns (preempt.c) */
+extern unsigned long exobox_slice_end;
+void exobox_preempt(void);
+static inline void exobox_syscall_preempt(void)
+{
+	if (unlikely(time_after_eq(jiffies, exobox_slice_end)))
+		exobox_preempt();
+}
 /* after the program's entry returned: true if it unwound for fork (now rewound) */
 bool exobox_fork_unwound(void);
 /* a fork child's kernel_clone fn */

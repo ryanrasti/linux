@@ -40,7 +40,8 @@ config EXOBOX
 	help
 	  What exobox's host (packages/exobox in its fork of tombl/distro)
 	  adds, in arch/wasm/exobox/: fork (clone returning twice, the
-	  program unwinding its stack with Asyncify).
+	  program unwinding its stack with Asyncify), and a preemption point
+	  at syscalls, where the host's event loop turns once a time slice.
 
 config EXOBOX_HOSTSOCK
 	bool "The guest's inet sockets made by the host"

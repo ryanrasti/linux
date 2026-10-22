@@ -69,6 +69,9 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		 */
 		wasm_timer_check();
 		wasm_service_remote_request(current);
+#ifdef CONFIG_EXOBOX
+		exobox_syscall_preempt();
+#endif
 
 		if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
 			regs->syscall_return = -ENOSYS;
