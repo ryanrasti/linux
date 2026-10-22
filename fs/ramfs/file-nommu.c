@@ -186,6 +186,17 @@ static long ramfs_nommu_fallocate(struct file *file, int mode, loff_t offset, lo
 		ret = inode_newsize_ok(inode, end);
 		if (!ret)
 			ret = ramfs_nommu_resize(inode, end, inode->i_size);
+		/*
+		 * Too big to allocate contiguously (an empty file grows for a
+		 * shared mapping, all at once): the size alone, its pages
+		 * allocated as written, as ramfs's are (InnoDB's 12 MiB
+		 * ibdata1). It can't then be mapped shared, which a file this
+		 * size seldom is.
+		 */
+		if (ret == -EFBIG || ret == -ENOMEM) {
+			truncate_setsize(inode, end);
+			ret = 0;
+		}
 		if (!ret)
 			inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 	}
