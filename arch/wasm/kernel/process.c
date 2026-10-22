@@ -226,8 +226,9 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (args->fn == wasm_call_clone_fn)
 		user_memory = args->flags & CLONE_VM ?
 			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
-	if (exobox_is_fork(args->fn))	/* (arch/wasm/exobox/fork.c) */
-		user_memory = WASM_USER_MEMORY_COPY;
+	if (exobox_is_fork(args->fn))	/* (arch/wasm/exobox/fork.c: vfork shares) */
+		user_memory = args->flags & CLONE_VM ?
+			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
 	if (user_memory != WASM_USER_MEMORY_NONE)
 		task_thread_info(p)->context_mm = p->mm;
 

@@ -9,6 +9,13 @@
  * wasm_user_enter, which makes the child, its memory a copy of the
  * parent's (the saved stack in it); then both rewind into the same clone
  * call, which returns the child's pid in the parent and 0 in the child.
+ *
+ * vfork (CLONE_VM | CLONE_VFORK, no function) is the same but for the
+ * copy: the child is a new instance of the program over the parent's
+ * memory, rewinding from the same saved stack, while the parent waits in
+ * kernel_clone (CLONE_VFORK) until it execs or exits; then the parent
+ * rewinds (the host puts Asyncify's header back as it unwound). As
+ * vfork's child does anywhere, it runs on the parent's stack and memory.
  */
 #include "exobox.h"
 #include <asm/wasm_imports.h>
@@ -35,8 +42,9 @@ bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret)
 		return true;
 	}
 
-	/* clone(fn, fn_arg, flags, ptid, ctid, tls) with neither: fork */
-	if (nr != __NR_clone || args[0] || (args[2] & CLONE_VM))
+	/* clone(fn, fn_arg, flags, ptid, ctid, tls) with neither: fork; with both CLONE_VM and CLONE_VFORK: vfork */
+	if (nr != __NR_clone || args[0] ||
+	    (args[2] & (CLONE_VM | CLONE_VFORK)) == CLONE_VM)
 		return false;
 	/*
 	 * The copy is of one memory at one moment, which other threads of the
@@ -94,7 +102,7 @@ bool exobox_fork_unwound(void)
 		return false;
 	ti->exobox.forking = 0;
 	wasm_user_stop_unwind();
-	/* (the host copies the memory now: copy_thread's WASM_USER_MEMORY_COPY) */
+	/* (the host copies the memory now: copy_thread's WASM_USER_MEMORY_COPY; vfork: shares it, and this waits) */
 	ti->exobox.rewind_ret = exobox_fork(ti);
 	ti->exobox.rewinding = 1;
 	wasm_user_start_rewind();
