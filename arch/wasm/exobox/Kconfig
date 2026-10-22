@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# exobox's host interface, part by part (arch/wasm/exobox/)
+
+config EXOBOX_HOSTFUSE
+	bool "Host directories: filesystems the host serves with FUSE (hostfuse)"
+	depends on EXOBOX && FUSE_FS=y
+	help
+	  mount -t hostfuse TAG DIR mounts the host's filesystem TAG: FUSE
+	  requests go straight to the host as lists of their pieces, and its
+	  replies come back the same way, without virtqueues (hostfuse.c).
+
+config EXOBOX_HOSTSOCK
+	bool "The guest's inet sockets made by the host"
+	depends on EXOBOX && INET
+	default y
+	help
+	  AF_INET and AF_INET6 stream and datagram sockets whose peer isn't
+	  the guest itself are the host's (its network, its policy), through
+	  kernel.sock_* imports; loopback ones stay the kernel's.
