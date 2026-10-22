@@ -23,12 +23,17 @@ int wasm_stream_file(struct file *file);
  */
 bool exobox_syscall_enter(long nr, unsigned long args[6], long *ret);
 
-/* a syscall's preemption point, past a time slice: the host's event loop turns (preempt.c) */
+/*
+ * a syscall's preemption point, past a time slice or when the host asks (its
+ * work in progress): the host's event loop turns (preempt.c)
+ */
 extern unsigned long exobox_slice_end;
+extern int exobox_host_turn;
 void exobox_preempt(void);
 static inline void exobox_syscall_preempt(void)
 {
-	if (unlikely(time_after_eq(jiffies, exobox_slice_end)))
+	if (unlikely(time_after_eq(jiffies, exobox_slice_end) ||
+		     READ_ONCE(exobox_host_turn)))
 		exobox_preempt();
 }
 

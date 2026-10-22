@@ -26,6 +26,15 @@
  * and at least a tick (10 ms at HZ=100): the loop turns at most once a
  * tick. It's measured from the last turn here, not from the loop's turns
  * when the CPU idled: after an idle, the first syscall turns once more.
+ *
+ * And the host may ask for turns sooner (exobox_host_turn, nonzero): while
+ * it works on something the kernel waits for that ends soon by itself (a
+ * host directory's request, served from the host's files), which needs
+ * turns of the loop of its own, one for each file operation it awaits.
+ * Else, while another process keeps the CPU, each such request would take
+ * a time slice or more. Meanwhile each syscall yields, and the host turns
+ * the loop at most so often (its HOST_WORK_TURN_MS), returning at once
+ * otherwise.
  */
 #include "exobox.h"
 #include <asm/wasm_imports.h>
@@ -39,6 +48,14 @@
 
 /* the first slice is from boot (jiffies start at INITIAL_JIFFIES, not 0) */
 unsigned long exobox_slice_end = INITIAL_JIFFIES + SLICE_JIFFIES;
+
+/* the host's to set: turns asked for (while its work is in progress) */
+int exobox_host_turn;
+
+__attribute__((export_name("host_turn_word"))) int *exobox_host_turn_word(void)
+{
+	return &exobox_host_turn;
+}
 
 void exobox_preempt(void)
 {
