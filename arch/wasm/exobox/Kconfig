@@ -20,6 +20,25 @@ config EXOBOX_EXEC_CACHE
 	  size and mtime): exec of a file it has compiled before sends
 	  nothing (user.compile_cached).
 
+config EXOBOX_CONSOLE
+	bool "The console (hvc0) as direct host calls"
+	depends on EXOBOX && TTY
+	default y
+	select HVC_DRIVER
+	select HVC_IRQ
+	help
+	  hvc0 backed by host imports (kernel.console_*): output written to
+	  the host at once, input read when the host raises its interrupt.
+	  No virtqueues (console.c).
+
+config EXOBOX_HOSTBLK
+	bool "Disks as direct host calls (hostblk)"
+	depends on EXOBOX && BLOCK
+	default y
+	help
+	  /dev/vda, vdb, ... backed by host imports (kernel.blk_*): no
+	  virtqueues (hostblk.c).
+
 config EXOBOX_HOSTFUSE
 	bool "Host directories: filesystems the host serves with FUSE (hostfuse)"
 	depends on EXOBOX && FUSE_FS=y

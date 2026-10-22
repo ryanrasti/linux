@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * hvc0 as direct host calls (CONFIG_WASM_HOST_DEVICES): output is written
+ * hvc0 as direct host calls (CONFIG_EXOBOX_CONSOLE): output is written
  * to the host at once; input is the host's buffer, read when the host
  * raises the console's irq.
  */
 #include <linux/init.h>
 #include <asm/irq.h>
-#include <asm/wasm_imports.h>
 #include "hvc_console.h"
+#include "exobox.h"
+
+void exobox_import(kernel, console_write)(const u8 *buf, size_t len);
+/* bytes the host has for the console, up to len; 0: none */
+int exobox_import(kernel, console_read)(u8 *buf, size_t len);
+/* the irq the host raises when it has console input */
+void exobox_import(kernel, console_irq)(int irq);
 
 static ssize_t hvc_wasm_put(u32 vtermno, const u8 *buf, size_t count)
 {

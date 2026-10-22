@@ -88,20 +88,6 @@ u32 wasm_import(user, entry)(void);
 u32 wasm_import(user, func)(u32 fn);
 #endif
 
-#ifdef CONFIG_WASM_HOST_DEVICES
-void wasm_import(kernel, console_write)(const u8 *buf, size_t len);
-/* bytes the host has for the console, up to len; 0: none */
-int wasm_import(kernel, console_read)(u8 *buf, size_t len);
-/* the irq the host raises when it has console input */
-void wasm_import(kernel, console_irq)(int irq);
-int wasm_import(kernel, blk_count)(void);
-u64 wasm_import(kernel, blk_size)(int disk);
-int wasm_import(kernel, blk_writable)(int disk);
-/* 0, or a negative errno */
-int wasm_import(kernel, blk_read)(int disk, u64 offset, void *buf, u32 len);
-int wasm_import(kernel, blk_write)(int disk, u64 offset, const void *buf, u32 len);
-#endif
-
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Disks as direct host calls (CONFIG_WASM_HOST_DEVICES): /dev/vda, vdb, ...,
+ * Disks as direct host calls (CONFIG_EXOBOX_HOSTBLK): /dev/vda, vdb, ...,
  * one per kernel.blk_count(). Each request's segments are read or written
  * by host calls, and the request completes before queue_rq returns.
  */
@@ -8,7 +8,14 @@
 #include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <asm/wasm_imports.h>
+#include "exobox.h"
+
+int exobox_import(kernel, blk_count)(void);
+u64 exobox_import(kernel, blk_size)(int disk);
+int exobox_import(kernel, blk_writable)(int disk);
+/* 0, or a negative errno */
+int exobox_import(kernel, blk_read)(int disk, u64 offset, void *buf, u32 len);
+int exobox_import(kernel, blk_write)(int disk, u64 offset, const void *buf, u32 len);
 
 struct hostblk {
 	int id;
