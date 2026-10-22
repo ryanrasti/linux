@@ -34,6 +34,50 @@
 #include "exobox.h"
 #include <asm/irq.h>
 
+/*
+ * Sockets the host makes, for the guest's AF_INET(6) sockets whose peer
+ * isn't the guest itself. Addresses are Linux's
+ * sockaddr_in(6), in the kernel's memory. None of these waits: the host
+ * works meanwhile, and its sockets' state (sock_state) changes as it goes,
+ * each change raising sock_irq's interrupt.
+ */
+/* the guest has a network: 1 (then sock_irq), or 0: none (loopback only) */
+int exobox_import(kernel, sock_init)(void);
+/* the interrupt to raise when sockets' state changed (0: none) */
+void exobox_import(kernel, sock_irq)(int irq);
+/* a socket (AF_INET(6); SOCK_STREAM or SOCK_DGRAM): its handle (> 0), or a negative errno */
+int exobox_import(kernel, sock_open)(int family, int type);
+/* start connecting a stream: 0 (then CONNECTED or FAILED), or a negative errno */
+int exobox_import(kernel, sock_connect)(int sock, const void *addr, int addr_len);
+/* offer a listener on addr's port to the host: 0 (then LISTENING, or FAILED: -EPERM if not published) */
+int exobox_import(kernel, sock_listen)(int sock, const void *addr, int addr_len, int backlog);
+/* a connection the host took on a listener: its handle, or -EAGAIN */
+int exobox_import(kernel, sock_accept)(int sock);
+/* len bytes of buf (a stream: as many as it takes now; a datagram to addr, whole): how many, -EAGAIN, or an errno */
+long exobox_import(kernel, sock_send)(int sock, const void *buf, unsigned long len, const void *addr, int addr_len);
+/* into buf, at most len: a stream's next (0: its end), or the next datagram (its source at addr); -EAGAIN if none; peek: leave them */
+long exobox_import(kernel, sock_recv)(int sock, void *buf, unsigned long len, int peek, void *addr, int *addr_len);
+/* the socket's address, or its peer's, at addr: its length, or a negative errno */
+int exobox_import(kernel, sock_getname)(int sock, void *addr, int peer);
+int exobox_import(kernel, sock_shutdown)(int sock, int how);
+void exobox_import(kernel, sock_close)(int sock);
+/* a socket whose state changed since, or 0 */
+int exobox_import(kernel, sock_changed)(void);
+/* its HOSTSOCK_* bits, and with HOSTSOCK_FAILED its errno above HOSTSOCK_ERRNO_SHIFT */
+unsigned int exobox_import(kernel, sock_state)(int sock);
+/* the bytes a stream has to read (FIONREAD) */
+unsigned long exobox_import(kernel, sock_pending)(int sock);
+
+/* a host socket's state (sock_state) */
+#define HOSTSOCK_CONNECTED	1	/* a stream's connection is made */
+#define HOSTSOCK_LISTENING	2	/* the host publishes the listener */
+#define HOSTSOCK_READABLE	4	/* bytes, or datagrams, to read */
+#define HOSTSOCK_WRITABLE	8	/* room for more to send */
+#define HOSTSOCK_EOF		16	/* the peer won't send more */
+#define HOSTSOCK_FAILED		32	/* connect or listen failed, or reset */
+#define HOSTSOCK_ACCEPTABLE	64	/* a listener's connections wait */
+#define HOSTSOCK_ERRNO_SHIFT	16
+
 #define AF_HOSTSOCK	AF_ECONET	/* the guest's AF_INET sockets */
 #define AF_HOSTSOCK6	AF_WANPIPE	/* ...and AF_INET6 */
 

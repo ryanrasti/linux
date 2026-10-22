@@ -15,6 +15,13 @@
 #include <linux/limits.h>
 #include <linux/slab.h>
 
+/*
+ * exec, after the program: the path of the next library to send it, in
+ * buf (>0), or 0 (no more), or a negative errno. err: why the last path
+ * couldn't be sent (0: it was), for the host to try the next place.
+ */
+int exobox_import(user, exec_lib)(char *buf, u32 size, int err);
+
 int exobox_exec_libraries(void)
 {
 	char *path = kmalloc(PATH_MAX, GFP_KERNEL);

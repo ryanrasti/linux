@@ -16,6 +16,13 @@
 #include <linux/sched/task.h>
 #include <linux/syscalls.h>
 
+/* the current program's Asyncify (can_fork: whether it has it) */
+int exobox_import(user, can_fork)(void);
+void exobox_import(user, start_unwind)(void);
+void exobox_import(user, stop_unwind)(void);
+void exobox_import(user, start_rewind)(void);
+void exobox_import(user, stop_rewind)(void);
+
 bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret)
 {
 	struct thread_info *ti = current_thread_info();
