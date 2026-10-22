@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# exobox's host interface, part by part (arch/wasm/exobox/)
+
+config EXOBOX_HOSTFUSE
+	bool "Host directories: filesystems the host serves with FUSE (hostfuse)"
+	depends on EXOBOX && FUSE_FS=y
+	help
+	  mount -t hostfuse TAG DIR mounts the host's filesystem TAG: FUSE
+	  requests go straight to the host as lists of their pieces, and its
+	  replies come back the same way, without virtqueues (hostfuse.c).

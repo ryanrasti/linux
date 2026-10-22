@@ -42,6 +42,8 @@ config EXOBOX
 	  adds, in arch/wasm/exobox/: fork (clone returning twice, the
 	  program unwinding its stack with Asyncify).
 
+source "arch/wasm/exobox/Kconfig"
+
 config CMDLINE
 	string "Kernel command string to append"
 	default ""
