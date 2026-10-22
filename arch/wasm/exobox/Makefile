@@ -1,1 +1,1 @@
-obj-y += debug.o fault.o fork.o
+obj-y += debug.o exec.o fault.o fork.o

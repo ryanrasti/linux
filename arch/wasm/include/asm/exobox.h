@@ -12,4 +12,10 @@ bool exobox_fork_unwound(void);
 /* a fork child's kernel_clone fn */
 int exobox_fork_child(void *unused);
 
+struct file;
+/* send a file's bytes to the host to compile (binfmt_wasm.c) */
+int wasm_stream_file(struct file *file);
+/* exec: a dynamically linked program's libraries, after it (exec.c) */
+int exobox_exec_libraries(void);
+
 #endif

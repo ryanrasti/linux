@@ -91,6 +91,12 @@ u32 wasm_import(user, func)(u32 fn);
 #endif
 
 #ifdef CONFIG_EXOBOX
+/*
+ * exec, after the program: the path of the next library to send it, in
+ * buf (>0), or 0 (no more), or a negative errno. err: why the last path
+ * couldn't be sent (0: it was), for the host to try the next place.
+ */
+int wasm_import(user, exec_lib)(char *buf, u32 size, int err);
 /* fork: the current program's Asyncify (can_fork: whether it has it) */
 int wasm_import(user, can_fork)(void);
 void wasm_import(user, start_unwind)(void);
