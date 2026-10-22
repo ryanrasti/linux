@@ -336,26 +336,10 @@ int wasm_stream_file(struct file *file)
 	if (filesize > U32_MAX)
 		return -EFBIG;
 
-#ifdef CONFIG_WASM_JSPI
-	{
-		/*
-		 * The host may have this file compiled already (same device,
-		 * inode, size and mtime): then nothing is read or sent, and it
-		 * has the module and its memory ready, as compile_end would.
-		 */
-		struct inode *inode = file_inode(file);
-		struct timespec64 mtime = inode_get_mtime(inode);
-		char key[96];
-		int len = snprintf(key, sizeof(key), "%u:%lu:%lld:%lld.%ld",
-				   inode->i_sb->s_dev, inode->i_ino, filesize,
-				   (long long)mtime.tv_sec, mtime.tv_nsec);
-
-		ret = wasm_user_compile_cached(key, len, user_memory_limit_pages());
-		if (ret <= 0)
-			return ret;
-		/* (1: not cached; compile_end caches it under this key) */
-	}
-#endif
+	/* the host may have it compiled already (arch/wasm/exobox/exec.c) */
+	ret = exobox_exec_cached(file, filesize, user_memory_limit_pages());
+	if (ret <= 0)
+		return ret;
 	chunk_size = min_t(loff_t, filesize, WASM_EXEC_MAX_CHUNK_SIZE);
 	chunk = kmalloc(max_t(u32, chunk_size, 1), GFP_KERNEL);
 	if (!chunk)

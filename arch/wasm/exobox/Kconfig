@@ -11,6 +11,15 @@ config EXOBOX
 	  at syscalls, where the host's event loop turns once a time slice;
 	  and the parts below, each its own option.
 
+config EXOBOX_EXEC_CACHE
+	bool "exec asks the host for the file's compiled module first"
+	depends on EXOBOX
+	default y
+	help
+	  The host keeps the modules it compiled, by file (device, inode,
+	  size and mtime): exec of a file it has compiled before sends
+	  nothing (user.compile_cached).
+
 config EXOBOX_HOSTFUSE
 	bool "Host directories: filesystems the host serves with FUSE (hostfuse)"
 	depends on EXOBOX && FUSE_FS=y

@@ -51,4 +51,14 @@ static inline bool exobox_is_fork(int (*fn)(void *)) { return false; }
 static inline int exobox_exec_libraries(void) { return 0; }
 #endif
 
+#ifdef CONFIG_EXOBOX_EXEC_CACHE
+/*
+ * exec: whether the host has this file compiled already (exec.c): 0 (then
+ * nothing is sent), 1 (send it, and the host caches it), or a negative errno
+ */
+int exobox_exec_cached(struct file *file, loff_t size, u32 max_memory_pages);
+#else
+static inline int exobox_exec_cached(struct file *file, loff_t size, u32 max_memory_pages) { return 1; }
+#endif
+
 #endif
