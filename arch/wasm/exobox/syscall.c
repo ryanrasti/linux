@@ -5,7 +5,7 @@
  * (hostsock.c: socket() redirected to its families, and getsockopt's
  * SO_DOMAIN answered for them).
  */
-#include <asm/exobox.h>
+#include "exobox.h"
 #include <linux/syscalls.h>
 
 bool exobox_syscall_enter(long nr, unsigned long args[6], long *ret)

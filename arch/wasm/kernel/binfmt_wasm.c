@@ -14,9 +14,7 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
-#ifdef CONFIG_EXOBOX
 #include <asm/exobox.h>
-#endif
 
 /* Four pages amortize host calls without requiring a large kernel allocation. */
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
@@ -409,12 +407,10 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	ret = wasm_stream_file(bprm->file);
 	if (ret)
 		return ret;
-#ifdef CONFIG_EXOBOX
-	/* a dynamically linked program's libraries, as the host asks for them */
+	/* a dynamically linked program's libraries (arch/wasm/exobox/exec.c) */
 	ret = exobox_exec_libraries();
 	if (ret)
 		goto err;
-#endif
 
 	ret = copy_args(bprm);
 	if (ret)

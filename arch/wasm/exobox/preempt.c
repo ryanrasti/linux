@@ -27,7 +27,7 @@
  * tick. It's measured from the last turn here, not from the loop's turns
  * when the CPU idled: after an idle, the first syscall turns once more.
  */
-#include <asm/exobox.h>
+#include "exobox.h"
 #include <asm/wasm_imports.h>
 #include <linux/irqflags.h>
 #include <linux/jiffies.h>

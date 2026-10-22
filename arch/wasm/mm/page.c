@@ -39,4 +39,3 @@ void arch_alloc_page(struct page *page, int order)
 {
 	materialize_memory(page_to_pfn(page) + (1UL << order));
 }
-

@@ -1,6 +1,7 @@
 #ifndef _WASM_THREAD_INFO_H
 #define _WASM_THREAD_INFO_H
 
+#include <asm/exobox_thread.h>
 #include <asm/page.h>
 #include <linux/types.h>
 
@@ -45,12 +46,7 @@ struct thread_info {
 	int user_entered;
 #endif
 #ifdef CONFIG_EXOBOX
-	/* fork: the program is unwinding for it (arch/wasm/exobox/fork.c) */
-	int forking;
-	unsigned long fork_flags, fork_ptid, fork_ctid, fork_tls;
-	/* ...or rewinding into the clone call, which then returns rewind_ret */
-	int rewinding;
-	long rewind_ret;
+	struct exobox_thread_info exobox;	/* (arch/wasm/exobox/) */
 #endif
 };
 

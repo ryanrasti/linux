@@ -10,7 +10,7 @@
  * parent's (the saved stack in it); then both rewind into the same clone
  * call, which returns the child's pid in the parent and 0 in the child.
  */
-#include <asm/exobox.h>
+#include "exobox.h"
 #include <asm/wasm_imports.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
@@ -21,10 +21,10 @@ bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret)
 	struct thread_info *ti = current_thread_info();
 
 	/* the end of a rewind: the clone call returning, a second time */
-	if (ti->rewinding) {
-		ti->rewinding = 0;
+	if (ti->exobox.rewinding) {
+		ti->exobox.rewinding = 0;
 		wasm_user_stop_rewind();
-		*ret = ti->rewind_ret;
+		*ret = ti->exobox.rewind_ret;
 		return true;
 	}
 
@@ -41,11 +41,11 @@ bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret)
 		*ret = -ENOSYS;
 		return true;
 	}
-	ti->forking = 1;
-	ti->fork_flags = args[2];
-	ti->fork_ptid = args[3];
-	ti->fork_ctid = args[4];
-	ti->fork_tls = args[5];
+	ti->exobox.forking = 1;
+	ti->exobox.fork_flags = args[2];
+	ti->exobox.fork_ptid = args[3];
+	ti->exobox.fork_ctid = args[4];
+	ti->exobox.fork_tls = args[5];
 	wasm_user_start_unwind();
 	*ret = 0;	/* (unused: the program unwinds past it) */
 	return true;
@@ -57,22 +57,22 @@ int exobox_fork_child(void *unused)
 
 	/* its program, a copy of the parent's, rewinds to return 0 from clone */
 	ti->rewinding_entry = 1;	/* (into the parent's entry_fn, inherited) */
-	ti->rewinding = 1;
-	ti->rewind_ret = 0;
+	ti->exobox.rewinding = 1;
+	ti->exobox.rewind_ret = 0;
 	wasm_user_start_rewind();
 	return 0;
 }
 
 static long exobox_fork(struct thread_info *ti)
 {
-	unsigned long flags = ti->fork_flags;
+	unsigned long flags = ti->exobox.fork_flags;
 	struct kernel_clone_args args = {
 		.flags = lower_32_bits(flags) & ~CSIGNAL,
 		.exit_signal = lower_32_bits(flags) & CSIGNAL,
-		.pidfd = (int __user *)ti->fork_ptid,
-		.parent_tid = (int __user *)ti->fork_ptid,
-		.child_tid = (int __user *)ti->fork_ctid,
-		.tls = ti->fork_tls,
+		.pidfd = (int __user *)ti->exobox.fork_ptid,
+		.parent_tid = (int __user *)ti->exobox.fork_ptid,
+		.child_tid = (int __user *)ti->exobox.fork_ctid,
+		.tls = ti->exobox.fork_tls,
 		.fn = exobox_fork_child,
 	};
 
@@ -83,13 +83,13 @@ bool exobox_fork_unwound(void)
 {
 	struct thread_info *ti = current_thread_info();
 
-	if (!ti->forking)
+	if (!ti->exobox.forking)
 		return false;
-	ti->forking = 0;
+	ti->exobox.forking = 0;
 	wasm_user_stop_unwind();
 	/* (the host copies the memory now: copy_thread's WASM_USER_MEMORY_COPY) */
-	ti->rewind_ret = exobox_fork(ti);
-	ti->rewinding = 1;
+	ti->exobox.rewind_ret = exobox_fork(ti);
+	ti->exobox.rewinding = 1;
 	wasm_user_start_rewind();
 	return true;
 }

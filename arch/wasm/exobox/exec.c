@@ -7,7 +7,7 @@
  * each in its requester's run paths, then /lib and /usr/lib), the kernel
  * opens it and streams it, and says whether it couldn't.
  */
-#include <asm/exobox.h>
+#include "exobox.h"
 #include <asm/wasm_imports.h>
 #include <linux/err.h>
 #include <linux/file.h>

@@ -31,7 +31,7 @@
 #include <net/ipv6.h>
 #include <net/sock.h>
 #include <asm/wasm_imports.h>
-#include <asm/exobox.h>
+#include "exobox.h"
 #include <asm/irq.h>
 
 #define AF_HOSTSOCK	AF_ECONET	/* the guest's AF_INET sockets */

@@ -7,9 +7,7 @@
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
-#ifdef CONFIG_EXOBOX
 #include <asm/exobox.h>
-#endif
 
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -171,12 +169,8 @@ static void wasm_user_enter(void)
 			((int (*)(u32))(uintptr_t)wasm_user_func(ti->entry_fn))(ti->entry_arg);
 		else
 			((void (*)(void))(uintptr_t)wasm_user_entry())();
-#ifdef CONFIG_EXOBOX
 	/* (it returned because it unwound for fork: on into the rewind) */
 	} while (exobox_fork_unwound());
-#else
-	} while (0);
-#endif
 	ti->user_entered = 0;
 }
 
@@ -311,10 +305,8 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (args->fn == wasm_call_clone_fn)
 		user_memory = args->flags & CLONE_VM ?
 			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
-#ifdef CONFIG_EXOBOX
-	if (args->fn == exobox_fork_child)
+	if (exobox_is_fork(args->fn))	/* (arch/wasm/exobox/fork.c) */
 		user_memory = WASM_USER_MEMORY_COPY;
-#endif
 	if (user_memory != WASM_USER_MEMORY_NONE)
 		task_thread_info(p)->context_mm = p->mm;
 
