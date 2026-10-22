@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <asm/irq.h>
+#include <asm/jspi.h>
 #include <asm/remote_vm.h>
 #include <asm/thread_info.h>
 #include <asm/wasm_imports.h>
@@ -151,6 +152,8 @@ int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 	u64 deadline;
 	int result = 0;
 
+	if (IS_ENABLED(CONFIG_WASM_JSPI))
+		return wasm_jspi_access_remote_vm(mm, addr, buf, len, gup_flags);
 	if (len <= 0)
 		return 0;
 	len = min_t(int, len, PAGE_SIZE - offset_in_page(addr));

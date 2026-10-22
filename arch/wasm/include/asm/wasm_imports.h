@@ -82,6 +82,11 @@ void wasm_import(kernel, jspi_restart)(void);
 int wasm_import(kernel, jspi_idle)(void *word, long long timeout_ns);
 /* lets the event loop run (an irq may arrive); a no-op outside a task */
 void wasm_import(kernel, jspi_yield)(void);
+/*
+ * len bytes between buf (the kernel's) and addr in task's user memory (to
+ * it if write): what was copied (0: none, task having no program)
+ */
+int wasm_import(kernel, jspi_access_task)(void *task, unsigned long addr, void *buf, int len, int write);
 /* the kernel table's index of the current program's _start */
 u32 wasm_import(user, entry)(void);
 /* the kernel table's index of the current program's table[fn] */

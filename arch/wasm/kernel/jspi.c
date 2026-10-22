@@ -10,7 +10,10 @@
 #include <asm/globals.h>
 #include <asm/jspi.h>
 #include <asm/wasm_imports.h>
+#include <linux/mm.h>
 #include <linux/ptrace.h>
+#include <linux/rcupdate.h>
+#include <linux/sched/signal.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/sched/task_stack.h>
@@ -104,4 +107,31 @@ __attribute__((export_name("user_restart"))) void wasm_user_restart(void)
 {
 	set_stack_pointer(task_pt_regs(current) - 1);
 	user_restart_inner();
+}
+
+/*
+ * Another process's memory (/proc/<pid>/cmdline, environ, ptrace): every
+ * process's is the host's, in this one isolate, so it copies from a task
+ * of the mm's directly. (remote_vm.c asks the owner's worker instead, which
+ * here can't run while this task waits.)
+ */
+int wasm_jspi_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
+			       int len, unsigned int gup_flags)
+{
+	struct task_struct *p, *t;
+	int ret = 0;
+
+	if (len <= 0)
+		return 0;
+	rcu_read_lock();
+	for_each_process_thread(p, t) {
+		if (t->mm == mm) {
+			ret = wasm_kernel_jspi_access_task(t, addr, buf, len,
+							   !!(gup_flags & FOLL_WRITE));
+			goto out;
+		}
+	}
+out:
+	rcu_read_unlock();
+	return ret;
 }
