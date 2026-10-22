@@ -65,13 +65,29 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 		const kernel_siginfo_t *previous = ti->active_siginfo;
 
 		ti->active_siginfo = &ksig->info;
+#ifdef CONFIG_WASM_JSPI
+		/*
+		 * Through the kernel's own table, as a thread's entry is: no host
+		 * frame between the kernel and the handler, so the handler's own
+		 * syscalls can suspend (a SIGCHLD handler's waitpid).
+		 */
+		((void (*)(u32, u32))(uintptr_t)wasm_user_func(
+			(uintptr_t)sa->sa_restorer))((uintptr_t)sa->sa_handler,
+						     ksig->sig);
+#else
 		failed = wasm_user_call_siginfo_handler(
 			(uintptr_t)sa->sa_restorer, (uintptr_t)sa->sa_handler,
 			ksig->sig);
+#endif
 		ti->active_siginfo = previous;
 	} else {
+#ifdef CONFIG_WASM_JSPI
+		((void (*)(int))(uintptr_t)wasm_user_func(
+			(uintptr_t)sa->sa_handler))(ksig->sig);
+#else
 		wasm_user_call_signal_handler((uintptr_t)sa->sa_handler,
 					      ksig->sig);
+#endif
 	}
 
 	local_irq_disable();
