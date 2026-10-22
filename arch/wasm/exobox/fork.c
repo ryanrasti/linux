@@ -16,7 +16,7 @@
 #include <linux/sched/task.h>
 #include <linux/syscalls.h>
 
-bool exobox_syscall_enter(long nr, const unsigned long args[6], long *ret)
+bool exobox_fork_enter(long nr, const unsigned long args[6], long *ret)
 {
 	struct thread_info *ti = current_thread_info();
 

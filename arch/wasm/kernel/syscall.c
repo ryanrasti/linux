@@ -37,6 +37,8 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 
 		if (exobox_syscall_enter(nr, args, &ret))
 			return ret;
+		arg0 = args[0], arg1 = args[1], arg2 = args[2];
+		arg3 = args[3], arg4 = args[4], arg5 = args[5];
 	}
 #endif
 	regs->syscall_args[0] = arg0;
