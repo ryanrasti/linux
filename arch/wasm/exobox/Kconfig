@@ -20,6 +20,18 @@ config EXOBOX_EXEC_CACHE
 	  size and mtime): exec of a file it has compiled before sends
 	  nothing (user.compile_cached).
 
+config EXOBOX_EXEC_REF
+	bool "exec of a module named by its content's hash (exobox.ref)"
+	depends on EXOBOX
+	default y
+	help
+	  A program or library whose first sections include a custom
+	  section exobox.ref (after dylink.0, if any) names a module by its
+	  content's hash: exec asks the host for it first
+	  (user.exec_ref), and if it has it, nothing more is read or sent.
+	  If it hasn't, the file is sent as usual, unless it's a stub
+	  (custom sections alone): then exec fails with ENOEXEC.
+
 config EXOBOX_CONSOLE
 	bool "The console (hvc0) as direct host calls"
 	depends on EXOBOX && TTY
