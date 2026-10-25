@@ -16,6 +16,13 @@
  * numbers (AF_ECONET, AF_WANPIPE), as nothing else registers them. Every
  * socket has its inner inet socket from the start: it keeps the options,
  * and an undecided socket behaves as inet.
+ *
+ * AF_VSOCK stream sockets are the host's alone, with no inner socket: the
+ * channel between the guest and the host itself (not its network, nor its
+ * policy), as a VM's vsock is. Their addresses are sockaddr_vm's; the
+ * guest is VMADDR_CID_GUEST, the host VMADDR_CID_HOST. A listener's
+ * connections are the host's; a connection's peer is the host. They're
+ * registered as AF_VSOCK itself (no CONFIG_VSOCKETS: nothing else is).
  */
 #include <linux/inet.h>
 #include <linux/interrupt.h>
@@ -28,6 +35,7 @@
 #include <linux/uio.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
+#include <linux/vm_sockets.h>
 #include <net/ipv6.h>
 #include <net/sock.h>
 #include <asm/wasm_imports.h>
@@ -41,11 +49,11 @@
  * works meanwhile, and its sockets' state (sock_state) changes as it goes,
  * each change raising sock_irq's interrupt.
  */
-/* the guest has a network: 1 (then sock_irq), or 0: none (loopback only) */
+/* what the host has for the guest's sockets: HOSTSOCK_INET (its network) and HOSTSOCK_VSOCK (itself), or 0 (then no sock_irq) */
 int exobox_import(kernel, sock_init)(void);
 /* the interrupt to raise when sockets' state changed (0: none) */
 void exobox_import(kernel, sock_irq)(int irq);
-/* a socket (AF_INET(6); SOCK_STREAM or SOCK_DGRAM): its handle (> 0), or a negative errno */
+/* a socket (AF_INET(6); SOCK_STREAM or SOCK_DGRAM; AF_VSOCK, SOCK_STREAM): its handle (> 0), or a negative errno */
 int exobox_import(kernel, sock_open)(int family, int type);
 /* start connecting a stream: 0 (then CONNECTED or FAILED), or a negative errno */
 int exobox_import(kernel, sock_connect)(int sock, const void *addr, int addr_len);
@@ -78,6 +86,13 @@ unsigned long exobox_import(kernel, sock_pending)(int sock);
 #define HOSTSOCK_ACCEPTABLE	64	/* a listener's connections wait */
 #define HOSTSOCK_ERRNO_SHIFT	16
 
+/* what the host has (sock_init) */
+#define HOSTSOCK_INET		1
+#define HOSTSOCK_VSOCK		2
+
+/* the guest's CID (the host is VMADDR_CID_HOST) */
+#define VMADDR_CID_GUEST	3
+
 #define AF_HOSTSOCK	AF_ECONET	/* the guest's AF_INET sockets */
 #define AF_HOSTSOCK6	AF_WANPIPE	/* ...and AF_INET6 */
 
@@ -89,18 +104,19 @@ enum mode { UNDECIDED, LOCAL, REMOTE };
 struct hsock {
 	struct sock sk;			/* first: the sock is ours */
 	struct socket *inner;		/* local traffic, and the options' record */
-	int family;			/* AF_INET or AF_INET6 */
+	int family;			/* AF_INET, AF_INET6 or AF_VSOCK */
 	enum mode mode;
 	int hid;			/* the host's socket (REMOTE) */
 	bool listener;			/* a REMOTE listener (and its inner one) */
 	bool error_told;		/* a failure's errno is in sk_err, once */
 	struct sockaddr_storage peer;	/* a REMOTE datagram socket's connect() */
 	int peer_len;
+	struct sockaddr_vm bound;	/* a vsock's bind() (svm_family 0: none) */
 };
 
 #define hs_sk(sk) ((struct hsock *)(sk))
 
-static const struct proto_ops hostsock_stream_ops, hostsock_dgram_ops;
+static const struct proto_ops hostsock_stream_ops, hostsock_dgram_ops, hostsock_vsock_ops;
 
 static bool hostsock_on;
 static int hostsock_irq;
@@ -218,7 +234,7 @@ static int hs_open(struct hsock *hs)
 /* a published listener's inner one has a connection to accept */
 static bool hs_inner_acceptable(struct hsock *hs)
 {
-	return hs->listener &&
+	return hs->listener && hs->inner &&
 	       (hs->inner->ops->poll(NULL, hs->inner, NULL) & EPOLLIN);
 }
 
@@ -372,12 +388,40 @@ static int hostsock_bind(struct socket *sock, struct sockaddr_unsized *uaddr, in
 	return hs->inner->ops->bind(hs->inner, uaddr, len);
 }
 
+/* a REMOTE stream's connect(), once asked: connecting, or connected, or failed */
+static int hs_connected(struct socket *sock, struct hsock *hs, int flags)
+{
+	long timeo;
+	int err;
+
+	if (hs_state(hs) & HOSTSOCK_CONNECTED) {
+		if (sock->state == SS_CONNECTED)
+			return -EISCONN;
+		sock->state = SS_CONNECTED;
+		return 0;
+	}
+	timeo = sock_sndtimeo(sock->sk, flags & O_NONBLOCK);
+	err = hs_wait(hs, HOSTSOCK_CONNECTED, &timeo);
+	if (err == -EAGAIN)
+		return sock->state == SS_CONNECTING && !(flags & O_NONBLOCK) ?
+			-ETIMEDOUT : -EINPROGRESS;
+	if (err)
+		return err;
+	err = hs_error(hs_state(hs));
+	if (err) {
+		hs->error_told = true;
+		sock->state = SS_UNCONNECTED;
+		return err;
+	}
+	sock->state = SS_CONNECTED;
+	return 0;
+}
+
 static int hostsock_stream_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
 				   int len, int flags)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct hsock *hs = hs_sk(sock->sk);
-	long timeo;
 	int err;
 
 	if (hs->mode == LOCAL)
@@ -401,29 +445,7 @@ static int hostsock_stream_connect(struct socket *sock, struct sockaddr_unsized 
 	} else if (hs->listener) {
 		return -EISCONN;
 	}
-
-	/* REMOTE: connecting, or connected, or failed */
-	if (hs_state(hs) & HOSTSOCK_CONNECTED) {
-		if (sock->state == SS_CONNECTED)
-			return -EISCONN;
-		sock->state = SS_CONNECTED;
-		return 0;
-	}
-	timeo = sock_sndtimeo(sock->sk, flags & O_NONBLOCK);
-	err = hs_wait(hs, HOSTSOCK_CONNECTED, &timeo);
-	if (err == -EAGAIN)
-		return sock->state == SS_CONNECTING && !(flags & O_NONBLOCK) ?
-			-ETIMEDOUT : -EINPROGRESS;
-	if (err)
-		return err;
-	err = hs_error(hs_state(hs));
-	if (err) {
-		hs->error_told = true;
-		sock->state = SS_UNCONNECTED;
-		return err;
-	}
-	sock->state = SS_CONNECTED;
-	return 0;
+	return hs_connected(sock, hs, flags);
 }
 
 static int hostsock_dgram_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
@@ -581,29 +603,14 @@ static int hostsock_getname(struct socket *sock, struct sockaddr *addr, int peer
 	return wasm_kernel_sock_getname(hs->hid, addr, peer);
 }
 
-static __poll_t hostsock_poll(struct file *file, struct socket *sock,
-			      poll_table *wait)
+/* a REMOTE socket's poll: the host's state */
+static __poll_t hs_poll(struct file *file, struct socket *sock, poll_table *wait)
 {
 	struct sock *sk = sock->sk;
 	struct hsock *hs = hs_sk(sk);
 	unsigned int state;
 	__poll_t mask = 0;
 
-	if (hs->mode != REMOTE) {
-		/*
-		 * its error ours: SO_ERROR reads ours (generic SOL_SOCKET), as
-		 * after a non-blocking connect
-		 */
-		int err;
-
-		mask = hs->inner->ops->poll(file, hs->inner, wait);
-		err = xchg(&hs->inner->sk->sk_err, 0);
-		if (err)
-			WRITE_ONCE(sk->sk_err, err);
-		if (READ_ONCE(sk->sk_err))
-			mask |= EPOLLERR;
-		return mask;
-	}
 	sock_poll_wait(file, sock, wait);
 	if (!hs->hid)	/* (a datagram socket that hasn't sent) */
 		return EPOLLOUT | EPOLLWRNORM;
@@ -630,6 +637,31 @@ static __poll_t hostsock_poll(struct file *file, struct socket *sock,
 	if ((state & HOSTSOCK_EOF) && (sk->sk_shutdown & SEND_SHUTDOWN))
 		mask |= EPOLLHUP;
 	return mask;
+}
+
+static __poll_t hostsock_poll(struct file *file, struct socket *sock,
+			      poll_table *wait)
+{
+	struct sock *sk = sock->sk;
+	struct hsock *hs = hs_sk(sk);
+	__poll_t mask = 0;
+
+	if (hs->mode != REMOTE) {
+		/*
+		 * its error ours: SO_ERROR reads ours (generic SOL_SOCKET), as
+		 * after a non-blocking connect
+		 */
+		int err;
+
+		mask = hs->inner->ops->poll(file, hs->inner, wait);
+		err = xchg(&hs->inner->sk->sk_err, 0);
+		if (err)
+			WRITE_ONCE(sk->sk_err, err);
+		if (READ_ONCE(sk->sk_err))
+			mask |= EPOLLERR;
+		return mask;
+	}
+	return hs_poll(file, sock, wait);
 }
 
 static int hostsock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
@@ -854,6 +886,189 @@ static int hostsock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 	return hs_recv(hs, msg, len, flags);
 }
 
+/*
+ * AF_VSOCK: the host's sockets alone (REMOTE from the start, no inner
+ * socket), streams only.
+ */
+static int hs_vsock_addr(const struct sockaddr *addr, int len)
+{
+	if (len < (int)sizeof(struct sockaddr_vm) || addr->sa_family != AF_VSOCK)
+		return -EINVAL;
+	return 0;
+}
+
+static int hostsock_vsock_create(struct net *net, struct socket *sock,
+				 int protocol, int kern)
+{
+	struct sock *sk;
+	struct hsock *hs;
+
+	if (sock->type != SOCK_STREAM)
+		return -ESOCKTNOSUPPORT;
+	if (protocol && protocol != PF_VSOCK)
+		return -EPROTONOSUPPORT;
+	sk = sk_alloc(net, AF_VSOCK, GFP_KERNEL, &hostsock_proto, kern);
+	if (!sk)
+		return -ENOMEM;
+	sock->ops = &hostsock_vsock_ops;
+	sock_init_data(sock, sk);
+	hs = hs_sk(sk);
+	hs->family = AF_VSOCK;
+	hs->mode = REMOTE;
+	return 0;
+}
+
+/* (the address a listener listens at: the host makes a connection's) */
+static int hostsock_vsock_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int len)
+{
+	struct sockaddr_vm *addr = (struct sockaddr_vm *)uaddr;
+	struct hsock *hs = hs_sk(sock->sk);
+	int err = hs_vsock_addr((struct sockaddr *)addr, len);
+
+	if (err)
+		return err;
+	if (hs->bound.svm_family || hs->hid)
+		return -EINVAL;
+	if (addr->svm_cid != VMADDR_CID_ANY && addr->svm_cid != VMADDR_CID_GUEST)
+		return -EADDRNOTAVAIL;
+	hs->bound = *addr;
+	return 0;
+}
+
+static int hostsock_vsock_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
+				  int len, int flags)
+{
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
+	struct hsock *hs = hs_sk(sock->sk);
+	int err;
+
+	if (hs->listener)
+		return -EISCONN;
+	if (!hs->hid) {
+		err = hs_vsock_addr(addr, len);
+		if (!err)
+			err = hs_open(hs);
+		if (!err)
+			err = wasm_kernel_sock_connect(hs->hid, addr, len);
+		if (err)
+			return err;
+		sock->state = SS_CONNECTING;
+	}
+	return hs_connected(sock, hs, flags);
+}
+
+/* a listener at its bound address, the host's: it makes the connections */
+static int hostsock_vsock_listen(struct socket *sock, int backlog)
+{
+	struct hsock *hs = hs_sk(sock->sk);
+	long timeo = MAX_SCHEDULE_TIMEOUT;
+	int err;
+
+	if (hs->listener)
+		return 0;
+	if (!hs->bound.svm_family || hs->hid)
+		return -EINVAL;
+	err = hs_open(hs);
+	if (!err)
+		err = wasm_kernel_sock_listen(hs->hid, &hs->bound, sizeof(hs->bound), backlog);
+	if (!err)
+		err = hs_wait(hs, HOSTSOCK_LISTENING, &timeo);
+	if (!err)
+		err = hs_error(hs_state(hs));
+	if (err) {
+		xa_erase(&hsocks, hs->hid);
+		wasm_kernel_sock_close(hs->hid);
+		hs->hid = 0;
+		return err;
+	}
+	hs->listener = true;
+	return 0;
+}
+
+static int hostsock_vsock_accept(struct socket *sock, struct socket *newsock,
+				 struct proto_accept_arg *arg)
+{
+	struct hsock *hs = hs_sk(sock->sk), *child;
+	long timeo = sock_rcvtimeo(sock->sk, arg->flags & O_NONBLOCK);
+	int hid, err;
+
+	if (!hs->listener)
+		return -EINVAL;
+	while ((hid = wasm_kernel_sock_accept(hs->hid)) == -EAGAIN) {
+		err = hs_wait(hs, HOSTSOCK_ACCEPTABLE, &timeo);
+		if (err)
+			return err;
+	}
+	if (hid < 0)
+		return hid;
+	err = hostsock_vsock_create(sock_net(sock->sk), newsock, 0, arg->kern);
+	if (err) {
+		wasm_kernel_sock_close(hid);
+		return err;
+	}
+	child = hs_sk(newsock->sk);
+	child->hid = hid;
+	xa_store(&hsocks, hid, child, GFP_KERNEL);
+	newsock->state = SS_CONNECTED;
+	return 0;
+}
+
+static int hostsock_vsock_getname(struct socket *sock, struct sockaddr *addr, int peer)
+{
+	struct hsock *hs = hs_sk(sock->sk);
+
+	if (hs->hid)
+		return wasm_kernel_sock_getname(hs->hid, addr, peer);
+	if (peer)
+		return -ENOTCONN;
+	if (hs->bound.svm_family) {
+		memcpy(addr, &hs->bound, sizeof(hs->bound));
+	} else {
+		struct sockaddr_vm any = { .svm_family = AF_VSOCK,
+					   .svm_cid = VMADDR_CID_ANY,
+					   .svm_port = VMADDR_PORT_ANY };
+
+		memcpy(addr, &any, sizeof(any));
+	}
+	return sizeof(struct sockaddr_vm);
+}
+
+static __poll_t hostsock_vsock_poll(struct file *file, struct socket *sock,
+				    poll_table *wait)
+{
+	if (!hs_sk(sock->sk)->hid) {
+		sock_poll_wait(file, sock, wait);
+		return 0;
+	}
+	return hs_poll(file, sock, wait);
+}
+
+static int hostsock_vsock_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
+{
+	struct hsock *hs = hs_sk(sock->sk);
+
+	if (!hs->hid || hs->listener)
+		return -ENOTCONN;
+	return hs_send(hs, msg, len, NULL, 0);
+}
+
+static int hostsock_vsock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+				  int flags)
+{
+	if (!hs_sk(sock->sk)->hid)
+		return -ENOTCONN;
+	return hs_recv(hs_sk(sock->sk), msg, len, flags);
+}
+
+static int hostsock_vsock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+{
+	struct hsock *hs = hs_sk(sock->sk);
+
+	if (cmd == SIOCINQ && hs->hid)
+		return put_user((int)wasm_kernel_sock_pending(hs->hid), (int __user *)arg);
+	return -ENOIOCTLCMD;
+}
+
 static const struct proto_ops hostsock_stream_ops = {
 	.family		= AF_HOSTSOCK,
 	.owner		= THIS_MODULE,
@@ -894,6 +1109,24 @@ static const struct proto_ops hostsock_dgram_ops = {
 	.mmap		= sock_no_mmap,
 };
 
+static const struct proto_ops hostsock_vsock_ops = {
+	.family		= AF_VSOCK,
+	.owner		= THIS_MODULE,
+	.release	= hostsock_release,
+	.bind		= hostsock_vsock_bind,
+	.connect	= hostsock_vsock_connect,
+	.socketpair	= sock_no_socketpair,
+	.accept		= hostsock_vsock_accept,
+	.getname	= hostsock_vsock_getname,
+	.poll		= hostsock_vsock_poll,
+	.ioctl		= hostsock_vsock_ioctl,
+	.listen		= hostsock_vsock_listen,
+	.shutdown	= hostsock_shutdown,
+	.sendmsg	= hostsock_vsock_sendmsg,
+	.recvmsg	= hostsock_vsock_recvmsg,
+	.mmap		= sock_no_mmap,
+};
+
 static struct proto hostsock_proto = {
 	.name		= "HOSTSOCK",
 	.owner		= THIS_MODULE,
@@ -912,12 +1145,18 @@ static const struct net_proto_family hostsock_family6 = {
 	.owner	= THIS_MODULE,
 };
 
+static const struct net_proto_family hostsock_family_vsock = {
+	.family	= AF_VSOCK,
+	.create	= hostsock_vsock_create,
+	.owner	= THIS_MODULE,
+};
+
 static int __init hostsock_init(void)
 {
-	int err;
+	int has = wasm_kernel_sock_init(), err;
 
 	/* (no network from the host: AF_INET stays the kernel's, loopback only) */
-	if (!wasm_kernel_sock_init())
+	if (!has)
 		return 0;
 	INIT_WORK(&hostsock_work, hostsock_changed);
 	hostsock_irq = wasm_alloc_irq();
@@ -931,17 +1170,27 @@ static int __init hostsock_init(void)
 	err = proto_register(&hostsock_proto, 0);
 	if (err)
 		goto out_request;
-	err = sock_register(&hostsock_family4);
-	if (err)
-		goto out_proto;
-	err = sock_register(&hostsock_family6);
-	if (err)
-		goto out_family4;
-	hostsock_on = true;
+	if (has & HOSTSOCK_VSOCK) {
+		err = sock_register(&hostsock_family_vsock);
+		if (err)
+			goto out_proto;
+	}
+	if (has & HOSTSOCK_INET) {
+		err = sock_register(&hostsock_family4);
+		if (err)
+			goto out_vsock;
+		err = sock_register(&hostsock_family6);
+		if (err)
+			goto out_family4;
+		hostsock_on = true;
+	}
 	return 0;
 
 out_family4:
 	sock_unregister(AF_HOSTSOCK);
+out_vsock:
+	if (has & HOSTSOCK_VSOCK)
+		sock_unregister(AF_VSOCK);
 out_proto:
 	proto_unregister(&hostsock_proto);
 out_request:
