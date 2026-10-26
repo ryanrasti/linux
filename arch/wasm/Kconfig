@@ -11,19 +11,28 @@ config WASM
 	select GENERIC_CSUM
 	select GENERIC_ENTRY
 	select GENERIC_HWEIGHT
-	select GENERIC_IRQ_MIGRATION
+	select GENERIC_IRQ_MIGRATION if SMP
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
 	select GENERIC_SMP_IDLE_THREAD
-	select HOTPLUG_PARALLEL
+	select HOTPLUG_PARALLEL if SMP
 	select IRQ_DOMAIN
 	select OF
 	select OF_EARLY_FLATTREE
 	select OF_IRQ
 	select HAVE_PAGE_SIZE_4KB
 	select HAVE_PAGE_SIZE_64KB
-	select SMP
+	select SMP if !WASM_JSPI
 	select THREAD_INFO_IN_TASK
+
+config WASM_JSPI
+	bool "Run every task on one JavaScript event loop (JSPI)"
+	help
+	  One CPU, and every task a coroutine on the host's event loop: a task
+	  blocks by suspending through JavaScript Promise Integration, not by
+	  waiting on an atomic in a worker of its own. The kernel enters user
+	  code through its own function table (call_indirect), so no
+	  JavaScript frame is between a task's syscall and its suspension.
 
 config CMDLINE
 	string "Kernel command string to append"
@@ -36,7 +45,8 @@ config EARLY_PRINTK
 	def_bool y
 
 config SMP
-	def_bool y
+	# (one CPU on one event loop: a uniprocessor kernel)
+	def_bool !WASM_JSPI
 
 config NR_CPUS
 	int

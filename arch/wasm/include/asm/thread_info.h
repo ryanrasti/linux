@@ -35,6 +35,14 @@ struct thread_info {
 	const struct kernel_siginfo *active_siginfo;
 	/* Counts execs that replaced this task's user instance. */
 	unsigned int exec_count;
+#ifdef CONFIG_WASM_JSPI
+	/* a clone child's entry (user table index, 0: _start) and argument */
+	u32 clone_fn, clone_arg;
+	/* what the program was entered at (wasm_user_enter), and with what */
+	u32 entry_fn, entry_arg;
+	/* a fork child: rewinding into its parent's entry_fn, not starting anew */
+	int rewinding_entry;
+#endif
 #ifdef CONFIG_EXOBOX
 	struct exobox_thread_info exobox;	/* (arch/wasm/exobox/) */
 #endif

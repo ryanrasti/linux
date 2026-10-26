@@ -70,6 +70,26 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
 
+#ifdef CONFIG_WASM_JSPI
+/* suspends from until a later switch to it; to runs next */
+void wasm_import(kernel, jspi_switch)(void *from, void *to);
+/* from is dead: to runs next; the kernel then traps, ending this coroutine */
+void wasm_import(kernel, jspi_exit)(void *to);
+/* suspends until *word is nonzero (an irq) or timeout_ns (-1: none); 2: timed out */
+int wasm_import(kernel, jspi_idle)(void *word, long long timeout_ns);
+/* lets the event loop run (an irq may arrive); a no-op outside a task */
+void wasm_import(kernel, jspi_yield)(void);
+/*
+ * len bytes between buf (the kernel's) and addr in task's user memory (to
+ * it if write): what was copied (0: none, task having no program)
+ */
+int wasm_import(kernel, jspi_access_task)(void *task, unsigned long addr, void *buf, int len, int write);
+/* the kernel table's index of the current program's _start */
+u32 wasm_import(user, entry)(void);
+/* the kernel table's index of the current program's table[fn] */
+u32 wasm_import(user, func)(u32 fn);
+#endif
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 
