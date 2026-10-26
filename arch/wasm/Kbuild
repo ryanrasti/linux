@@ -1,1 +1,3 @@
 obj-y += kernel/ mm/
+# (exobox's host interface, from its own repository: copied here at build)
+obj-$(CONFIG_EXOBOX) += exobox/
