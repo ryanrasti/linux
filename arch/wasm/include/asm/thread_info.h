@@ -35,6 +35,8 @@ struct thread_info {
 	/* Counts execs that replaced this task's user instance. */
 	unsigned int exec_count;
 #ifdef CONFIG_WASM_JSPI
+	/* copy_thread's bootstrap args, until the task first runs (exit_thread) */
+	void *bootstrap;
 	/* a clone child's entry (user table index, 0: _start) and argument */
 	u32 clone_fn, clone_arg;
 	/* what the program was entered at (wasm_user_enter), and with what */

@@ -13,8 +13,8 @@
 
 /*
  * spawn_worker's arg. task first, and so it stays: a JSPI host knows which
- * task it's spawning by the arg's first word (as __switch_to names tasks
- * by their task_struct).
+ * task it's spawning by the arg's first word (as __switch_to and
+ * release_worker name tasks by their task_struct).
  */
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -30,6 +30,7 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	task_thread_info(dst)->active_siginfo = NULL;
 #ifdef CONFIG_WASM_JSPI
 	task_thread_info(dst)->siginfo_copied = 0;
+	task_thread_info(dst)->bootstrap = NULL;
 #endif
 	return 0;
 }
@@ -164,6 +165,9 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	set_current_task(task);
 	wasm_service_remote_request(task);
 
+#ifdef CONFIG_WASM_JSPI
+	info->bootstrap = NULL;
+#endif
 	kfree(args);
 
 	// early_printk(
@@ -242,6 +246,32 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		kfree(bootstrap_args);
 		return ret;
 	}
+#ifdef CONFIG_WASM_JSPI
+	task_thread_info(p)->bootstrap = bootstrap_args;
+#endif
 
 	return 0;
 }
+
+#ifdef CONFIG_WASM_JSPI
+/*
+ * A task that never ran: its fork failed after copy_thread (alloc_pid, a
+ * pid namespace with no init, a fatal signal), so the host lets go of what
+ * it made for it, its copy of the parent's memory with it, and its
+ * bootstrap args go. (A task that ran exits by the scheduler instead.)
+ * JSPI only: a worker build's never-run task is a thread that may be in
+ * task_entry already, on its stack and reading its args, so freeing them
+ * here would need it to say first, by a word, that it's off them.
+ */
+void exit_thread(struct task_struct *tsk)
+{
+	struct thread_info *info = task_thread_info(tsk);
+
+	if (!info->bootstrap)
+		return;
+	/* (the task, and the word its coroutine waits on for a cpu it'll never have) */
+	wasm_kernel_release_worker(tsk, &info->running_cpu.counter);
+	kfree(info->bootstrap);
+	info->bootstrap = NULL;
+}
+#endif
