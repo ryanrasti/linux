@@ -14,6 +14,8 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
+#include <asm/binfmt_wasm.h>
+#include <asm/exobox.h>
 
 /* Four pages amortize host calls without requiring a large kernel allocation. */
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
@@ -316,7 +318,8 @@ restore:
 	return ret;
 }
 
-static int load_wasm_binary(struct linux_binprm *bprm)
+/* (asm/binfmt_wasm.h) */
+int wasm_stream_file(struct file *file)
 {
 	loff_t offset = 0;
 	u8 *chunk = NULL;
@@ -325,17 +328,18 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	bool compiling = false;
 	u32 chunk_size;
 
-	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
-		return -ENOEXEC;
-
-	ret = file_get_size(bprm->file, &filesize);
+	ret = file_get_size(file, &filesize);
 	if (ret < 0)
 		return ret;
 	if (filesize > U32_MAX)
 		return -EFBIG;
 
+	/* the host may have it compiled already (arch/wasm/exobox/exec.c) */
+	ret = exobox_exec_cached(file, filesize, user_memory_limit_pages());
+	if (ret <= 0)
+		return ret;
 	chunk_size = min_t(loff_t, filesize, WASM_EXEC_MAX_CHUNK_SIZE);
-	chunk = kmalloc(chunk_size, GFP_KERNEL);
+	chunk = kmalloc(max_t(u32, chunk_size, 1), GFP_KERNEL);
 	if (!chunk)
 		return -ENOMEM;
 
@@ -347,7 +351,7 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	while (offset < filesize) {
 		u32 size = min_t(loff_t, filesize - offset, chunk_size);
 		loff_t chunk_offset = offset;
-		ssize_t read = kernel_read(bprm->file, chunk, size, &offset);
+		ssize_t read = kernel_read(file, chunk, size, &offset);
 
 		if (read < 0) {
 			ret = read;
@@ -366,9 +370,29 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	ret = wasm_user_compile_end(user_memory_limit_pages());
 	if (ret)
 		goto err;
-
 	kfree(chunk);
-	chunk = NULL;
+	return 0;
+err:
+	if (compiling)
+		wasm_user_compile_abort();
+	kfree(chunk);
+	return ret;
+}
+
+static int load_wasm_binary(struct linux_binprm *bprm)
+{
+	int ret;
+
+	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
+		return -ENOEXEC;
+
+	ret = wasm_stream_file(bprm->file);
+	if (ret)
+		return ret;
+	/* a dynamically linked program's libraries (arch/wasm/exobox/exec.c) */
+	ret = exobox_exec_libraries();
+	if (ret)
+		goto err;
 
 	ret = copy_args(bprm);
 	if (ret)
@@ -398,9 +422,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 
 	return 0;
 err:
-	if (compiling)
-		wasm_user_compile_abort();
-	kfree(chunk);
+	/* (what the host has compiled for this exec: dropped) */
+	wasm_user_compile_abort();
 	return ret;
 }
 

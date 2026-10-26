@@ -4,6 +4,7 @@
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
 #include <asm/wasm_imports.h>
+#include <asm/exobox.h>
 
 #define sys_sigaltstack sys_wasm_sigaltstack
 #undef __SYSCALL
@@ -28,6 +29,15 @@ static noinline long wasm_do_syscall(long nr, unsigned long arg0,
 {
 	struct pt_regs *regs = current_pt_regs();
 
+	{	/* exobox's (arch/wasm/exobox/syscall.c; none without CONFIG_EXOBOX) */
+		unsigned long args[6] = { arg0, arg1, arg2, arg3, arg4, arg5 };
+		long ret;
+
+		if (exobox_syscall_enter(nr, args, &ret))
+			return ret;
+		arg0 = args[0], arg1 = args[1], arg2 = args[2];
+		arg3 = args[3], arg4 = args[4], arg5 = args[5];
+	}
 	regs->syscall_args[0] = arg0;
 	regs->syscall_args[1] = arg1;
 	regs->syscall_args[2] = arg2;
@@ -56,6 +66,7 @@ static noinline long wasm_do_syscall(long nr, unsigned long arg0,
 		 */
 		wasm_timer_check();
 		wasm_service_remote_request(current);
+		exobox_syscall_preempt();	/* (arch/wasm/exobox/preempt.c) */
 
 		if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
 			regs->syscall_return = -ENOSYS;
