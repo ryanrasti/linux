@@ -41,7 +41,7 @@ static void *__init load_devicetree(size_t *size)
 	 * for this exact blob, then remove that description before the FDT scan
 	 * installs the authoritative range.
 	 */
-	bootstrap_size = PFN_PHYS(__builtin_wasm_memory_size(0));
+	bootstrap_size = (phys_addr_t)__builtin_wasm_memory_size(0) * WASM_PAGE_SIZE;
 	BUG_ON(bootstrap_size > PHYS_ADDR_MAX - PAGE_SIZE);
 	BUG_ON(*size > PHYS_ADDR_MAX - bootstrap_size - PAGE_SIZE);
 	bootstrap_size = PAGE_ALIGN(bootstrap_size + *size);
