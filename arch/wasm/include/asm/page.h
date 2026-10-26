@@ -7,6 +7,9 @@
 #define PAGE_OFFSET _AC(CONFIG_DEFAULT_MEM_START, UL)
 #define PHYS_OFFSET _AC(CONFIG_DEFAULT_MEM_START, UL)
 
+/* a wasm memory page, whatever the kernel's page size */
+#define WASM_PAGE_SIZE 0x10000
+
 #define clear_page(pgaddr) memset((pgaddr), 0, PAGE_SIZE)
 #define copy_page(to, from) memcpy((to), (from), PAGE_SIZE)
 
