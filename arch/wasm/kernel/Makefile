@@ -17,6 +17,7 @@ obj-y += \
 	signal.o \
 	stacktrace.o \
 	syscall.o \
+	sys_wasm32.o \
 	time.o
 
 obj-$(CONFIG_SMP) += smp.o

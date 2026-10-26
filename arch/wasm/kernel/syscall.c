@@ -5,6 +5,15 @@
 #include <asm/remote_vm.h>
 
 #define sys_sigaltstack sys_wasm_sigaltstack
+/* 64-bit arguments in two (sys_wasm32.c) */
+#define sys_fallocate sys_wasm_fallocate
+#define sys_fadvise64_64 sys_wasm_fadvise64_64
+#define sys_sync_file_range2 sys_wasm_sync_file_range2
+#define sys_readahead sys_wasm_readahead
+#define sys_pread64 sys_wasm_pread64
+#define sys_pwrite64 sys_wasm_pwrite64
+#define sys_truncate64 sys_wasm_truncate64
+#define sys_ftruncate64 sys_wasm_ftruncate64
 #undef __SYSCALL
 #define __SYSCALL(nr, sym) asmlinkage long sym(const struct pt_regs *regs);
 #include <asm/unistd.h>
@@ -18,6 +27,14 @@ syscall_handler_t syscall_table[__NR_syscalls] = {
 	[0 ... __NR_syscalls - 1] = (syscall_handler_t)sys_ni_syscall,
 #include <asm/unistd.h>
 #undef sys_sigaltstack
+#undef sys_fallocate
+#undef sys_fadvise64_64
+#undef sys_sync_file_range2
+#undef sys_readahead
+#undef sys_pread64
+#undef sys_pwrite64
+#undef sys_truncate64
+#undef sys_ftruncate64
 };
 
 __attribute__((export_name("syscall"))) long
