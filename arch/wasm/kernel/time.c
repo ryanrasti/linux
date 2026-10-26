@@ -1,3 +1,4 @@
+#include <asm/wasm_wait.h>
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
 #include <linux/cpuhotplug.h>
@@ -24,8 +25,9 @@ void calibrate_delay(void)
 
 void __delay(unsigned long cycles)
 {
+	/* (under JSPI, the host's event loop runs meanwhile) */
 	static int zero = 0;
-	int ret = __builtin_wasm_memory_atomic_wait32(&zero, 0, cycles);
+	int ret = wasm_wait32(&zero, 0, cycles);
 	BUG_ON(ret != 2); // 2 means timeout
 }
 

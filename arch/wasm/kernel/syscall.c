@@ -107,8 +107,11 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	long ret;
 
 	ret = wasm_do_syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
-	if (unlikely(READ_ONCE(ti->exec_count) != exec_count))
+	if (unlikely(READ_ONCE(ti->exec_count) != exec_count)) {
 		wasm_user_unwind();
+		/* (a trap: under JSPI the import returns, the host only told) */
+		__builtin_trap();
+	}
 	return ret;
 }
 
