@@ -7,6 +7,7 @@
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
+#include <asm/exobox.h>
 
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -209,6 +210,9 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
 
 	if (args->fn == wasm_call_clone_fn)
+		user_memory = args->flags & CLONE_VM ?
+			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
+	if (exobox_is_fork(args->fn))	/* (arch/wasm/exobox/fork.c: vfork shares) */
 		user_memory = args->flags & CLONE_VM ?
 			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
 	if (user_memory != WASM_USER_MEMORY_NONE)
