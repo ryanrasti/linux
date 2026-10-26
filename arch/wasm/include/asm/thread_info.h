@@ -1,6 +1,7 @@
 #ifndef _WASM_THREAD_INFO_H
 #define _WASM_THREAD_INFO_H
 
+#include <asm/exobox_thread.h>
 #include <asm/page.h>
 #include <linux/types.h>
 
@@ -33,6 +34,9 @@ struct thread_info {
 	const struct kernel_siginfo *active_siginfo;
 	/* Counts execs that replaced this task's user instance. */
 	unsigned int exec_count;
+#ifdef CONFIG_EXOBOX
+	struct exobox_thread_info exobox;	/* (arch/wasm/exobox/) */
+#endif
 };
 
 #ifndef current_thread_info
