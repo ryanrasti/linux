@@ -24,6 +24,22 @@ void calibrate_delay(void)
 
 void __delay(unsigned long cycles)
 {
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * A real delay, by the clock, yielding to the host's event loop until
+	 * it has passed: waiting in place would block the one thread every task
+	 * and the host run on, and what a delay-bounded poll waits for may be
+	 * the host's. (A no-op instead would end panic()'s countdown at once,
+	 * and make its last loop spin without the host ever running.)
+	 */
+	{
+		unsigned long long end = wasm_kernel_get_now_nsec() + cycles;
+
+		while (wasm_kernel_get_now_nsec() < end)
+			wasm_kernel_jspi_yield();
+		return;
+	}
+#endif
 	static int zero = 0;
 	int ret = __builtin_wasm_memory_atomic_wait32(&zero, 0, cycles);
 	BUG_ON(ret != 2); // 2 means timeout
