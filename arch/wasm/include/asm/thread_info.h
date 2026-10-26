@@ -15,12 +15,12 @@ struct mm_struct;
 #define WASM_CPU_PARKED		(-1)
 #define WASM_CPU_REMOTE_WAKE	(-2)
 
-/* THREAD_SIZE is the size of the task_struct + kernel stack
- * This is asserted in setup, but the stack should be 1 page,
- * and a task_struct should be *way* less than a page big. */
-#define THREAD_SIZE_ORDER 1
+/* THREAD_SIZE is the size of the task_struct + kernel stack (asserted in
+ * setup): 128 KiB, whatever the page size (2 pages of 64 KiB, 32 of 4 KiB);
+ * a task_struct is *way* less. */
+#define THREAD_SIZE_ORDER (17 - PAGE_SHIFT)
 #define THREAD_SIZE (PAGE_SIZE << THREAD_SIZE_ORDER)
-#define THREAD_SHIFT (PAGE_SHIFT << THREAD_SIZE_ORDER)
+#define THREAD_SHIFT (PAGE_SHIFT + THREAD_SIZE_ORDER)
 
 struct thread_info {
 	unsigned long flags;
