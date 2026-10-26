@@ -8,6 +8,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
 #include <asm/exobox.h>
+#include <asm/jspi.h>
 
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -35,6 +36,10 @@ struct task_struct *__switch_to(struct task_struct *from,
 	cpu = atomic_xchg(&from_info->running_cpu, WASM_CPU_PARKED);
 	BUG_ON(current != from);
 	BUG_ON(cpu < 0 || cpu != get_current_cpu());
+
+#ifdef CONFIG_WASM_JSPI
+	return wasm_jspi_switch_to(from, to, cpu);	/* (jspi.c) */
+#endif
 
 	/*
 	 * Give the current cpu to the new worker. A remote request may have
@@ -102,6 +107,10 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	return prev;
 }
+
+#ifdef CONFIG_WASM_JSPI
+#define wasm_user_call wasm_user_enter	/* (jspi.c) */
+#endif
 
 static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args)
 {
@@ -191,6 +200,11 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	memset(childregs, 0, sizeof(struct pt_regs));
 
 	atomic_set(&task_thread_info(p)->running_cpu, WASM_CPU_PARKED);
+#ifdef CONFIG_WASM_JSPI
+	task_thread_info(p)->clone_fn = 0;
+	task_thread_info(p)->exec_restart = 0;
+	task_thread_info(p)->user_entered = 0;
+#endif
 	if (args->flags & CLONE_SETTLS)
 		task_thread_info(p)->tp_value = args->tls;
 

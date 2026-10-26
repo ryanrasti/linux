@@ -92,6 +92,14 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		syscall_exit_to_user_mode(regs);
 		regs->user_mode = 1;
 
+#ifdef CONFIG_WASM_JSPI
+		if (current_thread_info()->exec_restart) {
+			current_thread_info()->exec_restart = 0;
+			/* out of the old program by a trap, into the new at user_restart */
+			wasm_kernel_jspi_restart();
+			__builtin_trap();
+		}
+#endif
 		if (regs->restart_syscall_nr < 0)
 			return regs->syscall_return;
 		nr = regs->restart_syscall_nr;

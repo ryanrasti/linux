@@ -413,6 +413,15 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	finalize_exec(bprm);
 
 	wasm_user_instantiate(true);
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * From a syscall (user code is running: wasm_user_enter's jmp_buf is
+	 * set), it returns to the new program's start instead (wasm_syscall).
+	 * A kernel thread's exec (init's) enters it when its function returns.
+	 */
+	if (current_thread_info()->user_entered)
+		current_thread_info()->exec_restart = 1;
+#endif
 	/*
 	 * begin_new_exec() installs current->mm before the JS worker swaps its
 	 * local user memory. Publish readiness only after instantiate returns,

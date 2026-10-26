@@ -10,8 +10,13 @@ struct clone_fn {
 int wasm_call_clone_fn(void *arg)
 {
 	struct clone_fn *clone_fn = arg;
+#ifdef CONFIG_WASM_JSPI
+	current_thread_info()->clone_fn = (uintptr_t)clone_fn->fn;
+	current_thread_info()->clone_arg = (uintptr_t)clone_fn->arg;
+#else
 	wasm_user_switch_entry((uintptr_t)clone_fn->fn,
 			       (uintptr_t)clone_fn->arg);
+#endif
 	kfree(clone_fn);
 	return 0;
 }
