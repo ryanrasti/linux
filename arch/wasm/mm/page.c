@@ -4,8 +4,10 @@
 
 static DEFINE_RAW_SPINLOCK(memory_grow_lock);
 
-static void materialize_memory(unsigned long desired)
+/* desired: kernel pages (pfns); wasm memory grows in WASM_PAGE_SIZE pages */
+static void materialize_memory(unsigned long desired_pfns)
 {
+	unsigned long desired = DIV_ROUND_UP_ULL((u64)desired_pfns << PAGE_SHIFT, WASM_PAGE_SIZE);
 	unsigned long flags, current_pages;
 	long previous;
 

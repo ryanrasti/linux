@@ -17,10 +17,10 @@
 #include <asm/binfmt_wasm.h>
 #include <asm/exobox.h>
 
-/* Four pages amortize host calls without requiring a large kernel allocation. */
+/* 256 KiB chunks amortize host calls without requiring a large kernel allocation. */
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
 #define WASM_ARG_LIMIT SZ_256K
-#define WASM32_MAX_MEMORY_PAGES (1U << (32 - PAGE_SHIFT))
+#define WASM32_MAX_MEMORY_PAGES (1U << 16) /* wasm pages */
 
 /*
  * binfmt_wasm hands userland its arguments through a flat blob rather than the
