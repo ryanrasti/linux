@@ -24,6 +24,19 @@ void calibrate_delay(void)
 
 void __delay(unsigned long cycles)
 {
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * A no-op: waiting here would block the one thread every task and the
+	 * host's event loop run on. Nothing of ours delays (our devices are host
+	 * calls, completed by interrupt), but a poll bounded by udelay would
+	 * time out at once, though what it waits on might be the host's work.
+	 * The other way: yield until the deadline (jspi_yield, get_now_nsec),
+	 * a real delay that lets the host run, slower where code delays. Told
+	 * once, so a caller shows rather than timing out unexplained.
+	 */
+	WARN_ONCE(1, "udelay/ndelay under CONFIG_WASM_JSPI: a no-op\n");
+	return;
+#endif
 	static int zero = 0;
 	int ret = __builtin_wasm_memory_atomic_wait32(&zero, 0, cycles);
 	BUG_ON(ret != 2); // 2 means timeout

@@ -1,3 +1,4 @@
+#include <linux/smp.h>
 #include <asm/smp.h>
 #include <asm/page.h>
 #include <asm/thread_info.h>
