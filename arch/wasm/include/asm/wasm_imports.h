@@ -45,6 +45,8 @@ enum wasm_user_memory {
 int wasm_import(kernel, spawn_worker)(void (*fn)(void *), void *arg,
 				      char *name, size_t name_len,
 				      enum wasm_user_memory user_memory);
+/* a task spawn_worker made for arg will never run (exit_thread): the host lets go of it */
+void wasm_import(kernel, release_worker)(void *arg);
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
 
