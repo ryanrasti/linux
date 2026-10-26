@@ -70,6 +70,27 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
 
+#ifdef CONFIG_WASM_JSPI
+/* (a task's waits: asm/wasm_wait.h) */
+/*
+ * Another process's memory (access_remote_vm: /proc/<pid>/cmdline, ptrace;
+ * user.read and write are the current task's alone): len bytes between buf,
+ * the kernel's, and addr in task's (to it if write). What was copied (0:
+ * none, task having no program).
+ */
+int wasm_import(kernel, jspi_access_task)(void *task, unsigned long addr, void *buf, int len, int write);
+/*
+ * A program is a wasm instance of its own, its functions called through the
+ * kernel's table (call_indirect: no JavaScript frame between the kernel and
+ * the program, so a program's syscalls, and a signal handler's, can
+ * suspend). The host puts them in it; these give their slots.
+ */
+/* the slot of the current program's _start */
+u32 wasm_import(user, entry)(void);
+/* the slot of the current program's table[fn]: a function pointer it gave the kernel (clone's, a handler's) */
+u32 wasm_import(user, func)(uintptr_t fn);
+#endif
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 

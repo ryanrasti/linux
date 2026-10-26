@@ -3,11 +3,13 @@
 #include <asm/remote_vm.h>
 #include <asm/sysmem.h>
 #include <asm/wasm_imports.h>
+#include <asm/wasm_wait.h>
 #include <linux/entry-common.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
 #include <asm/exobox.h>
+#include <asm/jspi.h>
 
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -36,6 +38,7 @@ struct task_struct *__switch_to(struct task_struct *from,
 	BUG_ON(current != from);
 	BUG_ON(cpu < 0 || cpu != get_current_cpu());
 
+
 	/*
 	 * Give the current cpu to the new worker. A remote request may have
 	 * changed PARKED to REMOTE_WAKE concurrently; either negative state is
@@ -50,15 +53,19 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	// wake the other worker:
 	// pr_info("wake cpu=%i task=%p\n", cpu, to);
-	BUG_ON(__builtin_wasm_memory_atomic_notify(
-		       &to_info->running_cpu.counter,
-		       /* at most, wake up: */ 1) > 1);
+	BUG_ON(wasm_notify(&to_info->running_cpu.counter,
+			   /* at most, wake up: */ 1) > 1);
 
 	// pr_info("waiting cpu=%i task=%p in switch\n", cpu, from);
 
 	// this is set to true in do_task_dead:
-	if (wasm_get_thread_done())
+	if (wasm_get_thread_done()) {
+		/* (one instance for every task, under JSPI: the next isn't done) */
+		wasm_set_thread_done(0);
 		wasm_kernel_halt_worker();
+		/* (a trap: no cleanup in a program's frames below can catch it) */
+		__builtin_trap();
+	}
 
 	/*
 	 * This task no longer owns a logical CPU. Service after publishing the
@@ -86,22 +93,26 @@ struct task_struct *__switch_to(struct task_struct *from,
 		}
 
 		BUG_ON(cpu != WASM_CPU_PARKED);
-		__builtin_wasm_memory_atomic_wait32(
-			&from_info->running_cpu.counter,
-			/* block if the value is: */ WASM_CPU_PARKED,
-			/* timeout: */ -1);
+		wasm_wait32(&from_info->running_cpu.counter,
+			    /* block if the value is: */ WASM_CPU_PARKED,
+			    /* timeout: */ -1);
 	}
 
 	BUG_ON(cpu >= nr_cpu_ids || cpu != from_info->cpu);
 	set_current_cpu(cpu);
 	prev = get_current_task_on(cpu);
-	set_current_task(current);
+	/* (from, not current: under JSPI the global is the last task's) */
+	set_current_task(from);
 	wasm_service_remote_request(from);
 
 	// pr_info("woke up cpu=%i task=%p in switch\n", cpu, from);
 
 	return prev;
 }
+
+#ifdef CONFIG_WASM_JSPI
+#define wasm_user_call wasm_user_enter	/* (jspi.c) */
+#endif
 
 static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args)
 {
@@ -131,10 +142,9 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 		}
 
 		BUG_ON(cpu != WASM_CPU_PARKED);
-		ret = __builtin_wasm_memory_atomic_wait32(
-			&info->running_cpu.counter,
-			/* block if the value is: */ WASM_CPU_PARKED,
-			/* timeout: 1s */ 1000 * 1000 * 1000);
+		ret = wasm_wait32(&info->running_cpu.counter,
+				  /* block if the value is: */ WASM_CPU_PARKED,
+				  /* timeout: 1s */ 1000 * 1000 * 1000);
 		if (ret == 2 && atomic_read(&info->running_cpu) < 0)
 			early_printk("task %p %s %d is waiting for cpu in entry\n",
 				     task, task->comm, task->pid);
@@ -172,9 +182,8 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 
 static void task_entry(void *args)
 {
-	set_stack_pointer(
-		task_pt_regs(((struct task_bootstrap_args *)args)->task) - 1);
-	task_entry_inner(args);
+	wasm_call_on_task_stack(((struct task_bootstrap_args *)args)->task,
+				task_entry_inner, args);
 }
 
 int wasm_call_clone_fn(void *arg);
@@ -191,6 +200,9 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	memset(childregs, 0, sizeof(struct pt_regs));
 
 	atomic_set(&task_thread_info(p)->running_cpu, WASM_CPU_PARKED);
+#ifdef CONFIG_WASM_JSPI
+	task_thread_info(p)->clone_fn = 0;
+#endif
 	if (args->flags & CLONE_SETTLS)
 		task_thread_info(p)->tp_value = args->tls;
 
