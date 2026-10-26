@@ -156,6 +156,7 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	set_current_task(task);
 	wasm_service_remote_request(task);
 
+	info->bootstrap = NULL;
 	kfree(args);
 
 	// early_printk(
@@ -235,6 +236,24 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		kfree(bootstrap_args);
 		return ret;
 	}
+	task_thread_info(p)->bootstrap = bootstrap_args;
 
 	return 0;
+}
+
+/*
+ * A task that never ran: its fork failed after copy_thread (alloc_pid, a
+ * pid namespace with no init, a fatal signal), so the host lets go of what
+ * it made for it, its copy of the parent's memory with it, and its
+ * bootstrap args go. (A task that ran exits by the scheduler instead.)
+ */
+void exit_thread(struct task_struct *tsk)
+{
+	struct thread_info *info = task_thread_info(tsk);
+
+	if (!info->bootstrap)
+		return;
+	wasm_kernel_release_worker(info->bootstrap);
+	kfree(info->bootstrap);
+	info->bootstrap = NULL;
 }
