@@ -845,6 +845,15 @@ static ssize_t do_loop_readv_writev(struct file *filp, struct iov_iter *iter,
 	while (iov_iter_count(iter)) {
 		ssize_t nr;
 
+		/*
+		 * An empty segment: not a call of its own (musl's stdio writes
+		 * [its buffer, the data] with the buffer often empty, and a
+		 * ->write given 0 bytes may fail: /proc/<pid>/oom_score_adj).
+		 */
+		if (!iter_iov_len(iter)) {
+			iov_iter_advance(iter, 0);
+			continue;
+		}
 		if (type == READ) {
 			nr = filp->f_op->read(filp, iter_iov_addr(iter),
 						iter_iov_len(iter), ppos);
