@@ -35,6 +35,9 @@ config WASM_JSPI
 	  code through its own function table (call_indirect), so no
 	  JavaScript frame is between a task's syscall and its suspension.
 
+# (exobox's host interface, from its own repository: copied here at build)
+source "arch/wasm/exobox/Kconfig"
+
 config CMDLINE
 	string "Kernel command string to append"
 	default ""
