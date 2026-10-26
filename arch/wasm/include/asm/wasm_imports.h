@@ -70,6 +70,47 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
 
+#ifdef CONFIG_WASM_JSPI
+/*
+ * Every task a coroutine on one event loop, the host's, which knows each by
+ * its task_struct (from, to). They share one kernel instance: jspi.c saves
+ * and restores a task's globals (stack pointer, cpu, task) around these.
+ */
+/* suspends from's coroutine until a switch back to it; to's (the scheduler's choice) runs */
+void wasm_import(kernel, jspi_switch)(void *from, void *to);
+/* the current task is dead: the host lets go of it, to runs; the kernel then traps, ending its coroutine */
+void wasm_import(kernel, jspi_exit)(void *to);
+/*
+ * The idle task's wait, with nothing to run: until *word (this cpu's pending
+ * interrupts, which the host's trigger_irq sets) is nonzero (0), or
+ * timeout_ns passes (2; -1: none)
+ */
+int wasm_import(kernel, jspi_idle)(void *word, long long timeout_ns);
+/*
+ * A busy task's (cpu_relax, the syscall preemption point): one turn of the
+ * host's event loop (its I/O, its timers), so what it waits on can complete,
+ * then on; a no-op outside a task
+ */
+void wasm_import(kernel, jspi_yield)(void);
+/*
+ * Another process's memory (access_remote_vm: /proc/<pid>/cmdline, ptrace;
+ * user.read and write are the current task's alone): len bytes between buf,
+ * the kernel's, and addr in task's (to it if write). What was copied (0:
+ * none, task having no program).
+ */
+int wasm_import(kernel, jspi_access_task)(void *task, unsigned long addr, void *buf, int len, int write);
+/*
+ * A program is a wasm instance of its own, its functions called through the
+ * kernel's table (call_indirect: no JavaScript frame between the kernel and
+ * the program, so a program's syscalls, and a signal handler's, can
+ * suspend). The host puts them in it; these give their slots.
+ */
+/* the slot of the current program's _start */
+u32 wasm_import(user, entry)(void);
+/* the slot of the current program's table[fn]: a function pointer it gave the kernel (clone's, a handler's) */
+u32 wasm_import(user, func)(u32 fn);
+#endif
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 
