@@ -18,9 +18,10 @@ struct mm_struct;
 /* THREAD_SIZE is the size of the task_struct + kernel stack
  * This is asserted in setup, but the stack should be 1 page,
  * and a task_struct should be *way* less than a page big. */
-#define THREAD_SIZE_ORDER 1
+/* 128 KiB, whatever the page size */
+#define THREAD_SIZE_ORDER (17 - PAGE_SHIFT)
 #define THREAD_SIZE (PAGE_SIZE << THREAD_SIZE_ORDER)
-#define THREAD_SHIFT (PAGE_SHIFT << THREAD_SIZE_ORDER)
+#define THREAD_SHIFT (PAGE_SHIFT + THREAD_SIZE_ORDER)
 
 struct thread_info {
 	unsigned long flags;

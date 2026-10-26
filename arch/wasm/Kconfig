@@ -21,6 +21,7 @@ config WASM
 	select OF_EARLY_FLATTREE
 	select OF_IRQ
 	select HAVE_EXIT_THREAD if WASM_JSPI
+	select HAVE_PAGE_SIZE_4KB
 	select HAVE_PAGE_SIZE_64KB
 	select THREAD_INFO_IN_TASK
 
