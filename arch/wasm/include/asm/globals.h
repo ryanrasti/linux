@@ -18,6 +18,20 @@ static inline void *get_stack_pointer(void)
 	return ptr;
 }
 
+/*
+ * fn(arg) at the top of task's kernel stack: for an entry the host runs on
+ * a fresh coroutine (a task's start, exec's restart, a trap's fault), where
+ * the stack pointer is whatever the last task left. The stack pointer can't
+ * move under a frame, so the caller keeps none (no locals), and fn is
+ * noinline_for_stack (its frame laid out on the new stack). (task_pt_regs:
+ * asm/processor.h, at the use.)
+ */
+#define wasm_call_on_task_stack(task, fn, arg)			\
+	do {							\
+		set_stack_pointer(task_pt_regs(task) - 1);	\
+		fn(arg);					\
+	} while (0)
+
 
 void set_current_cpu(int cpu);
 int get_current_cpu(void);
