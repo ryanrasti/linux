@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * CONFIG_WASM_JSPI: one CPU, and every task a coroutine on the host's event
+ * loop, one kernel instance for them all. A task blocks by suspending
+ * through JavaScript Promise Integration (kernel.jspi_*), not by waiting on
+ * an atomic in a worker of its own: here, the task switch (__switch_to's)
+ * and the entry into user code, through the kernel's own function table.
+ */
+#include <asm/exobox.h>
+#include <asm/globals.h>
+#include <asm/jspi.h>
+#include <asm/wasm_imports.h>
+#include <linux/mm.h>
+#include <linux/ptrace.h>
+#include <linux/rcupdate.h>
+#include <linux/sched/signal.h>
+#include <linux/sched.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
+
+struct task_struct *wasm_jspi_switch_to(struct task_struct *from,
+					struct task_struct *to, int cpu)
+{
+	struct thread_info *from_info = task_thread_info(from);
+	struct thread_info *to_info = task_thread_info(to);
+	struct task_struct *prev;
+
+	/*
+	 * One CPU, one event loop: hand it to the next task's coroutine and
+	 * suspend this one until a switch back to it resumes it.
+	 */
+	BUG_ON(atomic_read(&to_info->running_cpu) >= 0);
+	atomic_set(&to_info->running_cpu, cpu);
+	if (wasm_get_thread_done()) {
+		/* (one instance for every task: the next one isn't done) */
+		wasm_set_thread_done(0);
+		wasm_kernel_jspi_exit(to);
+		/* (a trap: no cleanup in a program's frames below can catch it) */
+		__builtin_trap();
+	}
+	{
+		/*
+		 * Every task runs on the same instance, so its globals are the
+		 * last task's when it resumes: its stack pointer (a wasm local
+		 * here, kept on its own JSPI stack), cpu and task are its own.
+		 */
+		void *sp = get_stack_pointer();
+
+		wasm_kernel_jspi_switch(from, to);
+		set_stack_pointer(sp);
+	}
+	cpu = atomic_read(&from_info->running_cpu);
+	BUG_ON(cpu < 0 || cpu >= nr_cpu_ids || cpu != from_info->cpu);
+	set_current_cpu(cpu);
+	prev = get_current_task_on(cpu);
+	set_current_task(from);
+	return prev;
+}
+
+/*
+ * Enter user code through the kernel's own function table: no JavaScript
+ * frame between a syscall and the task's suspension. An exec from a syscall
+ * leaves the old program as the syscall export returns (user.unwind: under
+ * JSPI, the host has the kernel trap out of it), and the host runs the task
+ * again at user_restart (below), into the new one.
+ */
+void wasm_user_enter(void)
+{
+	struct thread_info *ti = current_thread_info();
+
+	/*
+	 * What the program is entered at: a clone child's function, else
+	 * _start (after exec too); kept, for a fork's rewind into the same
+	 * frames (a fork child inherits it with the rest of thread_info).
+	 */
+	if (ti->clone_fn) {
+		ti->entry_fn = ti->clone_fn;
+		ti->entry_arg = ti->clone_arg;
+		ti->clone_fn = 0;
+	} else if (!ti->rewinding_entry) {
+		ti->entry_fn = 0;
+	}
+	ti->rewinding_entry = 0;
+	do {
+		/* (a trap from here on is the program's: see exobox/fault.c) */
+		current_pt_regs()->user_mode = 1;
+		if (ti->entry_fn)
+			wasm_user_thread(ti->entry_fn)(ti->entry_arg);
+		else
+			wasm_user_start()();
+	/* (it returned because it unwound for fork: on into the rewind) */
+	} while (exobox_fork_unwound());
+}
+
+static void noinline_for_stack __noreturn user_restart_inner(void *unused)
+{
+	wasm_user_enter();
+	/* (its entry returned without exiting) */
+	local_irq_enable();
+	do_exit(SIGSEGV);
+}
+
+/* exec's restart (after user.unwind): the task's new program, on its kernel stack from the top */
+__attribute__((export_name("user_restart"))) void wasm_user_restart(void)
+{
+	wasm_call_on_task_stack(current, user_restart_inner, NULL);
+}
+
+/*
+ * Another process's memory (/proc/<pid>/cmdline, environ, ptrace): every
+ * process's is the host's, in this one isolate, so it copies from a task
+ * of the mm's directly. (remote_vm.c asks the owner's worker instead, which
+ * here can't run while this task waits.)
+ */
+int wasm_jspi_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
+			       int len, unsigned int gup_flags)
+{
+	struct task_struct *p, *t;
+	int ret = 0;
+
+	if (len <= 0)
+		return 0;
+	rcu_read_lock();
+	for_each_process_thread(p, t) {
+		/*
+		 * (and its program instantiated: exec sets mm before the host
+		 * has the new memory, context_mm after, as remote_vm.c's guard)
+		 */
+		if (t->mm == mm && READ_ONCE(task_thread_info(t)->context_mm) == mm) {
+			ret = wasm_kernel_jspi_access_task(t, addr, buf, len,
+							   !!(gup_flags & FOLL_WRITE));
+			goto out;
+		}
+	}
+out:
+	rcu_read_unlock();
+	return ret;
+}
