@@ -254,7 +254,8 @@ void exit_thread(struct task_struct *tsk)
 
 	if (!info->bootstrap)
 		return;
-	wasm_kernel_release_worker(info->bootstrap);
+	/* (the task, and the word its coroutine waits on for a cpu it'll never have) */
+	wasm_kernel_release_worker(tsk, &info->running_cpu.counter);
 	kfree(info->bootstrap);
 	info->bootstrap = NULL;
 }

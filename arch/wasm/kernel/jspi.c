@@ -76,19 +76,13 @@ __attribute__((export_name("user_restart"))) void wasm_user_restart(void)
  * For the host, which runs every task's coroutine and parks them in their
  * waits (asm/wasm_wait.h): which task holds the cpu, as __switch_to and
  * task_entry record it (globals.c's; one cpu), and so whose program the
- * user imports act on; and the word a task waits on for a cpu, to unpark
- * one released before it ever ran (exit_thread's release_worker).
+ * user imports act on.
  */
 extern struct task_struct *current_tasks[NR_CPUS];
 
 __attribute__((export_name("current_task_word"))) struct task_struct **wasm_current_task_word(void)
 {
 	return &current_tasks[0];
-}
-
-__attribute__((export_name("task_cpu_word"))) atomic_t *wasm_task_cpu_word(struct task_struct *task)
-{
-	return &task_thread_info(task)->running_cpu;
 }
 
 /*
