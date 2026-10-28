@@ -24,6 +24,8 @@ struct virtio_wasm_device {
 	int config_irq;
 
 	u32 host_id;
+	/* the most descriptors each queue takes: the device's (queue-size), else 256 */
+	u32 queue_size;
 	u8 status;
 	u64 features;
 
@@ -227,9 +229,10 @@ static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,
 				     vq_callback_t *callback, const char *name,
 				     bool ctx)
 {
+	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vdev);
 	struct virtio_wasm_vq *vw_vq;
 	struct virtqueue *vq;
-	int num = 256;
+	int num = vw_dev->queue_size;
 	int rc;
 
 	vw_vq = kzalloc(sizeof(*vw_vq), GFP_KERNEL);
@@ -397,6 +400,8 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 		goto error;
 	}
 
+	if (of_property_read_u32(pdev->dev.of_node, "queue-size", &vw_dev->queue_size))
+		vw_dev->queue_size = 256;
 	rc = of_property_read_u32(pdev->dev.of_node, "host-id",
 				  &vw_dev->host_id);
 	if (rc)
