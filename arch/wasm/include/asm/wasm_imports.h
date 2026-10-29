@@ -47,11 +47,13 @@ int wasm_import(kernel, spawn_worker)(void (*fn)(void *), void *arg,
 				      enum wasm_user_memory user_memory);
 #ifdef CONFIG_WASM_JSPI
 /*
- * a task spawn_worker made will never run (exit_thread): the host lets go of
- * it, and of what waits on cpu_word for it (its running_cpu)
+ * A task spawn_worker made: start_task runs it, as __switch_to first gives
+ * it the cpu (until then the host holds it, but runs nothing of it);
+ * release_worker lets go of it, as it will never run (exit_thread).
  */
 struct task_struct;
-void wasm_import(kernel, release_worker)(struct task_struct *task, int *cpu_word);
+void wasm_import(kernel, start_task)(struct task_struct *task);
+void wasm_import(kernel, release_worker)(struct task_struct *task);
 #endif
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
