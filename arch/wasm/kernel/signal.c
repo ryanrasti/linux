@@ -1,3 +1,4 @@
+#include <asm/jspi.h>
 #include <asm/wasm_imports.h>
 #include <asm/unistd.h>
 #include <linux/entry-common.h>
@@ -63,15 +64,37 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 
 	if (sa->sa_flags & SA_SIGINFO) {
 		const kernel_siginfo_t *previous = ti->active_siginfo;
+#ifdef CONFIG_WASM_JSPI
+		int copied = ti->siginfo_copied;	/* (a handler's, it nested) */
+#endif
 
 		ti->active_siginfo = &ksig->info;
+#ifdef CONFIG_WASM_JSPI
+		/*
+		 * Through the kernel's own table, as a thread's entry is: no host
+		 * frame between the kernel and the handler, so the handler's own
+		 * syscalls can suspend (a SIGCHLD handler's waitpid). Failed as
+		 * the worker build's call_siginfo_handler says: the trampoline's
+		 * copy of the info failed, or it never asked.
+		 */
+		ti->siginfo_copied = -EINVAL;
+		wasm_user_trampoline((uintptr_t)sa->sa_restorer)(
+			(uintptr_t)sa->sa_handler, ksig->sig);
+		failed = ti->siginfo_copied;
+		ti->siginfo_copied = copied;
+#else
 		failed = wasm_user_call_siginfo_handler(
 			(uintptr_t)sa->sa_restorer, (uintptr_t)sa->sa_handler,
 			ksig->sig);
+#endif
 		ti->active_siginfo = previous;
 	} else {
+#ifdef CONFIG_WASM_JSPI
+		wasm_user_handler((uintptr_t)sa->sa_handler)(ksig->sig);
+#else
 		wasm_user_call_signal_handler((uintptr_t)sa->sa_handler,
 					      ksig->sig);
+#endif
 	}
 
 	local_irq_disable();
@@ -93,8 +116,12 @@ __attribute__((export_name("copy_siginfo"))) int
 wasm_copy_active_siginfo(siginfo_t __user *to)
 {
 	const kernel_siginfo_t *info = current_thread_info()->active_siginfo;
+	int ret = info ? copy_siginfo_to_user(to, info) : -EINVAL;
 
-	return info ? copy_siginfo_to_user(to, info) : -EINVAL;
+#ifdef CONFIG_WASM_JSPI
+	current_thread_info()->siginfo_copied = ret;
+#endif
+	return ret;
 }
 
 __attribute__((export_name("clear_siginfo"))) void

@@ -1,5 +1,6 @@
 #include <asm/smp.h>
 #include <asm/timex.h>
+#include <asm/wasm_wait.h>
 #include <linux/cpu.h>
 #include <linux/bitops.h>
 #include <linux/hardirq.h>
@@ -64,8 +65,7 @@ void __cpuidle arch_cpu_idle(void)
 		timeout_ns = deadline - now;
 	}
 
-	ret = __builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
-						  timeout_ns);
+	ret = wasm_wait64(&pending->summary.counter, 0, timeout_ns);
 
 	if (ret == 2 /* timeout reached */) {
 		__this_cpu_write(timer_deadline_ns, 0);
@@ -115,12 +115,16 @@ void wasm_timer_check(void)
 
 void cpu_relax(void)
 {
+	/*
+	 * (under JSPI, one CPU and no preemption: a condition an interrupt
+	 * changes only changes if the host's event loop runs, which this wait
+	 * lets it, its timeout short)
+	 */
 	unsigned long flags;
 	struct pending_irqs *pending;
 	local_irq_save(flags);
 	pending = this_cpu_ptr(&irq_pending);
-	__builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
-					    CPU_RELAX_TIMEOUT_NS);
+	wasm_wait64(&pending->summary.counter, 0, CPU_RELAX_TIMEOUT_NS);
 	local_irq_restore(flags);
 }
 
@@ -171,8 +175,7 @@ trigger_irq_for_cpu(unsigned int cpu, irq_hw_number_t irq)
 
 	pend_irq(pending, irq);
 
-	__builtin_wasm_memory_atomic_notify((void *)&pending->summary.counter,
-					    /* at most, wake up: */ 1);
+	wasm_notify((void *)&pending->summary.counter, /* at most, wake up: */ 1);
 }
 
 __attribute__((export_name("trigger_irq"))) void

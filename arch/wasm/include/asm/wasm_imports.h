@@ -45,6 +45,14 @@ enum wasm_user_memory {
 int wasm_import(kernel, spawn_worker)(void (*fn)(void *), void *arg,
 				      char *name, size_t name_len,
 				      enum wasm_user_memory user_memory);
+#ifdef CONFIG_WASM_JSPI
+/*
+ * a task spawn_worker made will never run (exit_thread): the host lets go of
+ * it, and of what waits on cpu_word for it (its running_cpu)
+ */
+struct task_struct;
+void wasm_import(kernel, release_worker)(struct task_struct *task, int *cpu_word);
+#endif
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
 
@@ -59,8 +67,16 @@ void wasm_import(user, call_signal_handler)(uintptr_t fn, u32 sig);
 int wasm_import(user, call_siginfo_handler)(uintptr_t trampoline, uintptr_t fn,
 					    u32 sig);
 void wasm_import(user, halt_signal_handler)(void);
-/* Abandons the user stack and enters the current instance. Never returns. */
+/*
+ * Abandons the user stack and enters the current instance: never returns in
+ * a worker build. Under JSPI the host only marks the task as exec'ing and
+ * returns, and the caller traps out of the program (syscall.c).
+ */
+#ifdef CONFIG_WASM_JSPI
+void wasm_import(user, unwind)(void);
+#else
 void __noreturn wasm_import(user, unwind)(void);
+#endif
 
 int wasm_import(user, read)(void *to, const void __user *from, unsigned long n);
 int wasm_import(user, write)(void __user *to, const void *from, unsigned long n);
@@ -69,6 +85,27 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 				       int op, int oparg);
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
+
+#ifdef CONFIG_WASM_JSPI
+/* (a task's waits: asm/wasm_wait.h) */
+/*
+ * Another process's memory (access_remote_vm: /proc/<pid>/cmdline, ptrace;
+ * user.read and write are the current task's alone): len bytes between buf,
+ * the kernel's, and addr in task's (to it if write). What was copied (0:
+ * none, task having no program).
+ */
+int wasm_import(kernel, jspi_access_task)(void *task, unsigned long addr, void *buf, int len, int write);
+/*
+ * A program is a wasm instance of its own, its functions called through the
+ * kernel's table (call_indirect: no JavaScript frame between the kernel and
+ * the program, so a program's syscalls, and a signal handler's, can
+ * suspend). The host puts them in it; these give their slots.
+ */
+/* the slot of the current program's _start */
+u32 wasm_import(user, entry)(void);
+/* the slot of the current program's table[fn]: a function pointer it gave the kernel (clone's, a handler's) */
+u32 wasm_import(user, func)(uintptr_t fn);
+#endif
 
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
