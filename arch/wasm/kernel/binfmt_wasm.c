@@ -17,10 +17,11 @@
 #include <asm/binfmt_wasm.h>
 #include <asm/exobox.h>
 
-/* Four pages amortize host calls without requiring a large kernel allocation. */
+/* 256 KiB chunks amortize host calls without requiring a large kernel allocation. */
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
 #define WASM_ARG_LIMIT SZ_256K
-#define WASM32_MAX_MEMORY_PAGES (1U << (32 - PAGE_SHIFT))
+/* wasm32's 4 GiB, in wasm pages */
+#define WASM32_MAX_MEMORY_PAGES ((u32)(SZ_4G / WASM_PAGE_SIZE))
 
 /*
  * binfmt_wasm hands userland its arguments through a flat blob rather than the
@@ -66,7 +67,7 @@ static u32 user_memory_limit_pages(void)
 
 	/* WebAssembly memory limits are an intentional exec-time snapshot. */
 	return limit == RLIM_INFINITY ? WASM32_MAX_MEMORY_PAGES :
-				       limit / SZ_64K;
+				       limit / WASM_PAGE_SIZE;
 }
 
 static struct linux_binfmt wasm_format = {
