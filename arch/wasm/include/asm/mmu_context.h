@@ -11,7 +11,7 @@ void wasm_destroy_context(struct mm_struct *mm);
 int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 			  int len, unsigned int gup_flags);
 void wasm_remote_mm_shutdown(struct mm_struct *mm);
-#include <asm/exobox.h>	/* (exobox_mm_exit, for exit_mmap: mm/nommu.c) */
+#include <asm/exobox.h>	/* (exobox_mm_exit, for exit_mmap: mm/nommu.c; exobox_mm_exiting, exit_mm: kernel/exit.c) */
 
 #define init_new_context wasm_init_new_context
 #define destroy_context wasm_destroy_context

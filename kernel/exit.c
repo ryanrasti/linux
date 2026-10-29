@@ -584,6 +584,10 @@ static void exit_mm(void)
 	task_unlock(current);
 	mmap_read_unlock(mm);
 	mm_update_next_owner(mm);
+#ifdef CONFIG_WASM
+	/* (the last thread of its process: what it mapped written back while its memory is still the process's, whoever puts the mm last) */
+	exobox_mm_exiting(mm);
+#endif
 	mmput(mm);
 	if (test_thread_flag(TIF_MEMDIE))
 		exit_oom_victim();
