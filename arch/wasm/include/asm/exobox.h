@@ -52,6 +52,16 @@ static inline bool exobox_is_fork(int (*fn)(void *))
 
 /* exec: a dynamically linked program's libraries, after it (exec.c) */
 int exobox_exec_libraries(void);
+
+/*
+ * A process's memory, its mappings and break (mm.c): kept per mm
+ * (mm->context.exobox), a fork's copied as its mm is (init_new_context),
+ * written back as the process exits (exit_mmap), let go of with the mm.
+ */
+struct mm_struct;
+int exobox_mm_init(struct mm_struct *mm);
+void exobox_mm_exit(struct mm_struct *mm);
+void exobox_mm_destroy(struct mm_struct *mm);
 #else
 static inline bool exobox_syscall_enter(long nr, const unsigned long args[6], long *ret) { return false; }
 static inline bool exobox_syscall(struct pt_regs *regs) { return false; }
@@ -59,6 +69,10 @@ static inline void exobox_syscall_preempt(void) {}
 static inline bool exobox_fork_unwound(void) { return false; }
 static inline bool exobox_is_fork(int (*fn)(void *)) { return false; }
 static inline int exobox_exec_libraries(void) { return 0; }
+struct mm_struct;
+static inline int exobox_mm_init(struct mm_struct *mm) { return 0; }
+static inline void exobox_mm_exit(struct mm_struct *mm) {}
+static inline void exobox_mm_destroy(struct mm_struct *mm) {}
 #endif
 
 #if defined(CONFIG_EXOBOX_EXEC_CACHE) || defined(CONFIG_EXOBOX_EXEC_REF)
