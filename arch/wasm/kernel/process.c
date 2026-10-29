@@ -13,8 +13,8 @@
 
 /*
  * spawn_worker's arg. task first, and so it stays: a JSPI host knows which
- * task it's spawning by the arg's first word (as __switch_to and
- * release_worker name tasks by their task_struct).
+ * task it's spawning by the arg's first word (as __switch_to,
+ * start_worker and release_worker name tasks by their task_struct).
  */
 struct task_bootstrap_args {
 	struct task_struct *task;
@@ -61,6 +61,16 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	// wake the other worker:
 	// pr_info("wake cpu=%i task=%p\n", cpu, to);
+#ifdef CONFIG_WASM_JSPI
+	/*
+	 * (one that never ran has nothing to wake: the host starts it now, its
+	 * cpu given, so task_entry finds it so. A task whose fork fails after
+	 * copy_thread never runs anything (exit_thread).)
+	 */
+	if (to_info->bootstrap)
+		wasm_kernel_start_worker(to);
+	else
+#endif
 	BUG_ON(wasm_notify(&to_info->running_cpu.counter,
 			   /* at most, wake up: */ 1) > 1);
 
@@ -258,10 +268,11 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
  * A task that never ran: its fork failed after copy_thread (alloc_pid, a
  * pid namespace with no init, a fatal signal), so the host lets go of what
  * it made for it, its copy of the parent's memory with it, and its
- * bootstrap args go. (A task that ran exits by the scheduler instead.)
- * JSPI only: a worker build's never-run task is a thread that may be in
- * task_entry already, on its stack and reading its args, so freeing them
- * here would need it to say first, by a word, that it's off them.
+ * bootstrap args go. Nothing of it ever ran (started at its first switch:
+ * __switch_to), so nothing is on its stack or reading its args. (A task
+ * that ran exits by the scheduler instead.) JSPI only: a worker build's
+ * worker starts in copy_thread, so it may be in task_entry already; it
+ * could start at the first switch too.
  */
 void exit_thread(struct task_struct *tsk)
 {
@@ -269,8 +280,7 @@ void exit_thread(struct task_struct *tsk)
 
 	if (!info->bootstrap)
 		return;
-	/* (the task, and the word its coroutine waits on for a cpu it'll never have) */
-	wasm_kernel_release_worker(tsk, &info->running_cpu.counter);
+	wasm_kernel_release_worker(tsk);
 	kfree(info->bootstrap);
 	info->bootstrap = NULL;
 }
