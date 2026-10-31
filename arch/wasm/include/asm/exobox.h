@@ -78,11 +78,13 @@ static inline void exobox_mm_exit(struct mm_struct *mm) {}
 static inline void exobox_mm_destroy(struct mm_struct *mm) {}
 #endif
 
-#if defined(CONFIG_EXOBOX_EXEC_CACHE) || defined(CONFIG_EXOBOX_EXEC_REF)
+#ifdef CONFIG_EXOBOX_EXEC_CACHE
 /*
- * exec: whether the host has this file's module already (exec.c), by the
- * reference it holds or by the file: 0 (then nothing is sent), 1 (send it,
- * and the host caches it), or a negative errno
+ * exec: whether the host has this file's module already (exec.c's
+ * fast_compile: the file's virtio-fs tag and its path there, a store
+ * path's module compiled once for every machine): 0 (then nothing is read
+ * or sent), 1 (send it: the host compiles it, and keeps nothing), or a
+ * negative errno
  */
 int exobox_exec_cached(struct file *file, loff_t size, u32 max_memory_pages);
 #else
