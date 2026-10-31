@@ -2,6 +2,7 @@
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <asm/exobox.h>
 
 int wasm_init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 {
@@ -14,11 +15,12 @@ int wasm_init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	mm->context.remote.request = NULL;
 	mm->context.remote.accepting = true;
 	mm->context.exec_args = NULL;
-	return 0;
+	return exobox_mm_init(mm);
 }
 
 void wasm_destroy_context(struct mm_struct *mm)
 {
+	exobox_mm_destroy(mm);
 	kfree(mm->context.exec_args);
 	WARN_ON_ONCE(mm->context.remote.accepting);
 	WARN_ON_ONCE(atomic_read(&mm->context.remote.state) !=

@@ -1515,6 +1515,7 @@ void exit_mmap(struct mm_struct *mm)
 
 #ifdef CONFIG_WASM
 	wasm_remote_mm_shutdown(mm);
+	exobox_mm_exit(mm);
 #endif
 
 	mm->total_vm = 0;
