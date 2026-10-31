@@ -41,6 +41,11 @@ typedef struct {
 
 	/* Owned by the new mm between exec and the userspace startup call. */
 	struct wasm_exec_args *exec_args;
+
+#ifdef CONFIG_EXOBOX
+	/* its mappings and break: arch/wasm/exobox/mm.c's (dup_mm copies the pointer: init_new_context) */
+	struct exobox_mm *exobox;
+#endif
 } mm_context_t;
 
 #endif /* !__ASSEMBLY__ */
