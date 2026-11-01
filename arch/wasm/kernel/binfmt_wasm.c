@@ -14,7 +14,6 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
-#include <asm/binfmt_wasm.h>
 #include <asm/exobox.h>
 
 /* 256 KiB chunks amortize host calls without requiring a large kernel allocation. */
@@ -319,8 +318,8 @@ restore:
 	return ret;
 }
 
-/* (asm/binfmt_wasm.h) */
-int wasm_stream_file(struct file *file)
+/* the file's bytes sent to the host, which compiles them: 0, or a negative errno */
+static int wasm_stream_file(struct file *file)
 {
 	loff_t offset = 0;
 	u8 *chunk = NULL;
@@ -335,10 +334,6 @@ int wasm_stream_file(struct file *file)
 	if (filesize > U32_MAX)
 		return -EFBIG;
 
-	/* the host may have it compiled already (arch/wasm/exobox/exec.c) */
-	ret = exobox_exec_cached(file, filesize, user_memory_limit_pages());
-	if (ret <= 0)
-		return ret;
 	chunk_size = min_t(loff_t, filesize, WASM_EXEC_MAX_CHUNK_SIZE);
 	chunk = kmalloc(chunk_size, GFP_KERNEL);
 	if (!chunk)
@@ -387,11 +382,11 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
 		return -ENOEXEC;
 
-	ret = wasm_stream_file(bprm->file);
-	if (ret)
-		return ret;
-	/* a dynamically linked program's libraries (arch/wasm/exobox/exec.c) */
-	ret = exobox_exec_libraries();
+	/* exec as exobox's host drives it (arch/wasm/exobox/exec.c), else the file sent */
+	if (IS_ENABLED(CONFIG_EXOBOX))
+		ret = exobox_exec(bprm->file, user_memory_limit_pages());
+	else
+		ret = wasm_stream_file(bprm->file);
 	if (ret)
 		goto err;
 
@@ -423,8 +418,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 
 	return 0;
 err:
-	/* (what the host has compiled for this exec: dropped) */
-	wasm_user_compile_abort();
+	/* (what the host has made for this exec: dropped) */
+	exobox_exec_cancel();
 	return ret;
 }
 
