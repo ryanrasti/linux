@@ -3,6 +3,7 @@
 #include <linux/auxvec.h>
 #include <linux/binfmts.h>
 #include <linux/cred.h>
+#include <linux/elf.h>
 #include <linux/highmem.h>
 #include <linux/jiffies.h>
 #include <linux/mm.h>
@@ -55,6 +56,8 @@ struct wasm_exec_args {
 	unsigned int secureexec : 1;
 	unsigned int preserve_argv0 : 1;
 	unsigned int have_execfd : 1;
+	/* an ELF program's (exobox_elf_load's): AT_PHDR, AT_BASE, AT_ENTRY... */
+	unsigned long elf_aux[14];
 	struct wasm_process_args process;
 };
 
@@ -241,6 +244,8 @@ static void create_wasm_auxv(unsigned long *auxv,
 	NEW_AUX_ENT(AT_EXECFN, user_base + exec->execfn);
 	if (exec->have_execfd)
 		NEW_AUX_ENT(AT_EXECFD, exec->execfd);
+	for (int i = 0; i < ARRAY_SIZE(exec->elf_aux) && exec->elf_aux[i]; i += 2)
+		NEW_AUX_ENT(exec->elf_aux[i], exec->elf_aux[i + 1]);
 	NEW_AUX_ENT(AT_NULL, 0);
 #undef NEW_AUX_ENT
 }
@@ -377,16 +382,23 @@ err:
 
 static int load_wasm_binary(struct linux_binprm *bprm)
 {
+	struct wasm_exec_args *exec;
+	void *elf = NULL;
 	int ret;
 
-	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
+	if (!memcmp(bprm->buf, ELFMAG, SELFMAG)) {
+		/* (an ELF program whose code is wasm: exobox/elf.c's, or not ours) */
+		ret = exobox_elf_exec(bprm, user_memory_limit_pages(), &elf);
+		if (ret)
+			return ret;
+	} else if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8)) {
 		return -ENOEXEC;
-
-	/* exec's modules loaded by exobox (arch/wasm/exobox/exec.c), else the file sent */
-	if (IS_ENABLED(CONFIG_EXOBOX))
+	} else if (IS_ENABLED(CONFIG_EXOBOX)) {
+		/* exec as exobox's host drives it (arch/wasm/exobox/exec.c), else the file sent */
 		ret = exobox_exec(bprm->file, user_memory_limit_pages());
-	else
+	} else {
 		ret = wasm_stream_file(bprm->file);
+	}
 	if (ret)
 		goto err;
 
@@ -407,6 +419,12 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	finalize_exec(bprm);
 
 	wasm_user_instantiate(true);
+	if (elf) {
+		exec = current->mm->context.exec_args;
+		ret = exobox_elf_load(elf, exec->elf_aux);
+		if (ret)
+			return ret;
+	}
 	/* The syscall export unwinds the replaced instance on its way out. */
 	current_thread_info()->exec_count++;
 	/*
@@ -419,6 +437,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	return 0;
 err:
 	/* (what the host has made for this exec: dropped) */
+	if (elf)
+		exobox_elf_cancel(elf);
 	exobox_exec_cancel();
 	return ret;
 }

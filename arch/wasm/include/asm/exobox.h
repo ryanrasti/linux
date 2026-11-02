@@ -51,13 +51,23 @@ static inline bool exobox_is_fork(int (*fn)(void *))
 }
 
 /*
- * exec's modules (exec.c): 0 (the program loaded, and a dynamically linked
- * one's interpreter; the host instantiates it at the point of no return),
- * or a negative errno
+ * exec of a bare module, a static program, as the host drives it
+ * (exec.c): 0 (its module loaded, the new process's memory made), or a
+ * negative errno
  */
 int exobox_exec(struct file *program, u32 max_memory_pages);
 /* exec failed before its point of no return: what the host made, let go of */
 void exobox_exec_cancel(void);
+/*
+ * exec of an ELF program whose code is wasm (exobox/elf.c): before the point of no return, its state into *state;
+ * after it (the new memory the current one), its segments placed and its
+ * interpreter instantiated, auxv's extra entries into aux (at most 14
+ * words); or before it, cancelled
+ */
+struct linux_binprm;
+int exobox_elf_exec(struct linux_binprm *bprm, u32 max_pages, void **state);
+int exobox_elf_load(void *state, unsigned long *aux);
+void exobox_elf_cancel(void *state);
 
 /*
  * A process's memory, its mappings and break (mm.c): kept per mm
@@ -80,6 +90,10 @@ static inline bool exobox_fork_unwound(void) { return false; }
 static inline bool exobox_is_fork(int (*fn)(void *)) { return false; }
 static inline int exobox_exec(struct file *program, u32 max_memory_pages) { return -ENOEXEC; }
 static inline void exobox_exec_cancel(void) { wasm_user_compile_abort(); }
+struct linux_binprm;
+static inline int exobox_elf_exec(struct linux_binprm *bprm, u32 max_pages, void **state) { return -ENOEXEC; }
+static inline int exobox_elf_load(void *state, unsigned long *aux) { return -ENOEXEC; }
+static inline void exobox_elf_cancel(void *state) {}
 struct mm_struct;
 static inline int exobox_mm_init(struct mm_struct *mm) { return 0; }
 static inline void exobox_mm_exiting(struct mm_struct *mm) {}
