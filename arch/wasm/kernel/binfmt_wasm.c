@@ -394,8 +394,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	} else if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8)) {
 		return -ENOEXEC;
 	} else if (IS_ENABLED(CONFIG_EXOBOX)) {
-		/* exec as exobox's host drives it (arch/wasm/exobox/exec.c), else the file sent */
-		ret = exobox_exec(bprm->file, user_memory_limit_pages());
+		/* (exobox runs ELF programs alone: exobox/elf.c) */
+		return -ENOEXEC;
 	} else {
 		ret = wasm_stream_file(bprm->file);
 	}
