@@ -382,7 +382,7 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
 		return -ENOEXEC;
 
-	/* exec as exobox's host drives it (arch/wasm/exobox/exec.c), else the file sent */
+	/* exec's modules loaded by exobox (arch/wasm/exobox/exec.c), else the file sent */
 	if (IS_ENABLED(CONFIG_EXOBOX))
 		ret = exobox_exec(bprm->file, user_memory_limit_pages());
 	else

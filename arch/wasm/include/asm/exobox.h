@@ -51,8 +51,9 @@ static inline bool exobox_is_fork(int (*fn)(void *))
 }
 
 /*
- * exec as the host drives it (exec.c): 0 (the program, and a dynamically
- * linked one's libraries, compiled and linked), or a negative errno
+ * exec's modules (exec.c): 0 (the program loaded, and a dynamically linked
+ * one's interpreter; the host instantiates it at the point of no return),
+ * or a negative errno
  */
 int exobox_exec(struct file *program, u32 max_memory_pages);
 /* exec failed before its point of no return: what the host made, let go of */
