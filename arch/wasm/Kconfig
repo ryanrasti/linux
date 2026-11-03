@@ -41,6 +41,15 @@ config CMDLINE
 	string "Kernel command string to append"
 	default ""
 
+config ARCH_FORCE_MAX_ORDER
+	int "Order of maximal physically contiguous allocations"
+	default "10"
+	help
+	  The page allocator's most pages in one physically contiguous
+	  block (MAX_PAGE_ORDER): 2^order pages. Without an MMU, vmalloc
+	  is one such block, so this is also the most a single vmalloc
+	  or kmalloc can be (4 KiB pages: 10 is 4 MiB, 12 is 16 MiB).
+
 config MMU
 	def_bool n
 
