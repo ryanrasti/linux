@@ -50,8 +50,18 @@ static inline bool exobox_is_fork(int (*fn)(void *))
 	return fn == exobox_fork_child;
 }
 
-/* exec: a dynamically linked program's libraries, after it (exec.c) */
-int exobox_exec_libraries(void);
+/* exec failed before its point of no return: what the host made, let go of (exec.c) */
+void exobox_exec_cancel(void);
+/*
+ * exec of an ELF program whose code is wasm (exobox/elf.c): before the point of no return, its state into *state;
+ * after it (the new memory the current one), its segments placed and its
+ * interpreter instantiated, auxv's extra entries into aux (at most 14
+ * words); or before it, cancelled
+ */
+struct linux_binprm;
+int exobox_elf_exec(struct linux_binprm *bprm, u32 max_pages, void **state);
+int exobox_elf_load(void *state, unsigned long *aux);
+void exobox_elf_cancel(void *state);
 
 /*
  * A process's memory, its mappings and break (mm.c): kept per mm
@@ -65,30 +75,23 @@ void exobox_mm_exiting(struct mm_struct *mm);
 void exobox_mm_exit(struct mm_struct *mm);
 void exobox_mm_destroy(struct mm_struct *mm);
 #else
+#include <asm/wasm_imports.h>
+#include <linux/errno.h>
 static inline bool exobox_syscall_enter(long nr, const unsigned long args[6], long *ret) { return false; }
 static inline bool exobox_syscall(struct pt_regs *regs) { return false; }
 static inline void exobox_syscall_preempt(void) {}
 static inline bool exobox_fork_unwound(void) { return false; }
 static inline bool exobox_is_fork(int (*fn)(void *)) { return false; }
-static inline int exobox_exec_libraries(void) { return 0; }
+static inline void exobox_exec_cancel(void) { wasm_user_compile_abort(); }
+struct linux_binprm;
+static inline int exobox_elf_exec(struct linux_binprm *bprm, u32 max_pages, void **state) { return -ENOEXEC; }
+static inline int exobox_elf_load(void *state, unsigned long *aux) { return -ENOEXEC; }
+static inline void exobox_elf_cancel(void *state) {}
 struct mm_struct;
 static inline int exobox_mm_init(struct mm_struct *mm) { return 0; }
 static inline void exobox_mm_exiting(struct mm_struct *mm) {}
 static inline void exobox_mm_exit(struct mm_struct *mm) {}
 static inline void exobox_mm_destroy(struct mm_struct *mm) {}
-#endif
-
-#ifdef CONFIG_EXOBOX_EXEC_CACHE
-/*
- * exec: whether the host has this file's module already (exec.c's
- * fast_compile: the file's virtio-fs tag and its path there, a store
- * path's module compiled once for every machine): 0 (then nothing is read
- * or sent), 1 (send it: the host compiles it, and keeps nothing), or a
- * negative errno
- */
-int exobox_exec_cached(struct file *file, loff_t size, u32 max_memory_pages);
-#else
-static inline int exobox_exec_cached(struct file *file, loff_t size, u32 max_memory_pages) { return 1; }
 #endif
 
 #endif
