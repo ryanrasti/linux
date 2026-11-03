@@ -10,6 +10,8 @@ struct exobox_thread_info {
 	/* ...or rewinding into the clone call, which then returns rewind_ret */
 	int rewinding;
 	long rewind_ret;
+	/* a fork import is calling the program's functions: no syscall may come */
+	int fork_import;
 };
 
 #endif
