@@ -220,9 +220,15 @@ static void _enable(void *arg)
 	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vq->vdev);
 	struct virtio_wasm_vq *vw_vq = vq->priv;
 
+	/*
+	 * (with the event suppression structures, the host interrupts only when
+	 * the driver wants it to, and the driver notifies only when the host does)
+	 */
 	wasm_virtio_enable_vring(vw_dev->host_id, vq->index,
 				 virtqueue_get_vring_size(vq),
-				 virtqueue_get_desc_addr(vq), vw_vq->irq);
+				 virtqueue_get_desc_addr(vq),
+				 virtqueue_get_avail_addr(vq),
+				 virtqueue_get_used_addr(vq), vw_vq->irq);
 }
 
 static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,

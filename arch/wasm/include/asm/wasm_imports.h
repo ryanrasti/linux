@@ -116,8 +116,10 @@ void wasm_import(virtio, setup)(u32 id, u32 config_irq, u8 *config,
 				u32 config_len);
 void wasm_import(virtio, reset)(u32 id, u32 *done);
 
+/* a queue's packed ring, then its driver and device event suppression structures */
 void wasm_import(virtio, enable_vring)(u32 id, u32 index, u32 size,
-				       dma_addr_t desc, u32 irq);
+				       dma_addr_t desc, dma_addr_t driver,
+				       dma_addr_t device, u32 irq);
 void wasm_import(virtio, disable_vring)(u32 id, u32 index);
 
 void wasm_import(virtio, notify)(u32 id, u32 index);
