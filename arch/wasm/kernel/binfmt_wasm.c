@@ -57,7 +57,7 @@ struct wasm_exec_args {
 	unsigned int preserve_argv0 : 1;
 	unsigned int have_execfd : 1;
 	/* an ELF program's (exobox_elf_load's): AT_PHDR, AT_BASE, AT_ENTRY... */
-	unsigned long elf_aux[14];
+	unsigned long elf_aux[16];
 	struct wasm_process_args process;
 };
 
