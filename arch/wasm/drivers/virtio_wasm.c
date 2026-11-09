@@ -24,6 +24,8 @@ struct virtio_wasm_device {
 	int config_irq;
 
 	u32 host_id;
+	/* the most descriptors each queue takes: the device's (queue-size), else 256 */
+	u32 queue_size;
 	u8 status;
 	u64 features;
 
@@ -32,6 +34,8 @@ struct virtio_wasm_device {
 
 	/* set by the host once a reset has finished with guest memory */
 	u32 reset_done;
+	/* a reset's wait for it: the host raises the config irq once it's set */
+	wait_queue_head_t reset_wq;
 };
 
 /* per-virtqueue state, stored in vq->priv */
@@ -137,8 +141,7 @@ static void vw_reset(struct virtio_device *vdev)
 	 * writes in place. The driver frees those buffers once reset returns, so
 	 * wait until the host says it has finished with them.
 	 */
-	while (!smp_load_acquire(&vw_dev->reset_done))
-		msleep(1);
+	wait_event(vw_dev->reset_wq, smp_load_acquire(&vw_dev->reset_done));
 }
 
 /*
@@ -199,14 +202,14 @@ static void vw_del_vqs(struct virtio_device *vdev)
 		kfree(vw_vq->irq_name);
 		kfree(vw_vq);
 	}
-
-	free_irq(vw_dev->config_irq, vw_dev);
 }
 
 static irqreturn_t vw_config_interrupt(int irq, void *dev)
 {
 	struct virtio_wasm_device *vw_dev = dev;
 
+	/* (a reset finished, or the config changed: the host raises it for both) */
+	wake_up(&vw_dev->reset_wq);
 	virtio_config_changed(&vw_dev->vdev);
 	return IRQ_HANDLED;
 }
@@ -226,9 +229,10 @@ static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,
 				     vq_callback_t *callback, const char *name,
 				     bool ctx)
 {
+	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vdev);
 	struct virtio_wasm_vq *vw_vq;
 	struct virtqueue *vq;
-	int num = 256;
+	int num = vw_dev->queue_size;
 	int rc;
 
 	vw_vq = kzalloc(sizeof(*vw_vq), GFP_KERNEL);
@@ -285,11 +289,6 @@ static int vw_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vdev);
 	struct irq_affinity_desc *masks = NULL;
 	int i, queue_idx = 0, rc;
-
-	rc = request_irq(vw_dev->config_irq, vw_config_interrupt, 0,
-			 dev_name(&vdev->dev), vw_dev);
-	if (rc)
-		return rc;
 
 	if (desc)
 		masks = irq_create_affinity_masks(nvqs, desc);
@@ -401,6 +400,8 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 		goto error;
 	}
 
+	if (of_property_read_u32(pdev->dev.of_node, "queue-size", &vw_dev->queue_size))
+		vw_dev->queue_size = 256;
 	rc = of_property_read_u32(pdev->dev.of_node, "host-id",
 				  &vw_dev->host_id);
 	if (rc)
@@ -422,6 +423,15 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 						vw_dev->config_len);
 	if (rc < 0) {
 		pr_warn("failed to read config from device tree\n");
+		kfree(vw_dev->config);
+		goto error_free_irq;
+	}
+
+	/* (for the device's life: probing resets it, before any queue) */
+	init_waitqueue_head(&vw_dev->reset_wq);
+	rc = request_irq(vw_dev->config_irq, vw_config_interrupt, 0,
+			 dev_name(&pdev->dev), vw_dev);
+	if (rc) {
 		kfree(vw_dev->config);
 		goto error_free_irq;
 	}
@@ -450,7 +460,11 @@ static void virtio_wasm_remove(struct platform_device *pdev)
 	struct virtio_wasm_device *vw_dev = platform_get_drvdata(pdev);
 	int config_irq = vw_dev->config_irq;
 
+	/* (unregistering resets it, which waits on the irq; then the last ref frees vw_dev) */
+	get_device(&vw_dev->vdev.dev);
 	unregister_virtio_device(&vw_dev->vdev);
+	free_irq(config_irq, vw_dev);
+	put_device(&vw_dev->vdev.dev);
 	wasm_free_irq(config_irq);
 }
 
