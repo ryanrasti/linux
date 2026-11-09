@@ -442,8 +442,12 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 
 	rc = register_virtio_device(&vw_dev->vdev);
 	if (rc) {
-		/* the release callback frees vw_dev */
+		int config_irq = vw_dev->config_irq;
+
+		/* (the release callback frees vw_dev) */
+		free_irq(config_irq, vw_dev);
 		put_device(&vw_dev->vdev.dev);
+		wasm_free_irq(config_irq);
 		return rc;
 	}
 

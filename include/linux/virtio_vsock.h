@@ -131,9 +131,9 @@ static inline size_t virtio_vsock_skb_len(struct sk_buff *skb)
 }
 
 /* Dimension the RX SKB so that the entire thing fits exactly into
- * a single 4KiB page. This avoids wasting memory due to alloc_skb()
- * rounding up to the next page order and also means that we
- * don't leave higher-order pages sitting around in the RX queue.
+ * 16KiB (order 2 with 4KiB pages): alloc_skb() doesn't round it up to the
+ * next order. 16KiB rather than a single page is for throughput
+ * (measured in exobox's host, virtio/vsock.ts).
  */
 #define VIRTIO_VSOCK_DEFAULT_RX_BUF_SIZE	SKB_WITH_OVERHEAD(1024 * 16)
 #define VIRTIO_VSOCK_MAX_BUF_SIZE		0xFFFFFFFFUL
