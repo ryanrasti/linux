@@ -5,7 +5,7 @@
 #include <linux/types.h>
 
 /*
- * WASI's random source (random_get, which the kernel calls itself), as
+ * WASI's random source (wasi:random's, which the kernel calls itself), as
  * other arches have the CPU's: it seeds the RNG at boot (random.trust_cpu),
  * so getrandom() doesn't wait for entropy we can't collect (no timing
  * jitter here).
@@ -16,12 +16,16 @@ static inline size_t __must_check arch_get_random_longs(unsigned long *v, size_t
 }
 
 #ifdef CONFIG_LKL_WASI
-u16 wasi_random_get(void *buf, u32 len)
-	__attribute__((import_module("wasi_snapshot_preview1"), import_name("random_get")));
+u64 __wasm_import_wasi_random_random_get_random_u64(void)
+	__attribute__((import_module("wasi:random/random@0.2.12"), import_name("get-random-u64")));
 
 static inline size_t __must_check arch_get_random_seed_longs(unsigned long *v, size_t max_longs)
 {
-	return wasi_random_get(v, max_longs * sizeof(*v)) ? 0 : max_longs;
+	size_t i;
+
+	for (i = 0; i < max_longs; i++)
+		v[i] = __wasm_import_wasi_random_random_get_random_u64();
+	return max_longs;
 }
 #else
 static inline size_t __must_check arch_get_random_seed_longs(unsigned long *v, size_t max_longs)
