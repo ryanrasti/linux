@@ -157,6 +157,14 @@ enum lkl_prot {
  * @task_exit - the calling host thread's task exited in a syscall (exit,
  * exit_group, a fatal signal), with the given wait status; the thread ends,
  * without returning. Without it, the thread waits forever.
+ * @signal_handler - run a process's signal handler, a function of the
+ * program's, for sig: called at a syscall's return to the program, on the
+ * task's host thread (its own stack), with the CPU released. info: the
+ * siginfo_t for an SA_SIGINFO handler, which takes (sig, info, ucontext);
+ * NULL for a plain handler, which takes (sig). mask: the signal mask
+ * (sigset_t) that sigreturn restores once the handler returns, the
+ * ucontext's uc_sigmask, which the handler may change. Without it,
+ * processes get no signals delivered.
  *
  * @poll_watch - WASI 0.2: the kernel's waits on wasi:io pollables of its own
  * (arch/lkl/drivers/wasi_sock.c's, which calls wasi:sockets itself). Each
@@ -230,6 +238,8 @@ struct lkl_host_operations {
 	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
 					 unsigned long stack);
 	void (*task_exit)(int status);
+	void (*signal_handler)(unsigned long handler, int sig, void *info,
+			       void *mask);
 
 	void (*poll_watch)(unsigned int *pollables, int n, void (*ready)(void));
 

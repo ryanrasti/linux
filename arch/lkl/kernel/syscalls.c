@@ -10,6 +10,8 @@
 #include <linux/task_work.h>
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
+#include <linux/sched/signal.h>
+#include <linux/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
@@ -99,8 +101,12 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 
 	switch_to_host_task(host0);
 
+	/*
+	 * A new thread group is a process: its signal handlers its own (a
+	 * copy of host0's), so the ones it installs aren't the kernel's.
+	 */
 	if (new_tg_leader)
-		flags &= ~CLONE_THREAD;
+		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
 
 	/*
 	 * A process is a user mode thread, as init is: a kernel thread
@@ -116,6 +122,16 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	rcu_read_lock();
 	*task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+
+	/*
+	 * host0 ignores SIGCHLD, so exited host tasks are reaped; a process
+	 * starts with the default, so its own children can be waited for.
+	 */
+	if (new_tg_leader) {
+		spin_lock_irq(&(*task)->sighand->siglock);
+		(*task)->sighand->action[SIGCHLD - 1].sa.sa_handler = SIG_DFL;
+		spin_unlock_irq(&(*task)->sighand->siglock);
+	}
 
 	host_task_id++;
 
@@ -144,6 +160,81 @@ static void del_host_task(void *arg)
 
 static struct lkl_tls_key *task_key;
 
+/*
+ * Whether a syscall a signal interrupted runs again (an -ERESTART* ret;
+ * any other is its result): if not, it ends with -EINTR. ka: the handler
+ * about to run, or NULL.
+ */
+static bool syscall_restarts(long *ret, struct k_sigaction *ka)
+{
+	switch (*ret) {
+	case -ERESTARTNOHAND:
+	case -ERESTART_RESTARTBLOCK:
+		if (!ka)
+			return true;
+		break;
+	case -ERESTARTSYS:
+		if (!ka || ka->sa.sa_flags & SA_RESTART)
+			return true;
+		break;
+	case -ERESTARTNOINTR:
+		return true;
+	default:
+		return false;
+	}
+	*ret = -EINTR;
+	return false;
+}
+
+/*
+ * A syscall's return to the program, as an arch's (arch_do_signal_or_restart)
+ * but without a frame: a pending signal's handler, a function of the
+ * program's, is called by the host on the task's own stack, and when it
+ * returns, sigreturn's work is done here (the mask restored; then more
+ * signals, or the syscall again). A fatal signal exits the task in
+ * get_signal(), which doesn't return (__switch_to(): task_exit).
+ */
+static long syscall_exit_signals(long no, long *params, long ret)
+{
+	struct task_struct *task = current;
+	struct ksignal ksig;
+	siginfo_t info;
+	sigset_t mask;
+	bool restart, si;
+
+	for (;;) {
+		if (!signal_pending(task) || !get_signal(&ksig)) {
+			restart = syscall_restarts(&ret, NULL);
+			restore_saved_sigmask();
+			if (!restart)
+				return ret;
+		} else {
+			restart = syscall_restarts(&ret, &ksig.ka);
+			si = ksig.ka.sa.sa_flags & SA_SIGINFO;
+			if (si)
+				copy_siginfo_to_external(&info, &ksig.info);
+			mask = *sigmask_to_save();
+			signal_setup_done(0, &ksig, 0);
+
+			/* in the program */
+			lkl_cpu_put();
+			lkl_ops->signal_handler((unsigned long)ksig.ka.sa.sa_handler,
+						ksig.sig, si ? &info : NULL,
+						&mask);
+			if (lkl_cpu_get() < 0)
+				return -EINTR;	/* (the kernel halted) */
+			switch_to_host_task(task);
+			/* sigreturn */
+			set_current_blocked(&mask);
+			if (!restart)
+				continue;
+		}
+		if (ret == -ERESTART_RESTARTBLOCK)
+			no = __NR_restart_syscall;
+		ret = run_syscall(no, params);
+	}
+}
+
 long lkl_syscall(long no, long *params)
 {
 	struct task_struct *task = host0;
@@ -171,6 +262,10 @@ long lkl_syscall(long no, long *params)
 		thread_sched_jb();
 		return ret;
 	}
+
+	/* a process's (a kernel thread's signals are the kernel's own) */
+	if (!(task->flags & PF_KTHREAD) && lkl_ops->signal_handler)
+		ret = syscall_exit_signals(no, params, ret);
 
 out:
 	lkl_cpu_put();
@@ -280,11 +375,8 @@ int syscalls_init(void)
 
 	// Reap zombie host tasks spawned as new thread group leaders via
 	// new_thread_group_leader syscall (otherwise the dead task resources
-	// such as `struct task_struct` won't be reclaimed by kernel).
-	// TODO: currently LKL doesn't support thread signal handling in
-	// user-space, thus, it's safe to ignore this signal here. However,
-	// if user-space signal handling is implemented in future we might want
-	// to remove the line of code below to let user-space handle SIGCHLD.
+	// such as `struct task_struct` won't be reclaimed by kernel). The
+	// processes themselves start with SIGCHLD's default (new_host_task).
 	kernel_sigaction(SIGCHLD, SIG_IGN);
 
 	if (lkl_ops->tls_alloc) {
