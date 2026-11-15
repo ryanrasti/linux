@@ -1,5 +1,5 @@
-# LKL linked into a WASI program (a library OS): the console and an
-# in-memory root only
+# LKL linked into a WASI program (a library OS): the console, an in-memory
+# root, and sockets on the host's network (LKL_HOSTSOCK)
 CONFIG_EXPERT=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
@@ -7,7 +7,14 @@ CONFIG_CC_OPTIMIZE_FOR_SIZE=y
 CONFIG_DEBUG_INFO_NONE=y
 CONFIG_DEVTMPFS=y
 CONFIG_LKL_WASI=y
-# CONFIG_NET is not set
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_LKL_HOSTSOCK=y
+CONFIG_LKL_WASI_FS=y
+# CONFIG_IPV6 is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_ETHTOOL_NETLINK is not set
 # CONFIG_BLOCK is not set
 # CONFIG_PCI is not set
 # CONFIG_VT is not set
@@ -24,14 +31,14 @@ CONFIG_LKL_WASI=y
 # CONFIG_AIO is not set
 # CONFIG_SYSVIPC is not set
 # CONFIG_TMPFS is not set
-# CONFIG_PROC_FS is not set
+CONFIG_PROC_FS=y
 # CONFIG_SYSFS is not set
 # CONFIG_POSIX_TIMERS is not set
-# CONFIG_EPOLL is not set
+CONFIG_EPOLL=y
 # CONFIG_SIGNALFD is not set
 # CONFIG_TIMERFD is not set
-# CONFIG_EVENTFD is not set
-# CONFIG_FILE_LOCKING is not set
+CONFIG_EVENTFD=y
+CONFIG_FILE_LOCKING=y
 # CONFIG_DNOTIFY is not set
 # CONFIG_INOTIFY_USER is not set
 # CONFIG_FANOTIFY is not set
