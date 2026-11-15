@@ -81,15 +81,26 @@ static bool wasi_stdin_ready(void)
 	return false;
 }
 
+/*
+ * stdin's end: the tty's end-of-file character (VEOF, ^D), once, which
+ * ends a canonical read as a terminal's ^D would; after it, no input
+ */
+static bool wasi_stdin_ended;
+
 static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 {
 	struct wasi_iovec iov = { buf, count };
 	u32 read;
 
-	if (!wasi_stdin_ready())
+	if (wasi_stdin_ended || !wasi_stdin_ready())
 		return 0;
 	if (wasi_fd_read(0, &iov, 1, &read))
 		return -EIO;
+	if (!read && count) {
+		wasi_stdin_ended = true;
+		buf[0] = 4;
+		return 1;
+	}
 	return read;
 }
 
