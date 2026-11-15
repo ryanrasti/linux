@@ -165,11 +165,38 @@ static int ramfs_nommu_resize(struct inode *inode, loff_t newsize, loff_t size)
 }
 
 /*
+ * a hole punched in [start, end): its bytes zeroed where the file has pages,
+ * the pages kept (a shared mapping's are the file's own, contiguous)
+ */
+static void ramfs_nommu_punch_hole(struct inode *inode, loff_t start, loff_t end)
+{
+	pgoff_t index = start >> PAGE_SHIFT;
+
+	end = min(end, i_size_read(inode));
+	while ((loff_t)index << PAGE_SHIFT < end) {
+		struct folio *folio = filemap_lock_folio(inode->i_mapping, index);
+		loff_t pos;
+
+		if (IS_ERR(folio)) {
+			index++;
+			continue;
+		}
+		pos = folio_pos(folio);
+		folio_zero_range(folio, max(start, pos) - pos,
+				 min(end, pos + (loff_t)folio_size(folio)) -
+				 max(start, pos));
+		index = folio_next_index(folio);
+		folio_unlock(folio);
+		folio_put(folio);
+	}
+}
+
+/*
  * fallocate: tmpfs's, without an MMU (where tmpfs is ramfs), so that what
  * reserves space before writing or mapping a file (systemd-journald's
  * seqnum file) finds it there: the file grows to the range's end, its
- * pages allocated when written, as ramfs's always are. No holes punched,
- * no ranges zeroed or collapsed.
+ * pages allocated when written, as ramfs's always are. A hole punched
+ * reads as zeros (ramfs_nommu_punch_hole); no ranges collapsed or inserted.
  */
 static long ramfs_nommu_fallocate(struct file *file, int mode, loff_t offset,
 				  loff_t len)
@@ -178,6 +205,13 @@ static long ramfs_nommu_fallocate(struct file *file, int mode, loff_t offset,
 	loff_t end = offset + len;	/* (vfs_fallocate checked it doesn't overflow) */
 	int ret;
 
+	if (mode == (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)) {
+		inode_lock(inode);
+		ramfs_nommu_punch_hole(inode, offset, end);
+		ret = file_modified(file);
+		inode_unlock(inode);
+		return ret;
+	}
 	if (mode & ~FALLOC_FL_KEEP_SIZE)
 		return -EOPNOTSUPP;
 	inode_lock(inode);
