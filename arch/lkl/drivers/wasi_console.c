@@ -65,7 +65,11 @@ static ssize_t wasi_put_chars(u32 vtermno, const u8 *buf, size_t count)
 	return written;
 }
 
-/* stdin has bytes (or its end) now: a poll with a zero timeout beside it */
+/*
+ * stdin has bytes (or its end) now: a poll with a zero timeout beside it.
+ * A runtime that refuses the poll (node:wasi: stdin hasn't the right to be
+ * polled) has it read anyway, and the read blocks the module until input.
+ */
 static bool wasi_stdin_ready(void)
 {
 	struct wasi_subscription in[2] = {
@@ -76,7 +80,7 @@ static bool wasi_stdin_ready(void)
 	u32 got, i;
 
 	if (wasi_poll_oneoff(in, out, 2, &got))
-		return false;
+		return true;
 	for (i = 0; i < got; i++)
 		if (out[i].userdata == 1 && !out[i].error)
 			return true;
