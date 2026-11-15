@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/types.h>
+#include <linux/tty.h>
 #include "../../../drivers/tty/hvc/hvc_console.h"
 
 #define WASI(name) \
@@ -50,6 +51,7 @@ WASI(fd_write) u16 wasi_fd_write(u32 fd, const struct wasi_iovec *iovs,
 				 u32 n, u32 *written);
 WASI(fd_read) u16 wasi_fd_read(u32 fd, const struct wasi_iovec *iovs,
 			       u32 n, u32 *read);
+WASI(fd_fdstat_get) u16 wasi_fd_fdstat_get(u32 fd, void *stat);
 WASI(poll_oneoff) u16 wasi_poll_oneoff(const struct wasi_subscription *in,
 				       struct wasi_event *out, u32 n, u32 *got);
 
@@ -104,9 +106,43 @@ static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 	return read;
 }
 
+/* fd is a terminal's: WASI's filetype character_device */
+static bool wasi_isatty(u32 fd)
+{
+	struct { u8 filetype; u8 rest[23]; } st;
+
+	return !wasi_fd_fdstat_get(fd, &st) && st.filetype == 2;
+}
+
+/*
+ * the console's first open: a terminal's settings only where WASI's stdio
+ * is a terminal; otherwise no echo of piped input, and output as written
+ * (no \r before \n). Before any input is read (hvc polls once opened).
+ */
+static int wasi_notifier_add(struct hvc_struct *hp, int data)
+{
+	struct tty_struct *tty = tty_port_tty_get(&hp->port);
+	static bool set;
+	struct ktermios t;
+
+	if (!tty || set)
+		goto out;
+	set = true;
+	t = tty->termios;
+	if (!wasi_isatty(0))
+		t.c_lflag &= ~(ECHO | ECHONL);
+	if (!wasi_isatty(1))
+		t.c_oflag &= ~OPOST;
+	tty_set_termios(tty, &t);
+out:
+	tty_kref_put(tty);
+	return 0;
+}
+
 static const struct hv_ops wasi_hv_ops = {
 	.get_chars = wasi_get_chars,
 	.put_chars = wasi_put_chars,
+	.notifier_add = wasi_notifier_add,
 };
 
 static int __init wasi_console_init(void)
