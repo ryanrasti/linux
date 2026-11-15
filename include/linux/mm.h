@@ -3258,6 +3258,7 @@ extern void setup_per_cpu_pageset(void);
 /* nommu.c */
 extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);
+bool arch_page_fresh(struct page *page);
 
 /* interval_tree.c */
 void vma_interval_tree_insert(struct vm_area_struct *node,
