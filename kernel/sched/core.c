@@ -2270,6 +2270,17 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		if (unlikely(queued)) {
 			ktime_t to = NSEC_PER_SEC / HZ;
 
+			/*
+			 * LKL has one CPU, so a queued task can only run once
+			 * we give up the CPU: yield to it rather than sleep a
+			 * whole tick, which kthread_bind() etc. hit repeatedly
+			 * during boot.
+			 */
+			if (IS_ENABLED(CONFIG_LKL)) {
+				yield();
+				continue;
+			}
+
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_hrtimeout(&to, HRTIMER_MODE_REL_HARD);
 			continue;
