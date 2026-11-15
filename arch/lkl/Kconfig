@@ -40,6 +40,16 @@ config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
 
+config LKL_WASI
+	bool "Linked into a WASI program"
+	depends on LKL_WASM && TTY
+	select HVC_DRIVER
+	default n
+	help
+	  The kernel as a library OS, linked into a WASI program with its
+	  libc. Its console is an hvc console (/dev/hvc0) on the program's
+	  WASI stdin and stdout.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER

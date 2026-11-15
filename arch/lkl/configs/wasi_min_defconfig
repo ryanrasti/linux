@@ -1,0 +1,43 @@
+# LKL linked into a WASI program (a library OS): the console and an
+# in-memory root only
+CONFIG_EXPERT=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_DEBUG_INFO_NONE=y
+CONFIG_DEVTMPFS=y
+CONFIG_LKL_WASI=y
+# CONFIG_NET is not set
+# CONFIG_BLOCK is not set
+# CONFIG_PCI is not set
+# CONFIG_VT is not set
+# CONFIG_LEGACY_PTYS is not set
+# CONFIG_UNIX98_PTYS is not set
+# CONFIG_INPUT is not set
+# CONFIG_SERIO is not set
+# CONFIG_HID_SUPPORT is not set
+# CONFIG_HWMON is not set
+# CONFIG_HW_RANDOM is not set
+# CONFIG_FW_LOADER is not set
+# CONFIG_FTRACE is not set
+# CONFIG_IO_URING is not set
+# CONFIG_AIO is not set
+# CONFIG_SYSVIPC is not set
+# CONFIG_TMPFS is not set
+# CONFIG_PROC_FS is not set
+# CONFIG_SYSFS is not set
+# CONFIG_POSIX_TIMERS is not set
+# CONFIG_EPOLL is not set
+# CONFIG_SIGNALFD is not set
+# CONFIG_TIMERFD is not set
+# CONFIG_EVENTFD is not set
+# CONFIG_FILE_LOCKING is not set
+# CONFIG_DNOTIFY is not set
+# CONFIG_INOTIFY_USER is not set
+# CONFIG_FANOTIFY is not set
+# CONFIG_KALLSYMS is not set
+# CONFIG_BUG is not set
+# CONFIG_MULTIUSER is not set
+# CONFIG_CRYPTO is not set
+# CONFIG_MQ_IOSCHED_DEADLINE is not set
+# CONFIG_MQ_IOSCHED_KYBER is not set
