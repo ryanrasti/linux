@@ -7,6 +7,7 @@ long lkl_syscall(long no, long *params);
 bool wakeup_idle_host_task(void);
 bool others_runnable(void);
 long lkl_sys_halt(void);
+int lkl_process_brk(void);
 
 #define sys_mmap sys_mmap_pgoff
 #define sys_mmap2 sys_mmap_pgoff

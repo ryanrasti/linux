@@ -11,6 +11,8 @@
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
+#include <linux/mman.h>
 #include <linux/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
@@ -456,11 +458,61 @@ exit_device_put:
 }
 
 
+/*
+ * A process's break: a mapping of its own (the program's data is the
+ * module's, not the process's), which brk grows over and shrinks back
+ * from. Its pages are backed as they're written (do_mmap zeroes only what
+ * isn't zero).
+ */
+#define LKL_BRK_SIZE (1 << 20)
+
+int lkl_process_brk(void)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long addr;
+
+	addr = vm_mmap(NULL, 0, LKL_BRK_SIZE, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, 0);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+	mm->start_brk = mm->brk = addr;
+	mm->context.end_brk = addr + LKL_BRK_SIZE;
+	return 0;
+}
+
+/*
+ * A process's memory: an mm of its own, not host0's (which the host task it
+ * was made from shares, CLONE_VM), so its mappings are its own (nommu's
+ * mmap) and freed with it, and a break. exec replaces it, as a native
+ * process's.
+ */
+static int new_process_mm(void)
+{
+	struct task_struct *tsk = current;
+	struct mm_struct *mm, *old_mm = tsk->mm, *active_mm;
+
+	if (old_mm && old_mm != host0->mm)
+		return 0;
+	mm = mm_alloc();
+	if (!mm)
+		return -ENOMEM;
+	task_lock(tsk);
+	active_mm = tsk->active_mm;
+	tsk->active_mm = mm;
+	tsk->mm = mm;
+	task_unlock(tsk);
+	if (old_mm)
+		mmput(old_mm);
+	else if (active_mm)
+		mmdrop_lazy_tlb(active_mm);
+	return lkl_process_brk();
+}
+
 SYSCALL_DEFINE0(new_thread_group_leader)
 {
-	// No-op here -- actual handling is done in lkl_syscall routine.
+	// The task is made in lkl_syscall routine: here its memory.
 	if (current->tgid == current->pid)
-		return 0;
+		return new_process_mm() ? -1 : 0;
 	else
 		return -1;
 }

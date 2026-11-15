@@ -2,11 +2,62 @@
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
+#include <linux/bitmap.h>
+#include <linux/sizes.h>
 #include <asm/host_ops.h>
 
 unsigned long memory_start, memory_end;
 static void *_memory_start;
 static unsigned long mem_size;
+
+#ifndef CONFIG_MMU
+/*
+ * The pool's fresh pages: those the page allocator hasn't freed since
+ * boot (a bit each), past the part the boot allocator (memblock) may use.
+ * They still hold the zeros the host's memory gave them: a new mapping
+ * needn't zero them, nor read them (a lazily backed memory, as wasm's,
+ * would back what's read). A page is fresh until it's freed: whoever has
+ * it then may have written it.
+ */
+static unsigned long *fresh;
+static unsigned long fresh_pfn, fresh_pages;
+
+bool arch_page_fresh(struct page *page)
+{
+	unsigned long i = page_to_pfn(page) - fresh_pfn;
+
+	return fresh && page_to_pfn(page) >= fresh_pfn && i < fresh_pages &&
+	       test_bit(i, fresh);
+}
+
+void arch_free_page(struct page *page, int order)
+{
+	unsigned long pfn = page_to_pfn(page), end = pfn + (1UL << order);
+
+	if (!fresh || end <= fresh_pfn || pfn >= fresh_pfn + fresh_pages)
+		return;
+	pfn = max(pfn, fresh_pfn);
+	end = min(end, fresh_pfn + fresh_pages);
+	bitmap_clear(fresh, pfn - fresh_pfn, end - pfn);
+}
+
+/*
+ * the boot allocator's part, at the pool's start: enough for the memory
+ * map (a struct page each page) and the rest it allocates; the fresh pages
+ * past it
+ */
+static void __init fresh_init(void)
+{
+	unsigned long boot = min(mem_size, PAGE_ALIGN((mem_size >> 6) + SZ_4M));
+
+	memblock_set_current_limit(__pa(memory_start + boot));
+	fresh_pfn = virt_to_pfn((void *)(memory_start + boot));
+	fresh_pages = (mem_size - boot) >> PAGE_SHIFT;
+	if (fresh_pages)
+		fresh = memblock_alloc(BITS_TO_LONGS(fresh_pages) * sizeof(long),
+				       SMP_CACHE_BYTES);
+}
+#endif
 
 void *empty_zero_page;
 
@@ -40,6 +91,15 @@ void __init bootmem_init(unsigned long mem_sz)
 		memory_start = PAGE_ALIGN(memory_start);
 		mem_size = (mem_size / PAGE_SIZE) * PAGE_SIZE;
 	}
+	/*
+	 * its end at a max-order block's boundary, when it spans several: the
+	 * memory map spans whole blocks, and is zeroed (resident) at boot
+	 */
+	if (mem_size > 2 * (PAGE_SIZE << MAX_PAGE_ORDER)) {
+		memory_end = ALIGN_DOWN(memory_start + mem_size,
+					PAGE_SIZE << MAX_PAGE_ORDER);
+		mem_size = memory_end - memory_start;
+	}
 	pr_info("memblock address range: 0x%lx - 0x%lx\n", memory_start,
 		memory_start+mem_size);
 	/*
@@ -47,6 +107,9 @@ void __init bootmem_init(unsigned long mem_sz)
 	 * boot mem_map at the start of memory.
 	 */
 	memblock_add(__pa(memory_start), mem_size);
+#ifndef CONFIG_MMU
+	fresh_init();
+#endif
 
 	max_pfn = max_low_pfn = virt_to_pfn((void *)memory_end);
 	min_low_pfn = virt_to_pfn((void *)memory_start);
@@ -62,6 +125,11 @@ void __init bootmem_init(unsigned long mem_sz)
 void __init mem_init(void)
 {
 	memblock_free_all();
+#ifndef CONFIG_MMU
+	/* (freeing them to the page allocator cleared them) */
+	if (fresh)
+		bitmap_fill(fresh, fresh_pages);
+#endif
 }
 
 /*

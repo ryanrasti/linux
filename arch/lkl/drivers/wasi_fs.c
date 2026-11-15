@@ -17,7 +17,7 @@
  * negative ones are looked up again each time, attributes are fetched
  * again by stat and by open. An open file holds a descriptor of its own;
  * reads and writes go to the host directly (pread/pwrite: no page cache;
- * musl's mmap of a file is a pread copy).
+ * a mapping of a file is nommu's copy, a shared one written back).
  *
  * WASI has no owners or permissions: files are root's, directories 0755,
  * files 0644, symbolic links 0777, and chmod or chown to anything else is

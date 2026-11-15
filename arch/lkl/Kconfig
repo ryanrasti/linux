@@ -83,6 +83,15 @@ config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER
 
+config ARCH_FORCE_MAX_ORDER
+	int
+	default 16 if LKL_WASM
+	default 10
+	help
+	  The page allocator's largest block, 2^order pages. Without an MMU
+	  each mapping of a process is one block, trimmed: on wasm (a large
+	  pool, backed as it's used) 256 MiB, for a database's buffer pool.
+
 config ARCH_DMA_ADDR_T_64BIT
 	def_bool 64BIT
 

@@ -14,6 +14,7 @@
 #include <linux/highmem.h>
 #include <linux/mm.h>
 #include <asm/host_ops.h>
+#include <asm/syscalls.h>
 
 #define WASI_PROG_MAGIC "\0wasiprg"	/* 8 bytes */
 
@@ -58,7 +59,11 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 	if (!ret) {
 		set_personality(PER_LINUX);
 		setup_new_exec(bprm);
-		ret = lkl_ops->exec_prog(index, args, len, bprm->argc, bprm->envc);
+		/* (the new mm's break) */
+		ret = lkl_process_brk();
+		if (!ret)
+			ret = lkl_ops->exec_prog(index, args, len, bprm->argc,
+						 bprm->envc);
 	}
 	kvfree(args);
 	if (ret)
