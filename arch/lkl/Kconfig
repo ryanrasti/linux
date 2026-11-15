@@ -59,6 +59,14 @@ config LKL_WASI
 	  libc. Its console is an hvc console (/dev/hvc0) on the program's
 	  WASI stdin and stdout.
 
+config LKL_WASI_BLK
+	bool "A read-only block device over an image embedded in the program"
+	depends on BLOCK && LKL_WASI
+	default n
+	help
+	  The system image, embedded in the program as a data symbol
+	  (__wasi_image), served as /dev/wblk0 and mounted as the root.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER
