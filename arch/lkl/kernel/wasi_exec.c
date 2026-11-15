@@ -11,6 +11,8 @@
 #include <linux/module.h>
 #include <linux/personality.h>
 #include <linux/slab.h>
+#include <linux/highmem.h>
+#include <linux/mm.h>
 #include <asm/host_ops.h>
 
 #define WASI_PROG_MAGIC "\0wasiprg"	/* 8 bytes */
