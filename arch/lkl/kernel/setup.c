@@ -120,6 +120,8 @@ int __init lkl_start_kernel(const char *fmt, ...)
 	lkl_ops->sem_free(init_sem);
 	current_thread_info()->tid = lkl_ops->thread_self();
 	lkl_cpu_change_owner(current_thread_info()->tid);
+	/* init (PID 1) this thread's task: the first program's */
+	syscalls_init_thread();
 
 	lkl_cpu_put();
 	is_running = 1;
@@ -198,7 +200,12 @@ static int lkl_run_init(struct linux_binprm *bprm)
 
 	set_binfmt(&lkl_run_init_binfmt);
 
-	init_pid_ns.child_reaper = 0;
+	/*
+	 * init is the first program's process (syscalls_init_thread): its
+	 * break and stack, as an exec's (a Go program's runtime, which the
+	 * host doesn't exec, has its own stack)
+	 */
+	WARN_ON(IS_ERR_VALUE(lkl_process_mem()));
 
 	syscalls_init();
 

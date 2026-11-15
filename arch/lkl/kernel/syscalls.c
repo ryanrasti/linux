@@ -10,6 +10,7 @@
 #include <linux/task_work.h>
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
+#include <linux/completion.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
 #include <linux/mman.h>
@@ -95,30 +96,29 @@ static long run_syscall(long no, long *params)
 		     CLONE_SIGHAND | SIGCHLD)
 
 static int host_task_id;
+/*
+ * The task host calls are made as when a host thread has none of its own,
+ * and the thread group of each host thread's: a kernel thread (kthreadd's
+ * child, not init's), its signals ignored, so exited host tasks are reaped.
+ */
 static struct task_struct *host0;
 
 static int new_host_task(struct task_struct **task, int new_tg_leader)
 {
 	pid_t pid;
-	unsigned long flags = CLONE_FLAGS;
 
 	switch_to_host_task(host0);
 
 	/*
-	 * A new thread group is a process: its signal handlers its own (a
-	 * copy of host0's), so the ones it installs aren't the kernel's.
+	 * A new thread group is a process of its own, as init is: a user
+	 * mode thread (a kernel thread, PF_KTHREAD, can't exec a program),
+	 * its files and fs a copy of host0's and its signals' actions the
+	 * defaults, so its children can be waited for.
 	 */
 	if (new_tg_leader)
-		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
-
-	/*
-	 * A process is a user mode thread, as init is: a kernel thread
-	 * (PF_KTHREAD) can't exec a program.
-	 */
-	if (new_tg_leader)
-		pid = user_mode_thread(host_task_stub, NULL, flags);
+		pid = user_mode_thread(host_task_stub, NULL, SIGCHLD);
 	else
-		pid = kernel_thread(host_task_stub, NULL, NULL, flags);
+		pid = kernel_thread(host_task_stub, NULL, NULL, CLONE_FLAGS);
 	if (pid < 0)
 		return pid;
 
@@ -126,13 +126,9 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	*task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
 
-	/*
-	 * host0 ignores SIGCHLD, so exited host tasks are reaped; a process
-	 * starts with the default, so its own children can be waited for.
-	 */
 	if (new_tg_leader) {
 		spin_lock_irq(&(*task)->sighand->siglock);
-		(*task)->sighand->action[SIGCHLD - 1].sa.sa_handler = SIG_DFL;
+		flush_signal_handlers(*task, 1);
 		spin_unlock_irq(&(*task)->sighand->siglock);
 	}
 
@@ -265,6 +261,15 @@ long lkl_syscall(long no, long *params)
 		task_thread_info(task)->exec_old_mm = NULL;
 	}
 
+	/*
+	 * PID 1's end (its exit_group, or its last thread's exit) is the
+	 * host's, with its wait status: Linux would panic (do_exit)
+	 */
+	if (is_global_init(task) && lkl_ops->task_exit &&
+	    (no == __NR_exit_group ||
+	     (no == __NR_exit && atomic_read(&task->signal->live) == 1)))
+		lkl_ops->task_exit(1, (params[0] & 0xff) << 8);
+
 	ret = run_syscall(no, params);
 
 	if (no == __NR_reboot) {
@@ -376,17 +381,37 @@ static int idle_host_task_loop(void *unused)
 	}
 }
 
-int syscalls_init(void)
+static DECLARE_COMPLETION(host0_made);
+static int host0_ret;
+
+/*
+ * host0: a kernel thread that becomes a host task (its host thread ends,
+ * as init's does in lkl_run_init), the idle host task a thread of its group
+ */
+static int host0_init(void *unused)
 {
-	snprintf(current->comm, sizeof(current->comm), "host0");
+	/* its files its own (host tasks' descriptors), not the kernel threads' */
+	host0_ret = ksys_unshare(CLONE_FILES);
+	if (!host0_ret &&
+	    kernel_thread(idle_host_task_loop, NULL, NULL, CLONE_FLAGS) < 0)
+		host0_ret = -ENOMEM;
 	set_thread_flag(TIF_HOST_THREAD);
 	host0 = current;
+	complete(&host0_made);
+	/* asleep until a host thread takes it (switch_to_host_task) */
+	thread_sched_jb();
+	lkl_ops->thread_exit();
+	return 0;
+}
 
-	// Reap zombie host tasks spawned as new thread group leaders via
-	// new_thread_group_leader syscall (otherwise the dead task resources
-	// such as `struct task_struct` won't be reclaimed by kernel). The
-	// processes themselves start with SIGCHLD's default (new_host_task).
-	kernel_sigaction(SIGCHLD, SIG_IGN);
+/*
+ * Called by init (PID 1) in its exec of /init, which then stays the task
+ * of the thread that started the kernel (syscalls_init_thread): the first
+ * program's.
+ */
+int syscalls_init(void)
+{
+	struct task_struct *t;
 
 	if (lkl_ops->tls_alloc) {
 		task_key = lkl_ops->tls_alloc(del_host_task);
@@ -394,13 +419,24 @@ int syscalls_init(void)
 			return -1;
 	}
 
-	if (kernel_thread(idle_host_task_loop, NULL, NULL, CLONE_FLAGS) < 0) {
-		if (lkl_ops->tls_free)
-			lkl_ops->tls_free(task_key);
-		return -1;
+	t = kthread_run(host0_init, NULL, "host0");
+	if (!IS_ERR(t)) {
+		wait_for_completion(&host0_made);
+		if (!host0_ret) {
+			set_thread_flag(TIF_HOST_THREAD);
+			return 0;
+		}
 	}
+	if (lkl_ops->tls_free)
+		lkl_ops->tls_free(task_key);
+	return -1;
+}
 
-	return 0;
+/* the thread that started the kernel: init its host task */
+void syscalls_init_thread(void)
+{
+	if (lkl_ops->tls_set)
+		lkl_ops->tls_set(task_key, current);
 }
 
 void syscalls_cleanup(void)
@@ -500,17 +536,16 @@ unsigned long lkl_process_mem(void)
 }
 
 /*
- * A process's memory: an mm of its own, not host0's (which the host task it
- * was made from shares, CLONE_VM), so its mappings are its own (nommu's
- * mmap) and freed with it, and a break. exec replaces it, as a native
- * process's.
+ * A process's memory: an mm of its own (one made from host0, a kernel
+ * thread, has none until here), so its mappings are its own (nommu's mmap)
+ * and freed with it, and a break. exec replaces it, as a native process's.
  */
 static unsigned long new_process_mm(void)
 {
 	struct task_struct *tsk = current;
-	struct mm_struct *mm, *old_mm = tsk->mm, *active_mm;
+	struct mm_struct *mm, *active_mm;
 
-	if (old_mm && old_mm != host0->mm)
+	if (tsk->mm)
 		return -EEXIST;
 	mm = mm_alloc();
 	if (!mm)
@@ -520,9 +555,7 @@ static unsigned long new_process_mm(void)
 	tsk->active_mm = mm;
 	tsk->mm = mm;
 	task_unlock(tsk);
-	if (old_mm)
-		mmput(old_mm);
-	else if (active_mm)
+	if (active_mm)
 		mmdrop_lazy_tlb(active_mm);
 	return lkl_process_mem();
 }

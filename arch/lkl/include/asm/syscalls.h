@@ -2,6 +2,7 @@
 #define _ASM_LKL_SYSCALLS_H
 
 int syscalls_init(void);
+void syscalls_init_thread(void);
 void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
 bool wakeup_idle_host_task(void);
