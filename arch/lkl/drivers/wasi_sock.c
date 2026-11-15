@@ -36,6 +36,7 @@
 #include <net/ipv6.h>
 #include <net/sock.h>
 #include <asm/host_ops.h>
+#include <asm/wasi.h>
 #include <asm/wasi_sock.h>
 
 #define AF_WASI_SOCK	AF_ECONET	/* the guest's AF_INET sockets */
@@ -48,15 +49,8 @@
 /* bytes read ahead for MSG_PEEK */
 #define PEEK_SIZE	4096
 
-/*
- * wasi:sockets and wasi:io, as the canonical ABI lowers them (the names
- * wit-bindgen gives them; the version the program's world's, host/wit):
- * handles are i32s, results written to a return area
- */
-#define WASI_IMPORT(iface, name) \
-	__attribute__((import_module(iface "@0.2.12"), import_name(name)))
+/* wasi:sockets (asm/wasi.h: the ABI, and wasi:io's) */
 #define TCP(name) WASI_IMPORT("wasi:sockets/tcp", name)
-#define STREAMS(name) WASI_IMPORT("wasi:io/streams", name)
 
 #define ADDR_ARGS s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32
 
@@ -90,28 +84,6 @@ TCP("[method]tcp-socket.subscribe")
 s32 __wasm_import_wasi_sockets_tcp_method_tcp_socket_subscribe(s32);
 TCP("[resource-drop]tcp-socket")
 void __wasm_import_wasi_sockets_tcp_tcp_socket_drop(s32);
-STREAMS("[method]input-stream.read")
-void __wasm_import_wasi_io_streams_method_input_stream_read(s32, s64, void *);
-STREAMS("[method]input-stream.subscribe")
-s32 __wasm_import_wasi_io_streams_method_input_stream_subscribe(s32);
-STREAMS("[method]output-stream.check-write")
-void __wasm_import_wasi_io_streams_method_output_stream_check_write(s32, void *);
-STREAMS("[method]output-stream.write")
-void __wasm_import_wasi_io_streams_method_output_stream_write(s32, const void *, u32, void *);
-STREAMS("[method]output-stream.flush")
-void __wasm_import_wasi_io_streams_method_output_stream_flush(s32, void *);
-STREAMS("[method]output-stream.subscribe")
-s32 __wasm_import_wasi_io_streams_method_output_stream_subscribe(s32);
-STREAMS("[resource-drop]input-stream")
-void __wasm_import_wasi_io_streams_input_stream_drop(s32);
-STREAMS("[resource-drop]output-stream")
-void __wasm_import_wasi_io_streams_output_stream_drop(s32);
-WASI_IMPORT("wasi:io/poll", "[method]pollable.block")
-void __wasm_import_wasi_io_poll_method_pollable_block(s32);
-WASI_IMPORT("wasi:io/poll", "[resource-drop]pollable")
-void __wasm_import_wasi_io_poll_pollable_drop(s32);
-WASI_IMPORT("wasi:io/error", "[resource-drop]error")
-void __wasm_import_wasi_io_error_error_drop(s32);
 
 /* result<_, error-code> */
 struct ret_void {
@@ -122,39 +94,6 @@ struct ret_void {
 struct ret_handles {
 	u8 is_err;
 	u32 h[3];
-};
-
-/* stream-error: last-operation-failed (an error resource), or closed */
-struct stream_error {
-	u8 closed;
-	u32 error;
-};
-
-/* result<_, stream-error> */
-struct ret_stream {
-	u8 is_err;
-	struct stream_error err;
-};
-
-/* result<list<u8>, stream-error> */
-struct ret_list {
-	u8 is_err;
-	union {
-		struct {
-			u8 *ptr;
-			u32 len;
-		} ok;
-		struct stream_error err;
-	};
-};
-
-/* result<u64, stream-error> */
-struct ret_u64 {
-	u8 is_err;
-	union {
-		u64 ok;
-		struct stream_error err;
-	};
 };
 
 /*
@@ -196,13 +135,6 @@ static int hs_errno(u8 e)
 	};
 
 	return e < ARRAY_SIZE(errnos) ? errnos[e] : EIO;
-}
-
-/* a stream's failure, its error resource dropped */
-static void hs_stream_failed(const struct stream_error *e)
-{
-	if (!e->closed)
-		__wasm_import_wasi_io_error_error_drop(e->error);
 }
 
 /* a socket's state */
@@ -509,14 +441,14 @@ static int hs_listen(struct hsock *hs, const struct sockaddr *addr, int len,
  */
 static long hs_write(struct hsock *hs, const void *buf, unsigned long len)
 {
-	struct ret_u64 room;
-	struct ret_stream r;
+	struct wasi_ret_u64 room;
+	struct wasi_ret_stream r;
 
 	if (!hs->out)
 		return -ENOTCONN;
 	__wasm_import_wasi_io_streams_method_output_stream_check_write(hs->out, &room);
 	if (room.is_err) {
-		hs_stream_failed(&room.err);
+		wasi_stream_failed(&room.err);
 		return -EPIPE;
 	}
 	if (!room.ok) {
@@ -528,7 +460,7 @@ static long hs_write(struct hsock *hs, const void *buf, unsigned long len)
 	if (!r.is_err)
 		__wasm_import_wasi_io_streams_method_output_stream_flush(hs->out, &r);
 	if (r.is_err) {
-		hs_stream_failed(&r.err);
+		wasi_stream_failed(&r.err);
 		return -EPIPE;
 	}
 	return len;
@@ -546,7 +478,7 @@ static long hs_read(struct hsock *hs, void *buf, unsigned long len, bool peek)
 		return -ENOTCONN;
 	/* what peek read ahead first */
 	if (!hs->peeked) {
-		struct ret_list r;
+		struct wasi_ret_list r;
 
 		if (peek && !hs->peek) {
 			hs->peek = kmalloc(PEEK_SIZE, GFP_KERNEL);
@@ -556,7 +488,7 @@ static long hs_read(struct hsock *hs, void *buf, unsigned long len, bool peek)
 		__wasm_import_wasi_io_streams_method_input_stream_read(hs->in,
 			peek ? PEEK_SIZE : len, &r);
 		if (r.is_err) {
-			hs_stream_failed(&r.err);
+			wasi_stream_failed(&r.err);
 			hs_set(hs, HS_READABLE, false);
 			hs_set(hs, HS_EOF, true);
 			return 0;
