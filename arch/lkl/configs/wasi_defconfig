@@ -56,3 +56,9 @@ CONFIG_EROFS_FS=y
 # CONFIG_EROFS_FS_ZIP is not set
 # The root an overlay: the image under a ramfs, writable as any root
 CONFIG_OVERLAY_FS=y
+# memcpy, memset and memmove the host's: wasm's memory.copy and memory.fill
+# (the generic ones are loops a byte at a time: a page cache copy, a
+# mapping's zeroing, a fork's copy)
+CONFIG_LKL_HOST_MEMCPY=y
+CONFIG_LKL_HOST_MEMSET=y
+CONFIG_LKL_HOST_MEMMOVE=y
