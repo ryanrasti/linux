@@ -155,8 +155,10 @@ enum lkl_prot {
  * each NUL-ended, len bytes in all), in place of the calling task's program
  * once the syscall returns
  * @task_exit - the calling host thread's task exited in a syscall (exit,
- * exit_group, a fatal signal), with the given wait status; the thread ends,
- * without returning. Without it, the thread waits forever.
+ * exit_group, a fatal signal); the thread ends, without returning. If the
+ * task was the last of its process's threads, pid is the process's (its
+ * thread group's id) and status its wait status; else pid is 0. Without it,
+ * the thread waits forever.
  * @signal_handler - run a process's signal handler, a function of the
  * program's, for sig: called at a syscall's return to the program, on the
  * task's host thread (its own stack), with the CPU released. info: the
@@ -237,7 +239,7 @@ struct lkl_host_operations {
 
 	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
 					 unsigned long stack);
-	void (*task_exit)(int status);
+	void (*task_exit)(int pid, int status);
 	void (*signal_handler)(unsigned long handler, int sig, void *info,
 			       void *mask);
 

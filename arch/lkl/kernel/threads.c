@@ -92,7 +92,7 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	unsigned long _prev_flags = _prev->flags;
 	struct lkl_jmp_buf _prev_jb;
 	bool exited = false;
-	int status = 0;
+	int pid = 0, status = 0;
 
 	_current_thread_info = task_thread_info(next);
 	_next->prev_sched = prev;
@@ -107,16 +107,26 @@ struct task_struct *__switch_to(struct task_struct *prev,
 		_prev_jb = _prev->sched_jb;
 	} else if (test_bit(TIF_HOST_THREAD, &_prev_flags) &&
 		   READ_ONCE(prev->__state) == TASK_DEAD && lkl_ops->task_exit) {
-		/* a host task exited in a syscall: its host thread ends too */
+		/*
+		 * a host task exited in a syscall: its host thread ends too,
+		 * and if it was its process's last thread, the process (its
+		 * wait status: the group's exit code if one ended it all)
+		 */
+		struct signal_struct *sig = prev->signal;
+
 		exited = true;
-		status = prev->exit_code;
+		if (!atomic_read(&sig->live)) {
+			pid = task_tgid_nr(prev);
+			status = sig->flags & SIGNAL_GROUP_EXIT ?
+				 sig->group_exit_code : prev->exit_code;
+		}
 	}
 
 	lkl_ops->sem_up(_next->sched_sem);
 	if (test_bit(TIF_SCHED_JB, &_prev_flags)) {
 		lkl_ops->jmp_buf_longjmp(&_prev_jb, 1);
 	} else if (exited) {
-		lkl_ops->task_exit(status);
+		lkl_ops->task_exit(pid, status);
 	} else {
 		lkl_ops->sem_down(_prev->sched_sem);
 	}
