@@ -3,8 +3,8 @@
  * Executing a program linked into the blob module. An executable in the
  * image is a stub: a magic and the program's index. The host starts that
  * program's entry on the task's return to user mode (lkl_ops->exec_prog),
- * with the new argv and envp, in the one shared memory (no instance of its
- * own: a library OS on WASI).
+ * with the new argv and envp, on the new memory's stack, in the one shared
+ * memory (no instance of its own: a library OS on WASI).
  */
 #include <linux/binfmts.h>
 #include <linux/init.h>
@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
+#include <linux/sched/mm.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
 
@@ -41,8 +42,9 @@ static char *wasi_exec_args(struct linux_binprm *bprm, unsigned long *len)
 
 static int load_wasi_prog(struct linux_binprm *bprm)
 {
+	struct mm_struct *old_mm;
 	unsigned int index;
-	unsigned long len;
+	unsigned long len, stack;
 	char *args;
 	int ret;
 
@@ -55,16 +57,27 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 	args = wasi_exec_args(bprm, &len);
 	if (!args)
 		return -ENOMEM;
+	/*
+	 * The old memory stays until the task's next syscall: the task runs
+	 * on its stack until this one returns (the kernel's code on it too).
+	 */
+	old_mm = current->mm;
+	if (old_mm)
+		mmget(old_mm);
 	ret = begin_new_exec(bprm);
 	if (!ret) {
+		task_thread_info(current)->exec_old_mm = old_mm;
+		old_mm = NULL;
 		set_personality(PER_LINUX);
 		setup_new_exec(bprm);
-		/* (the new mm's break) */
-		ret = lkl_process_brk();
-		if (!ret)
-			ret = lkl_ops->exec_prog(index, args, len, bprm->argc,
-						 bprm->envc);
+		/* (the new mm's break and stack, the program run on that) */
+		stack = lkl_process_mem();
+		ret = IS_ERR_VALUE(stack) ? stack :
+			lkl_ops->exec_prog(index, args, len, bprm->argc,
+					   bprm->envc, stack);
 	}
+	if (old_mm)
+		mmput(old_mm);
 	kvfree(args);
 	if (ret)
 		return ret;

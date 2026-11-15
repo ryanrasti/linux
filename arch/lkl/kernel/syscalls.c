@@ -13,6 +13,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
 #include <linux/mman.h>
+#include <linux/sizes.h>
 #include <linux/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
@@ -258,6 +259,12 @@ long lkl_syscall(long no, long *params)
 
 	switch_to_host_task(task);
 
+	/* (an exec's old memory, which the task ran on until it returned) */
+	if (task_thread_info(task)->exec_old_mm) {
+		mmput(task_thread_info(task)->exec_old_mm);
+		task_thread_info(task)->exec_old_mm = NULL;
+	}
+
 	ret = run_syscall(no, params);
 
 	if (no == __NR_reboot) {
@@ -459,17 +466,20 @@ exit_device_put:
 
 
 /*
- * A process's break: a mapping of its own (the program's data is the
- * module's, not the process's), which brk grows over and shrinks back
- * from. Its pages are backed as they're written (do_mmap zeroes only what
- * isn't zero).
+ * A process's memory past its mappings: its break, a mapping of its own
+ * (the program's data is the module's, not the process's), which brk grows
+ * over and shrinks back from; and its main thread's stack, a mapping the
+ * host runs the program on, its argv, envp and auxv at the top as Linux
+ * lays them out (so musl's pthread_getattr_np finds the stack by mremap's
+ * probe, as natively). Their pages are backed as they're written (do_mmap
+ * zeroes only what isn't zero). Returns the stack's top, or an error.
  */
 #define LKL_BRK_SIZE (1 << 20)
 
-int lkl_process_brk(void)
+unsigned long lkl_process_mem(void)
 {
 	struct mm_struct *mm = current->mm;
-	unsigned long addr;
+	unsigned long addr, stack;
 
 	addr = vm_mmap(NULL, 0, LKL_BRK_SIZE, PROT_READ | PROT_WRITE,
 		       MAP_PRIVATE | MAP_ANONYMOUS, 0);
@@ -477,7 +487,16 @@ int lkl_process_brk(void)
 		return addr;
 	mm->start_brk = mm->brk = addr;
 	mm->context.end_brk = addr + LKL_BRK_SIZE;
-	return 0;
+
+	/* (RLIMIT_STACK's, 8 MiB by default, within reason) */
+	stack = PAGE_ALIGN(clamp_t(unsigned long, rlimit(RLIMIT_STACK),
+				   SZ_128K, SZ_64M));
+	addr = vm_mmap(NULL, 0, stack, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, 0);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+	mm->start_stack = addr + stack;
+	return addr + stack;
 }
 
 /*
@@ -486,13 +505,13 @@ int lkl_process_brk(void)
  * mmap) and freed with it, and a break. exec replaces it, as a native
  * process's.
  */
-static int new_process_mm(void)
+static unsigned long new_process_mm(void)
 {
 	struct task_struct *tsk = current;
 	struct mm_struct *mm, *old_mm = tsk->mm, *active_mm;
 
 	if (old_mm && old_mm != host0->mm)
-		return 0;
+		return -EEXIST;
 	mm = mm_alloc();
 	if (!mm)
 		return -ENOMEM;
@@ -505,14 +524,17 @@ static int new_process_mm(void)
 		mmput(old_mm);
 	else if (active_mm)
 		mmdrop_lazy_tlb(active_mm);
-	return lkl_process_brk();
+	return lkl_process_mem();
 }
 
+/*
+ * The task is made in lkl_syscall routine: here its memory. Returns its
+ * stack's top (lkl_process_mem), or an error.
+ */
 SYSCALL_DEFINE0(new_thread_group_leader)
 {
-	// The task is made in lkl_syscall routine: here its memory.
 	if (current->tgid == current->pid)
-		return new_process_mm() ? -1 : 0;
+		return new_process_mm();
 	else
-		return -1;
+		return -EINVAL;
 }

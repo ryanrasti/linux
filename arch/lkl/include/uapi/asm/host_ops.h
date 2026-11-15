@@ -153,7 +153,8 @@ enum lkl_prot {
  * @exec_prog - exec of a program linked into the module (arch/lkl/kernel/
  * wasi_exec.c): program index's start, with args (argc strings, then envc,
  * each NUL-ended, len bytes in all), in place of the calling task's program
- * once the syscall returns
+ * once the syscall returns, on the stack whose top is stack (the new
+ * process's: its argv, envp and auxv go at the top)
  * @task_exit - the calling host thread's task exited in a syscall (exit,
  * exit_group, a fatal signal); the thread ends, without returning. If the
  * task was the last of its process's threads, pid is the process's (its
@@ -246,7 +247,7 @@ struct lkl_host_operations {
 	void (*poll_watch)(unsigned int *pollables, int n, void (*ready)(void));
 
 	int (*exec_prog)(unsigned int index, const char *args, unsigned long len,
-			 int argc, int envc);
+			 int argc, int envc, unsigned long stack);
 };
 
 /**
