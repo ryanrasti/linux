@@ -1800,7 +1800,7 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	VMA_ITERATOR(vmi, oldmm, 0);
 	struct vm_area_struct *vma, *new;
 	struct vm_region *region, *old;
-	unsigned long sp = 0, from;
+	unsigned long sp = 0, from, to;
 	long delta;
 	int ret;
 
@@ -1861,10 +1861,19 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		 * host a fault to read)
 		 */
 		from = old->vm_start;
+		to = old->vm_end;
 		if (sp > old->vm_start && sp < old->vm_end)
 			from = sp & PAGE_MASK;
-		lkl_window_copy(mm, (void *)region->vm_start + (from - old->vm_start),
-				(void *)from, old->vm_end - from);
+		/*
+		 * (the break's mapping: past the break, not the program's,
+		 * zeroed as brk grows over it again; mostly never written,
+		 * which a fault would back just to read)
+		 */
+		if (oldmm->start_brk >= old->vm_start && oldmm->start_brk < old->vm_end)
+			to = min(to, PAGE_ALIGN(oldmm->brk));
+		if (to > from)
+			lkl_window_copy(mm, (void *)region->vm_start + (from - old->vm_start),
+					(void *)from, to - from);
 
 		vma_iter_config(&nvmi, new->vm_start, new->vm_end);
 		if (vma_iter_prealloc(&nvmi, new)) {
