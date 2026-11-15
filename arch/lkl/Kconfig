@@ -67,6 +67,15 @@ config LKL_WASI_BLK
 	  The system image, embedded in the program as a data symbol
 	  (__wasi_image), served as /dev/wblk0 and mounted as the root.
 
+config LKL_WASI_FS
+	bool "WASI's preopened directories as filesystems (wasifs)"
+	depends on LKL_WASI
+	default n
+	help
+	  wasifs: a preopened directory of the WASI program, mounted by its
+	  name (mount -t wasifs /data /data), its files through WASI's
+	  preview 1 calls.
+
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
 	select ARCH_HAS_SYSCALL_WRAPPER

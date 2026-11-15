@@ -7,3 +7,4 @@ obj-$(CONFIG_LKL_PCI_MSI_KUNIT_TEST) += pci-msi-test.o
 obj-$(CONFIG_LKL_WASI) += wasi_console.o
 obj-$(CONFIG_LKL_HOSTSOCK) += hostsock.o
 obj-$(CONFIG_LKL_WASI_BLK) += wasi_blk.o
+obj-$(CONFIG_LKL_WASI_FS) += wasi_fs.o
