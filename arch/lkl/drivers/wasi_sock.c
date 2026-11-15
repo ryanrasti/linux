@@ -901,7 +901,7 @@ static int wasi_sock_listen(struct socket *sock, int backlog)
 	err = hs_listen(hs, (struct sockaddr *)&addr, len, backlog);
 	if (err) {
 		hs_close(hs);
-		return err == -EPERM || err == -EADDRINUSE ||
+		return err == -EACCES || err == -EADDRINUSE ||
 		       err == -EADDRNOTAVAIL ? 0 : err;
 	}
 	hs->mode = REMOTE;
