@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/types.h>
 #include <linux/tty.h>
+#include <linux/timekeeping.h>
 #include "../../../drivers/tty/hvc/hvc_console.h"
 
 #define WASI(name) \
@@ -67,14 +68,17 @@ static ssize_t wasi_put_chars(u32 vtermno, const u8 *buf, size_t count)
 
 /*
  * stdin has bytes (or its end) now: a poll with a zero timeout beside it.
- * A runtime that refuses the poll (node:wasi: stdin hasn't the right to be
- * polled) has it read anyway, and the read blocks the module until input.
+ * node:wasi reports stdin beside no clock shorter than 1 ms, so when the
+ * console hasn't polled for a while (idle: hvc's polls back off), a poll
+ * that saw nothing is retried with 1 ms. A runtime that refuses the poll
+ * (node:wasi again, for a file: stdin hasn't the right to be polled) has
+ * it read anyway, and the read blocks the module until input.
  */
-static bool wasi_stdin_ready(void)
+static bool wasi_stdin_poll(u64 timeout)
 {
 	struct wasi_subscription in[2] = {
 		{ .userdata = 1, .tag = 1, .u.fd.fd = 0 },
-		{ .userdata = 2, .tag = 0, .u.clock = { .id = 1, .timeout = 0 } },
+		{ .userdata = 2, .tag = 0, .u.clock = { .id = 1, .timeout = timeout } },
 	};
 	struct wasi_event out[2];
 	u32 got, i;
@@ -85,6 +89,16 @@ static bool wasi_stdin_ready(void)
 		if (out[i].userdata == 1 && !out[i].error)
 			return true;
 	return false;
+}
+
+static bool wasi_stdin_ready(void)
+{
+	static u64 last;
+	u64 now = ktime_get_ns(), was = last;
+
+	last = now;
+	return wasi_stdin_poll(0) ||
+	       (now - was > 10 * NSEC_PER_MSEC && wasi_stdin_poll(NSEC_PER_MSEC));
 }
 
 /*
