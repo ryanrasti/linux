@@ -158,52 +158,15 @@ enum lkl_prot {
  * exit_group, a fatal signal), with the given wait status; the thread ends,
  * without returning. Without it, the thread waits forever.
  *
- * Sockets the host makes, for the guest's AF_INET and AF_INET6 sockets whose
- * peer isn't the guest itself (arch/lkl/drivers/hostsock.c). Addresses are
- * Linux's sockaddr_in and sockaddr_in6, in the kernel's memory. None of
- * these waits: the host works meanwhile, and its sockets' state
- * (sock_state) changes as it goes, each change raising the interrupt.
- * @sock_init - the guest has a network: 1, notify() then called (on a thread
- * of its own) when sockets' state changed; 0: none
- * @sock_open - a socket, family AF_INET or AF_INET6, type SOCK_STREAM or
- * SOCK_DGRAM: its handle (> 0), or a negative errno
- * @sock_connect - start connecting a stream socket to addr: 0 (then
- * LKL_SOCK_CONNECTED or LKL_SOCK_FAILED), or a negative errno
- * @sock_listen - offer a listener on addr's port to the host: 0 (then
- * LKL_SOCK_LISTENING, or LKL_SOCK_FAILED: -EPERM if the host won't publish
- * it), or a negative errno
- * @sock_accept - a connection the host took on listener sock: its handle,
- * or -EAGAIN if none yet
- * @sock_send - len bytes of buf: on a stream, as many as the host takes now;
- * a datagram to addr, whole. How many, -EAGAIN (none now: wait for
- * LKL_SOCK_WRITABLE), or a negative errno
- * @sock_recv - into buf, at most len bytes: a stream's next (0: its end), or
- * the next datagram (its length, which may be more than len), its source at
- * addr (*addr_len its room, then its length). -EAGAIN if none yet. peek:
- * leave them there.
- * @sock_getname - the socket's address, or its peer's, at addr: its length,
- * or a negative errno
- * @sock_shutdown - SHUT_RD, SHUT_WR or SHUT_RDWR: 0, or a negative errno
- * @sock_close - done with the socket
- * @sock_changed - a socket whose state changed since, or 0
- * @sock_state - a socket's LKL_SOCK_* bits, and with LKL_SOCK_FAILED its
- * errno (positive) above LKL_SOCK_ERRNO_SHIFT
- * @sock_pending - the bytes a stream socket has to read (FIONREAD)
- *
- * @random - fill buf with len cryptographically random bytes; returns 0 or a
- * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
- * would (see asm/archrandom.h). Optional.
+ * @poll_watch - WASI 0.2: the kernel's waits on wasi:io pollables of its own
+ * (arch/lkl/drivers/wasi_sock.c's, which calls wasi:sockets itself). Each
+ * time the host's scheduler waits, it waits on pollables[0..n) too, each a
+ * pollable's handle (0: none); one it finds ready it sets to 0, and then
+ * calls ready() on a thread of its own. The kernel owns the pollables. Lists
+ * the kernel's imports return are the module's cabi_realloc's, which the
+ * host gives mem_alloc's (freed with mem_free). Called once, at boot. A
+ * preview 1 host has none: its kernel has no wasi:sockets either.
  */
-/* a host socket's state (sock_state) */
-#define LKL_SOCK_CONNECTED	1	/* a stream's connection is made */
-#define LKL_SOCK_LISTENING	2	/* the host publishes the listener */
-#define LKL_SOCK_READABLE	4	/* bytes, or datagrams, to read */
-#define LKL_SOCK_WRITABLE	8	/* room for more to send */
-#define LKL_SOCK_EOF		16	/* the peer won't send more */
-#define LKL_SOCK_FAILED		32	/* connect or listen failed, or reset */
-#define LKL_SOCK_ACCEPTABLE	64	/* a listener's connections wait */
-#define LKL_SOCK_ERRNO_SHIFT	16
-
 struct lkl_host_operations {
 	const char *virtio_devices;
 
@@ -268,26 +231,10 @@ struct lkl_host_operations {
 					 unsigned long stack);
 	void (*task_exit)(int status);
 
-	int (*sock_init)(void (*notify)(void));
-	int (*sock_open)(int family, int type);
-	int (*sock_connect)(int sock, const void *addr, int addr_len);
-	int (*sock_listen)(int sock, const void *addr, int addr_len, int backlog);
-	int (*sock_accept)(int sock);
-	long (*sock_send)(int sock, const void *buf, unsigned long len,
-			  const void *addr, int addr_len);
-	long (*sock_recv)(int sock, void *buf, unsigned long len, int peek,
-			  void *addr, int *addr_len);
-	int (*sock_getname)(int sock, void *addr, int peer);
-	int (*sock_shutdown)(int sock, int how);
-	void (*sock_close)(int sock);
-	int (*sock_changed)(void);
-	unsigned int (*sock_state)(int sock);
-	unsigned long (*sock_pending)(int sock);
+	void (*poll_watch)(unsigned int *pollables, int n, void (*ready)(void));
 
 	int (*exec_prog)(unsigned int index, const char *args, unsigned long len,
 			 int argc, int envc);
-
-	int (*random)(void *buf, unsigned long len);
 };
 
 /**

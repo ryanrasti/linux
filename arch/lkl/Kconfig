@@ -40,15 +40,6 @@ config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
 
-config LKL_HOSTSOCK
-	bool "The guest's sockets on the host's network"
-	depends on INET
-	default n
-	help
-	  The guest's AF_INET and AF_INET6 sockets: a loopback peer's local,
-	  inside the kernel; any other's the host's, made through the sock_*
-	  host operations. Listeners are offered to the host first.
-
 config LKL_WASI
 	bool "Linked into a WASI program"
 	depends on LKL_WASM && TTY
@@ -58,6 +49,18 @@ config LKL_WASI
 	  The kernel as a library OS, linked into a WASI program with its
 	  libc. Its console is an hvc console (/dev/hvc0) on the program's
 	  WASI stdin and stdout.
+
+config LKL_WASI_SOCK
+	bool "Sockets on WASI 0.2's wasi:sockets"
+	depends on INET && LKL_WASI
+	default n
+	help
+	  The guest's AF_INET and AF_INET6 sockets: a loopback peer's local,
+	  inside the kernel; any other's on wasi:sockets, which the kernel
+	  calls itself. Listeners are offered to the host's network too. The
+	  program must be a WASI 0.2 component (its imports are wasi:sockets'
+	  and wasi:io's), and its host layer wait on the kernel's pollables
+	  (the poll_watch host operation).
 
 config LKL_WASI_BLK
 	bool "A read-only block device over an image embedded in the program"

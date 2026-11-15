@@ -5,6 +5,6 @@ obj-$(CONFIG_LKL_PCI_KUNIT_TEST) += pci_test.o
 obj-$(CONFIG_PCI_MSI) += pci-msi.o
 obj-$(CONFIG_LKL_PCI_MSI_KUNIT_TEST) += pci-msi-test.o
 obj-$(CONFIG_LKL_WASI) += wasi_console.o
-obj-$(CONFIG_LKL_HOSTSOCK) += hostsock.o
+obj-$(CONFIG_LKL_WASI_SOCK) += wasi_sock.o
 obj-$(CONFIG_LKL_WASI_BLK) += wasi_blk.o
 obj-$(CONFIG_LKL_WASI_FS) += wasi_fs.o

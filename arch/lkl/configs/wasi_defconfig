@@ -1,5 +1,5 @@
 # LKL linked into a WASI program (a library OS): the console, an in-memory
-# root, and sockets on the host's network (LKL_HOSTSOCK)
+# root, and sockets on wasi:sockets (LKL_WASI_SOCK: a WASI 0.2 component)
 CONFIG_EXPERT=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
@@ -10,7 +10,7 @@ CONFIG_LKL_WASI=y
 CONFIG_NET=y
 CONFIG_INET=y
 CONFIG_UNIX=y
-CONFIG_LKL_HOSTSOCK=y
+CONFIG_LKL_WASI_SOCK=y
 CONFIG_LKL_WASI_FS=y
 # CONFIG_IPV6 is not set
 # CONFIG_WIRELESS is not set
