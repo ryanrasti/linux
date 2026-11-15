@@ -24,6 +24,8 @@ EMPTY_RANGE(__start_rodata, __end_rodata);
 EMPTY_RANGE(__bss_start, __bss_stop);
 EMPTY_RANGE(__irqentry_text_start, __irqentry_text_end);
 EMPTY_RANGE(__softirqentry_text_start, __softirqentry_text_end);
+EMPTY_RANGE(__sched_text_start, __sched_text_end);
+EMPTY_RANGE(__cpuidle_text_start, __cpuidle_text_end);
 EMPTY_RANGE(__start___ex_table, __stop___ex_table);
 EMPTY_RANGE(__start_ftrace_events, __stop_ftrace_events);
 EMPTY_RANGE(__start_ftrace_eval_maps, __stop_ftrace_eval_maps);
