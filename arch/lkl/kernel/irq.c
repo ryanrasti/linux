@@ -10,6 +10,7 @@
 #include <asm/irqflags.h>
 #include <asm/host_ops.h>
 #include <asm/cpu.h>
+#include <asm/syscalls.h>
 #include <linux/cpu.h>
 
 /*
@@ -62,6 +63,7 @@ static void run_irq(int irq)
 	irq_enter();
 	generic_handle_irq(irq);
 	irq_exit();
+	idle_host_task_irq_exit();
 	set_irq_regs(old_regs);
 	local_irq_restore(flags);
 }

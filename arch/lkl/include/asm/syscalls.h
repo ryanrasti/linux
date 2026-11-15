@@ -7,6 +7,9 @@ void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
 bool wakeup_idle_host_task(void);
 bool others_runnable(void);
+void idle_host_task_idle(void);
+void idle_host_task_irq_exit(void);
+void idle_host_task_busy(void);
 long lkl_sys_halt(void);
 unsigned long lkl_process_mem(void);
 
