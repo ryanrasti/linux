@@ -1,5 +1,5 @@
-# LKL linked into a WASI program (a library OS): the console, an in-memory
-# root, and sockets on wasi:sockets (LKL_WASI_SOCK: a WASI 0.2 component)
+# LKL linked into a WASI 0.2 component (a library OS): the console, sockets
+# on wasi:sockets, wasifs, and its root the image embedded in the program
 CONFIG_EXPERT=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
@@ -15,7 +15,6 @@ CONFIG_LKL_WASI_FS=y
 # CONFIG_IPV6 is not set
 # CONFIG_WIRELESS is not set
 # CONFIG_ETHTOOL_NETLINK is not set
-# CONFIG_BLOCK is not set
 # CONFIG_PCI is not set
 # CONFIG_VT is not set
 # CONFIG_LEGACY_PTYS is not set
@@ -49,3 +48,11 @@ CONFIG_FILE_LOCKING=y
 # CONFIG_CRYPTO is not set
 # CONFIG_MQ_IOSCHED_DEADLINE is not set
 # CONFIG_MQ_IOSCHED_KYBER is not set
+# The system image: an EROFS root embedded in the program (LKL_WASI_BLK)
+CONFIG_BLOCK=y
+CONFIG_LKL_WASI_BLK=y
+CONFIG_EROFS_FS=y
+# (uncompressed images: decompression needs vmap, which nommu has not)
+# CONFIG_EROFS_FS_ZIP is not set
+# The root an overlay: the image under a ramfs, writable as any root
+CONFIG_OVERLAY_FS=y

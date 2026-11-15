@@ -46,9 +46,9 @@ config LKL_WASI
 	select HVC_DRIVER
 	default n
 	help
-	  The kernel as a library OS, linked into a WASI program with its
-	  libc. Its console is an hvc console (/dev/hvc0) on the program's
-	  WASI stdin and stdout.
+	  The kernel as a library OS, linked into a WASI 0.2 component with
+	  its libc. Its console is an hvc console (/dev/hvc0) on the
+	  program's WASI stdin and stdout (wasi:cli's streams).
 
 config LKL_WASI_SOCK
 	bool "Sockets on WASI 0.2's wasi:sockets"
@@ -57,10 +57,9 @@ config LKL_WASI_SOCK
 	help
 	  The guest's AF_INET and AF_INET6 sockets: a loopback peer's local,
 	  inside the kernel; any other's on wasi:sockets, which the kernel
-	  calls itself. Listeners are offered to the host's network too. The
-	  program must be a WASI 0.2 component (its imports are wasi:sockets'
-	  and wasi:io's), and its host layer wait on the kernel's pollables
-	  (the poll_watch host operation).
+	  calls itself. Listeners are offered to the host's network too. Its
+	  host layer waits on the kernel's pollables (the poll_watch host
+	  operation).
 
 config LKL_WASI_BLK
 	bool "A read-only block device over an image embedded in the program"
@@ -76,8 +75,8 @@ config LKL_WASI_FS
 	default n
 	help
 	  wasifs: a preopened directory of the WASI program, mounted by its
-	  name (mount -t wasifs /data /data), its files through WASI's
-	  preview 1 calls.
+	  name (mount -t wasifs /data /data), its files through
+	  wasi:filesystem's descriptors.
 
 config LKL_WASM
 	def_bool OUTPUT_FORMAT = "wasm"
