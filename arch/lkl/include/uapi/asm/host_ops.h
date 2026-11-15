@@ -150,6 +150,10 @@ enum lkl_prot {
  * function its libc left at stack (the clone's new stack pointer). Returns a
  * thread handle, or 0 if it could not be created. Without it, clone from
  * userspace fails with -ENOSYS.
+ * @exec_prog - exec of a program linked into the module (arch/lkl/kernel/
+ * wasi_exec.c): program index's start, with args (argc strings, then envc,
+ * each NUL-ended, len bytes in all), in place of the calling task's program
+ * once the syscall returns
  * @task_exit - the calling host thread's task exited in a syscall (exit,
  * exit_group, a fatal signal), with the given wait status; the thread ends,
  * without returning. Without it, the thread waits forever.
@@ -279,6 +283,9 @@ struct lkl_host_operations {
 	int (*sock_changed)(void);
 	unsigned int (*sock_state)(int sock);
 	unsigned long (*sock_pending)(int sock);
+
+	int (*exec_prog)(unsigned int index, const char *args, unsigned long len,
+			 int argc, int envc);
 
 	int (*random)(void *buf, unsigned long len);
 };
