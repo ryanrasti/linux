@@ -45,3 +45,5 @@ CONFIG_LKL_WASI=y
 CONFIG_BLOCK=y
 CONFIG_LKL_WASI_BLK=y
 CONFIG_EROFS_FS=y
+# (uncompressed images: decompression needs vmap, which nommu has not)
+# CONFIG_EROFS_FS_ZIP is not set

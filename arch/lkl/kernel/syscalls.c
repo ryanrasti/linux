@@ -102,7 +102,14 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	if (new_tg_leader)
 		flags &= ~CLONE_THREAD;
 
-	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
+	/*
+	 * A process is a user mode thread, as init is: a kernel thread
+	 * (PF_KTHREAD) can't exec a program.
+	 */
+	if (new_tg_leader)
+		pid = user_mode_thread(host_task_stub, NULL, flags);
+	else
+		pid = kernel_thread(host_task_stub, NULL, NULL, flags);
 	if (pid < 0)
 		return pid;
 

@@ -45,8 +45,9 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 	char *args;
 	int ret;
 
+	/* (a program's task only: a kernel thread has no program to replace) */
 	if (memcmp(bprm->buf, WASI_PROG_MAGIC, 8) || !lkl_ops->exec_prog ||
-	    !test_thread_flag(TIF_USER_TASK))
+	    (current->flags & PF_KTHREAD))
 		return -ENOEXEC;
 	memcpy(&index, bprm->buf + 8, 4);
 
