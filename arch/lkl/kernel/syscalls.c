@@ -23,6 +23,7 @@
 #include <asm/cpu.h>
 #include <asm/sched.h>
 #include <asm/wasi_sock.h>
+#include <asm/window.h>
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 /* one type for every entry (asm/syscall_wrapper.h) */
@@ -70,7 +71,7 @@ void *syscall_table[__NR_syscalls] = {
 
 static long run_syscall(long no, long *params)
 {
-	long ret;
+	long ret, args[6];
 	syscall_handler_t handler = (syscall_handler_t)syscall_table[no];
 
 	if (no < 0 || no >= __NR_syscalls)
@@ -78,13 +79,15 @@ static long run_syscall(long no, long *params)
 	/* AF_INET(6) sockets, local or wasi:sockets' (drivers/wasi_sock.c) */
 	if (no == __NR_socket)
 		params[0] = wasi_sock_family(params[0], params[1]);
+	/* (a process in a window: its mappings' addresses the kernel's) */
+	lkl_user_addrs(no, params, args);
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
-	ret = handler(params);
+	ret = handler(args);
 #else
-	ret = handler(params[0], params[1], params[2], params[3], params[4],
-		      params[5]);
+	ret = handler(args[0], args[1], args[2], args[3], args[4], args[5]);
 #endif
+	ret = lkl_user_result(no, ret);
 
 	task_work_run();
 
@@ -318,8 +321,21 @@ int copy_user_thread(struct task_struct *p,
 	if (!lkl_ops->vm_thread_create || !lkl_ops->tls_set ||
 	    !test_thread_flag(TIF_HOST_THREAD))
 		return -ENOSYS;
-	/* no copies of a process's memory (fork); threads on a stack given */
-	if (!(args->flags & CLONE_VM) || !args->stack)
+	/*
+	 * a copy of a process's memory (fork): its window's copy (copy_mm's,
+	 * nommu_dup_mmap), a host thread that resumes the parent's user code
+	 * in it; else a thread on a stack given
+	 */
+	if (!(args->flags & CLONE_VM)) {
+		if (!lkl_ops->fork_thread_create || !p->mm || !p->mm->context.win)
+			return -EINVAL;
+		clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+		clear_ti_thread_flag(ti, TIF_SCHED_JB);
+		ti->tid = lkl_ops->fork_thread_create(vm_thread_bootstrap, ti,
+						      p->mm->context.base);
+		return ti->tid ? 0 : -ENOMEM;
+	}
+	if (!args->stack)
 		return -EINVAL;
 
 	/* a plain thread, which kill_thread() can end, until it first runs */

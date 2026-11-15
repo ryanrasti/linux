@@ -16,6 +16,7 @@
 #include <linux/sched/mm.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
+#include <asm/window.h>
 
 #define WASI_PROG_MAGIC "\0wasiprg"	/* 8 bytes */
 
@@ -70,8 +71,13 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 		old_mm = NULL;
 		set_personality(PER_LINUX);
 		setup_new_exec(bprm);
-		/* (the new mm's break and stack, the program run on that) */
-		stack = lkl_process_mem();
+		/*
+		 * (the new mm a window of the module's: its program's data and
+		 * mappings, its break and stack among them; the program run on
+		 * that)
+		 */
+		ret = lkl_window_exec(current->mm, index);
+		stack = ret ? ret : lkl_process_mem();
 		ret = IS_ERR_VALUE(stack) ? stack :
 			lkl_ops->exec_prog(index, args, len, bprm->argc,
 					   bprm->envc, stack);

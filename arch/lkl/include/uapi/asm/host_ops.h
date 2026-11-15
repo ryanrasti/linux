@@ -150,6 +150,29 @@ enum lkl_prot {
  * function its libc left at stack (the clone's new stack pointer). Returns a
  * thread handle, or 0 if it could not be created. Without it, clone from
  * userspace fails with -ENOSYS.
+ * @window_exec - the memory of a process about to exec program index (a
+ * blob's: arch/lkl/mm/window.c), a window of the module's: its base (what
+ * its user addresses are offset by: 0, the program where it was linked),
+ * the range its mappings are made in (*lo to *hi, user addresses), and how
+ * far into it a process before wrote (*dirty: past it, zeros); or -errno
+ * (none free)
+ *
+ * @window_fork - a window for a fork's child of the process whose window's
+ * base is base, the program's data copied into it (its mappings the
+ * kernel's to copy): the new one's base (*dirty as window_exec's), or
+ * -errno
+ *
+ * @window_free - a process's window released, its mappings' memory used up
+ * to used (a user address: past it, still as the window was given)
+ *
+ * @fork_thread_create - the host thread of a fork's child (clone without
+ * CLONE_VM), on the parent's host thread in the syscall: f(arg) then the
+ * parent's user code resumed there (the host saved its frames as the
+ * syscall began), in memory whose base is base; the syscall returns 0 in it
+ *
+ * @user_sp - the calling thread's user stack pointer at its syscall (a
+ * fork's: below it, its stack's frames are dead, not copied)
+ *
  * @exec_prog - exec of a program linked into the module (arch/lkl/kernel/
  * wasi_exec.c): program index's start, with args (argc strings, then envc,
  * each NUL-ended, len bytes in all), in place of the calling task's program
@@ -250,6 +273,14 @@ struct lkl_host_operations {
 
 	int (*exec_prog)(unsigned int index, const char *args, unsigned long len,
 			 int argc, int envc, unsigned long stack);
+
+	long (*window_exec)(unsigned int index, unsigned long *lo,
+			    unsigned long *hi, unsigned long *dirty);
+	long (*window_fork)(unsigned long base, unsigned long *dirty);
+	void (*window_free)(unsigned long base, unsigned long used);
+	lkl_thread_t (*fork_thread_create)(void (*f)(void *), void *arg,
+					   unsigned long base);
+	unsigned long (*user_sp)(void);
 };
 
 /**

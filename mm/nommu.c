@@ -42,6 +42,23 @@
 #include <asm/mmu_context.h>
 #include "internal.h"
 
+/*
+ * a process whose memory is a window of the module's (LKL on WASI, a blob's
+ * program: arch/lkl/mm/window.c): its mappings made there, not by the page
+ * allocator, and copied at fork
+ */
+#ifdef CONFIG_LKL_WASI
+#include <asm/window.h>
+#include <asm/host_ops.h>
+#define mm_window(mm) ((mm)->context.win)
+#else
+#define mm_window(mm) NULL
+#define lkl_window_alloc(mm, len) NULL
+#define lkl_window_release(from, to) false
+#define lkl_in_window(addr) false
+#define lkl_window_exit(mm) do { } while (0)
+#endif
+
 void *high_memory;
 EXPORT_SYMBOL(high_memory);
 struct page *mem_map;
@@ -392,6 +409,9 @@ bool __weak arch_page_fresh(struct page *page)
  */
 static void clear_new_pages(void *addr, unsigned long len)
 {
+	/* (a window's: zeroed as it was allocated) */
+	if (lkl_in_window((unsigned long)addr))
+		return;
 	for (; len; addr += PAGE_SIZE, len -= min(len, PAGE_SIZE))
 		if (!arch_page_fresh(virt_to_page(addr)))
 			clear_nonzero(addr, min(len, PAGE_SIZE));
@@ -535,6 +555,10 @@ static void delete_nommu_region(struct vm_region *region)
  */
 static void free_page_series(unsigned long from, unsigned long to)
 {
+	if (lkl_window_release(from, to)) {
+		atomic_long_sub((to - from) >> PAGE_SHIFT, &mmap_pages_allocated);
+		return;
+	}
 	for (; from < to; from += PAGE_SIZE) {
 		struct page *page = virt_to_page((void *)from);
 
@@ -640,8 +664,11 @@ static int delete_vma_from_mm(struct vm_area_struct *vma)
 /*
  * destroy a VMA record
  */
+static void drop_snapshot(struct vm_area_struct *vma);
+
 static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
 {
+	drop_snapshot(vma);
 	vma_close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
@@ -979,7 +1006,10 @@ static int do_mmap_private(struct vm_area_struct *vma,
 	    !(vma->vm_flags & VM_MAPPED_COPY))
 		total = point;
 
-	base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
+	if (mm_window(current->mm))
+		base = lkl_window_alloc(current->mm, total << PAGE_SHIFT);
+	else
+		base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
 	if (!base)
 		goto enomem;
 
@@ -1070,7 +1100,7 @@ static int read_file_into(struct file *file, unsigned long addr,
  * file's readers see the mapping's writes then, and a write by another
  * meanwhile is overwritten. Only once the mapping was writable.
  */
-static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
+static int write_back_range(struct vm_area_struct *vma, unsigned long start,
 			    unsigned long end)
 {
 	struct file *file = vma->vm_file;
@@ -1106,6 +1136,56 @@ static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
 	}
 	file_end_write(file);
 	return ret < 0 ? ret : 0;
+}
+
+/*
+ * A fork's child's copy of a shared file mapping (in a window: LKL on WASI)
+ * has a snapshot of it as the fork made it (vm_private_data): its parent's
+ * bytes, which the parent writes back. Only the pages the child changed
+ * since are its to write back (as natively, where both see the one page),
+ * and the snapshot then follows them.
+ */
+static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end)
+{
+	char *snap = vma->vm_private_data;
+	unsigned long p, run = 0;
+	int ret = 0, r;
+
+	if (!snap || !vma_is_shared_copy(vma))
+		return write_back_range(vma, start, end);
+	start = max(start, vma->vm_start) & PAGE_MASK;
+	end = min(end, vma->vm_end);
+	for (p = start; p < end; p += PAGE_SIZE) {
+		unsigned long n = min(end - p, PAGE_SIZE);
+		char *s = snap + (p - vma->vm_start);
+
+		if (memcmp((void *)p, s, n)) {
+			memcpy(s, (void *)p, n);
+			if (!run)
+				run = p;
+			continue;
+		}
+		if (run) {
+			r = write_back_range(vma, run, p);
+			ret = ret ?: r;
+			run = 0;
+		}
+	}
+	if (run) {
+		r = write_back_range(vma, run, end);
+		ret = ret ?: r;
+	}
+	return ret;
+}
+
+/* (its snapshot dropped: whole again, its write-back all of it) */
+static void drop_snapshot(struct vm_area_struct *vma)
+{
+	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
+		kvfree(vma->vm_private_data);
+		vma->vm_private_data = NULL;
+	}
 }
 
 /*
@@ -1185,6 +1265,17 @@ unsigned long do_mmap(struct file *file,
 	/* we ignore the address hint */
 	addr = 0;
 	len = PAGE_ALIGN(len);
+
+	/*
+	 * a process in a window: its mappings all in it (a fork copies the
+	 * window), so a shared file mapping is a copy written back (as where
+	 * the file can't be mapped directly), never the file's own memory
+	 */
+	if (mm_window(current->mm) && file && (capabilities & NOMMU_MAP_DIRECT)) {
+		if (!(capabilities & NOMMU_MAP_COPY))
+			return -ENODEV;
+		capabilities &= ~NOMMU_MAP_DIRECT;
+	}
 
 	/* we've determined that we can make the mapping, now translate what we
 	 * now know into VMA flags */
@@ -1465,6 +1556,11 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	 * only usage of its region: anonymous memory, a file's copy) */
 	if (!vma_is_own_copy(vma))
 		return -ENOMEM;
+	/* (a fork's snapshot: what's changed written back, then whole) */
+	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
+		nommu_write_back(vma, vma->vm_start, vma->vm_end);
+		drop_snapshot(vma);
+	}
 
 	mm = vma->vm_mm;
 	if (mm->map_count >= sysctl_max_map_count)
@@ -1542,6 +1638,8 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 {
 	struct vm_region *region;
 
+	/* (written back already: munmap_vma_range) */
+	drop_snapshot(vma);
 	/* adjust the VMA's pointers, which may reposition it in the MM's tree
 	 * and list */
 	vma_unlink_file(vma);
@@ -1684,7 +1782,109 @@ void exit_mmap(struct mm_struct *mm)
 	}
 	__mt_destroy(&mm->mm_mt);
 	mmap_write_unlock(mm);
+	lkl_window_exit(mm);
 }
+
+#ifdef CONFIG_LKL_WASI
+/*
+ * A fork's child's mappings (mm, a copy of oldmm's struct, its own maple
+ * tree empty): a process in a window gets a window of its own
+ * (lkl_window_fork), and a copy of each of its parent's mappings there, at
+ * the same user address (its kernel address offset by the bases'
+ * difference), the same contents: memory of its own, as the parent's is
+ * (anonymous memory, a file's private or shared copy). Else nothing, as
+ * nommu has it (vfork's child shares its parent's memory).
+ */
+int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+{
+	VMA_ITERATOR(vmi, oldmm, 0);
+	struct vm_area_struct *vma, *new;
+	struct vm_region *region, *old;
+	unsigned long sp = 0, from;
+	long delta;
+	int ret;
+
+	if (!mm_window(oldmm)) {
+		mm->context.win = NULL;
+		mm->context.base = 0;
+		return 0;
+	}
+	ret = lkl_window_fork(mm, oldmm);
+	if (ret)
+		return ret;
+	delta = mm->context.base - oldmm->context.base;
+	if (lkl_ops->user_sp && current->mm == oldmm)
+		sp = lkl_ops->user_sp() + oldmm->context.base;
+	mm->start_brk += delta;
+	mm->brk += delta;
+	mm->context.end_brk += delta;
+	mm->start_stack += delta;
+	mm->total_vm = oldmm->total_vm;
+	mm->map_count = 0;
+
+	mmap_write_lock(oldmm);
+	for_each_vma(vmi, vma) {
+		VMA_ITERATOR(nvmi, mm, 0);
+
+		old = vma->vm_region;
+		ret = -ENOMEM;
+		region = kmem_cache_alloc(vm_region_jar, GFP_KERNEL);
+		if (!region)
+			break;
+		new = vm_area_dup(vma);
+		if (!new) {
+			kmem_cache_free(vm_region_jar, region);
+			break;
+		}
+		*region = *old;
+		region->vm_usage = 1;
+		region->vm_start += delta;
+		region->vm_end += delta;
+		region->vm_top += delta;
+		if (region->vm_file)
+			get_file(region->vm_file);
+		if (new->vm_file)
+			get_file(new->vm_file);
+		new->vm_region = region;
+		new->vm_start += delta;
+		new->vm_end += delta;
+		new->vm_private_data = NULL;
+		if (vma_is_shared_copy(vma) && (vma->vm_flags & VM_WRITE)) {
+			new->vm_private_data = kvmalloc(vma->vm_end - vma->vm_start, GFP_KERNEL);
+			if (new->vm_private_data)
+				memcpy(new->vm_private_data, (void *)vma->vm_start,
+				       vma->vm_end - vma->vm_start);
+		}
+		/*
+		 * (the forking thread's stack: below its stack pointer, dead
+		 * frames, left out; memory never written, which still costs the
+		 * host a fault to read)
+		 */
+		from = old->vm_start;
+		if (sp > old->vm_start && sp < old->vm_end)
+			from = sp & PAGE_MASK;
+		lkl_window_copy(mm, (void *)region->vm_start + (from - old->vm_start),
+				(void *)from, old->vm_end - from);
+
+		vma_iter_config(&nvmi, new->vm_start, new->vm_end);
+		if (vma_iter_prealloc(&nvmi, new)) {
+			/* (not in the tree: the window goes whole with the mm) */
+			region->vm_top = region->vm_start;
+			delete_vma(mm, new);
+			break;
+		}
+		down_write(&nommu_region_sem);
+		add_nommu_region(region);
+		up_write(&nommu_region_sem);
+		setup_vma_to_mm(new, mm);
+		vma_iter_store(&nvmi, new);
+		mm->map_count++;
+		ret = 0;
+	}
+	mmap_write_unlock(oldmm);
+	return ret;
+}
+#endif
 
 /*
  * grow a mapping in place, over what its region holds past its end (a
@@ -1702,6 +1902,10 @@ static int mremap_grow_in_place(struct mm_struct *mm, struct vm_area_struct *vma
 	if (!vma_is_own_copy(vma) || region->vm_end != old_end ||
 	    new_end > region->vm_top)
 		return -ENOMEM;
+	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
+		nommu_write_back(vma, vma->vm_start, vma->vm_end);
+		drop_snapshot(vma);
+	}
 	if (vma->vm_file)
 		ret = read_file_into(vma->vm_file, old_end, new_end - old_end,
 				     ((loff_t)vma->vm_pgoff << PAGE_SHIFT) +

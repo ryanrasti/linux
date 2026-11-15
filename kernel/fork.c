@@ -824,12 +824,19 @@ static inline void mm_free_pgd(struct mm_struct *mm)
 	pgd_free(mm, mm->pgd);
 }
 #else
+int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm);
+
 static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 {
 	mmap_write_lock(oldmm);
 	dup_mm_exe_file(mm, oldmm);
 	mmap_write_unlock(oldmm);
+#ifdef CONFIG_LKL_WASI
+	/* (a process in a window: its mappings copied, LKL on WASI's fork) */
+	return nommu_dup_mmap(mm, oldmm);
+#else
 	return 0;
+#endif
 }
 #define mm_alloc_pgd(mm)	(0)
 #define mm_free_pgd(mm)
