@@ -171,14 +171,14 @@ enum lkl_prot {
  * ucontext's uc_sigmask, which the handler may change. Without it,
  * processes get no signals delivered.
  *
- * @poll_watch - WASI 0.2: the kernel's waits on wasi:io pollables of its own
- * (arch/lkl/drivers/wasi_sock.c's, which calls wasi:sockets itself). Each
- * time the host's scheduler waits, it waits on pollables[0..n) too, each a
- * pollable's handle (0: none); one it finds ready it sets to 0, and then
- * calls ready() on a thread of its own. The kernel owns the pollables. Lists
- * the kernel's imports return are the module's cabi_realloc's, which the
- * host gives mem_alloc's (freed with mem_free). Called once, at boot. A
- * preview 1 host has none: its kernel has no wasi:sockets either.
+ * @poll_watch - WASI: the kernel's waits on wasi:io pollables of its own
+ * (arch/lkl/drivers: the sockets', the console's). Each time the host's
+ * scheduler waits, it waits on pollables[0..n) too, each a pollable's
+ * handle (0: none); one it finds ready it sets to 0, and then calls
+ * ready() on a thread of its own. The kernel owns the pollables. Lists the
+ * kernel's imports return are the module's cabi_realloc's, which the host
+ * gives mem_alloc's (freed with mem_free). Called at boot, once by each
+ * driver that waits so (its own pollables and ready).
  */
 struct lkl_host_operations {
 	const char *virtio_devices;

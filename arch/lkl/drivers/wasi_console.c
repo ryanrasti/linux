@@ -1,104 +1,105 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * The console on WASI's stdio: an hvc backend whose output is fd_write to
- * stdout and whose input is fd_read from stdin, when poll_oneoff says it
- * has some (hvc polls: no interrupt). The kernel is linked into the
- * program (a library OS), so it calls WASI's imports itself.
+ * The console on WASI's stdio (wasi:cli's streams): an hvc backend whose
+ * output is written to stdout and whose input is read from stdin, neither
+ * waiting. The kernel is linked into the program (a library OS), so it
+ * calls WASI's imports itself. What it waits for (stdin's bytes, stdout's
+ * room) is a wasi:io pollable, which the host layer's scheduler waits on
+ * with its own (the poll_watch host operation): a ready one raises the
+ * console's interrupt, which kicks hvc's thread to poll it again. So hvc
+ * polls only when told (the console is notifier driven), never on a
+ * timer.
  */
 #include <linux/init.h>
 #include <linux/err.h>
+#include <linux/interrupt.h>
 #include <linux/types.h>
 #include <linux/tty.h>
-#include <linux/timekeeping.h>
+#include <asm/host_ops.h>
+#include <asm/wasi.h>
 #include "../../../drivers/tty/hvc/hvc_console.h"
 
-#define WASI(name) \
-	__attribute__((import_module("wasi_snapshot_preview1"), import_name(#name)))
+#define CLI(iface, name) WASI_IMPORT("wasi:cli/" iface, name)
 
-struct wasi_iovec {
-	const void *buf;
-	u32 len;
+CLI("stdin", "get-stdin") s32 __wasm_import_wasi_cli_stdin_get_stdin(void);
+CLI("stdout", "get-stdout") s32 __wasm_import_wasi_cli_stdout_get_stdout(void);
+CLI("terminal-stdin", "get-terminal-stdin")
+void __wasm_import_wasi_cli_terminal_stdin_get_terminal_stdin(void *);
+CLI("terminal-stdout", "get-terminal-stdout")
+void __wasm_import_wasi_cli_terminal_stdout_get_terminal_stdout(void *);
+CLI("terminal-input", "[resource-drop]terminal-input")
+void __wasm_import_wasi_cli_terminal_input_terminal_input_drop(s32);
+CLI("terminal-output", "[resource-drop]terminal-output")
+void __wasm_import_wasi_cli_terminal_output_terminal_output_drop(s32);
+
+/* option<own<terminal-...>> */
+struct wasi_ret_option {
+	u8 is_some;
+	s32 handle;
 };
 
-struct wasi_subscription {
-	u64 userdata;
-	u8 tag;			/* 0: clock, 1: fd_read */
-	u8 pad[7];
-	union {
-		struct {
-			u32 id;
-			u8 pad[4];
-			u64 timeout;
-			u64 precision;
-			u16 flags;
-		} clock;
-		struct {
-			u32 fd;
-		} fd;
-	} u;
-};
+/* the streams, each got once (0: not yet) */
+static s32 wasi_stdin, wasi_stdout;
 
-struct wasi_event {
-	u64 userdata;
-	u16 error;
-	u8 type;
-	u8 pad[5];
-	u64 nbytes;
-	u16 flags;
-	u8 pad2[6];
-};
-
-WASI(fd_write) u16 wasi_fd_write(u32 fd, const struct wasi_iovec *iovs,
-				 u32 n, u32 *written);
-WASI(fd_read) u16 wasi_fd_read(u32 fd, const struct wasi_iovec *iovs,
-			       u32 n, u32 *read);
-WASI(fd_fdstat_get) u16 wasi_fd_fdstat_get(u32 fd, void *stat);
-WASI(poll_oneoff) u16 wasi_poll_oneoff(const struct wasi_subscription *in,
-				       struct wasi_event *out, u32 n, u32 *got);
-
-static ssize_t wasi_put_chars(u32 vtermno, const u8 *buf, size_t count)
+static s32 wasi_stdin_get(void)
 {
-	struct wasi_iovec iov = { buf, count };
-	u32 written;
+	if (!wasi_stdin)
+		wasi_stdin = __wasm_import_wasi_cli_stdin_get_stdin();
+	return wasi_stdin;
+}
 
-	if (wasi_fd_write(1, &iov, 1, &written))
-		return -EIO;
-	return written;
+static s32 wasi_stdout_get(void)
+{
+	if (!wasi_stdout)
+		wasi_stdout = __wasm_import_wasi_cli_stdout_get_stdout();
+	return wasi_stdout;
 }
 
 /*
- * stdin has bytes (or its end) now: a poll with a zero timeout beside it.
- * node:wasi reports stdin beside no clock shorter than 1 ms, so when the
- * console hasn't polled for a while (idle: hvc's polls back off), a poll
- * that saw nothing is retried with 1 ms. A runtime that refuses the poll
- * (node:wasi again, for a file: stdin hasn't the right to be polled) has
- * it read anyway, and the read blocks the module until input.
+ * what the host waits on for the console (poll_watch): stdin's bytes and
+ * stdout's room, each set while hvc has found none, 0 once ready
  */
-static bool wasi_stdin_poll(u64 timeout)
-{
-	struct wasi_subscription in[2] = {
-		{ .userdata = 1, .tag = 1, .u.fd.fd = 0 },
-		{ .userdata = 2, .tag = 0, .u.clock = { .id = 1, .timeout = timeout } },
-	};
-	struct wasi_event out[2];
-	u32 got, i;
+enum { W_IN, W_OUT, WATCHES };
+static unsigned int watched[WATCHES];
+static s32 pollable[WATCHES];	/* each made once it's first waited on */
+static int wasi_console_irq = -1;
 
-	if (wasi_poll_oneoff(in, out, 2, &got))
-		return true;
-	for (i = 0; i < got; i++)
-		if (out[i].userdata == 1 && !out[i].error)
-			return true;
-	return false;
+static void wasi_console_watch(int k)
+{
+	if (wasi_console_irq < 0)
+		return;
+	if (!pollable[k])
+		pollable[k] = k == W_IN ?
+			__wasm_import_wasi_io_streams_method_input_stream_subscribe(wasi_stdin_get()) :
+			__wasm_import_wasi_io_streams_method_output_stream_subscribe(wasi_stdout_get());
+	watched[k] = pollable[k];
 }
 
-static bool wasi_stdin_ready(void)
+static ssize_t wasi_put_chars(u32 vtermno, const u8 *buf, size_t count)
 {
-	static u64 last;
-	u64 now = ktime_get_ns(), was = last;
+	struct wasi_ret_u64 room;
+	struct wasi_ret_stream r;
+	s32 out = wasi_stdout_get();
 
-	last = now;
-	return wasi_stdin_poll(0) ||
-	       (now - was > 10 * NSEC_PER_MSEC && wasi_stdin_poll(NSEC_PER_MSEC));
+	__wasm_import_wasi_io_streams_method_output_stream_check_write(out, &room);
+	if (room.is_err) {
+		wasi_stream_failed(&room.err);
+		return -EIO;
+	}
+	if (!room.ok) {
+		/* (hvc keeps it, and writes it again once there's room) */
+		wasi_console_watch(W_OUT);
+		return 0;
+	}
+	count = min_t(u64, count, room.ok);
+	__wasm_import_wasi_io_streams_method_output_stream_write(out, buf, count, &r);
+	if (!r.is_err)
+		__wasm_import_wasi_io_streams_method_output_stream_flush(out, &r);
+	if (r.is_err) {
+		wasi_stream_failed(&r.err);
+		return -EIO;
+	}
+	return count;
 }
 
 /*
@@ -109,33 +110,48 @@ static bool wasi_stdin_ended;
 
 static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 {
-	struct wasi_iovec iov = { buf, count };
-	u32 read;
+	struct wasi_ret_list r;
 
-	if (wasi_stdin_ended || !wasi_stdin_ready())
+	if (wasi_stdin_ended)
 		return 0;
-	if (wasi_fd_read(0, &iov, 1, &read))
-		return -EIO;
-	if (!read && count) {
+	__wasm_import_wasi_io_streams_method_input_stream_read(wasi_stdin_get(), count, &r);
+	if (r.is_err) {
+		if (!r.err.closed) {
+			wasi_stream_failed(&r.err);
+			return -EIO;
+		}
 		wasi_stdin_ended = true;
+		if (!count)
+			return 0;
 		buf[0] = 4;
 		return 1;
 	}
-	return read;
+	count = r.ok.len;
+	memcpy(buf, r.ok.ptr, count);
+	lkl_ops->mem_free(r.ok.ptr);
+	/* none yet: polled again once there is */
+	if (!count)
+		wasi_console_watch(W_IN);
+	return count;
 }
 
-/* fd is a terminal's: WASI's filetype character_device */
-static bool wasi_isatty(u32 fd)
+/* stdin or stdout is a terminal's: WASI's terminal-stdin, terminal-stdout */
+static bool wasi_isatty(void (*get)(void *), void (*drop)(s32))
 {
-	struct { u8 filetype; u8 rest[23]; } st;
+	struct wasi_ret_option t;
 
-	return !wasi_fd_fdstat_get(fd, &st) && st.filetype == 2;
+	get(&t);
+	if (t.is_some)
+		drop(t.handle);
+	return t.is_some;
 }
 
 /*
- * the console's first open: a terminal's settings only where WASI's stdio
- * is a terminal; otherwise no echo of piped input, and output as written
- * (no \r before \n). Before any input is read (hvc polls once opened).
+ * the console's open: hvc polls it only when kicked (its interrupt), once
+ * the host waits on its pollables; and at the first, a terminal's
+ * settings only where WASI's stdio is a terminal: otherwise no echo of
+ * piped input, and output as written (no \r before \n). Before any input
+ * is read (hvc polls once opened).
  */
 static int wasi_notifier_add(struct hvc_struct *hp, int data)
 {
@@ -143,13 +159,16 @@ static int wasi_notifier_add(struct hvc_struct *hp, int data)
 	static bool set;
 	struct ktermios t;
 
+	hp->irq_requested = wasi_console_irq >= 0;
 	if (!tty || set)
 		goto out;
 	set = true;
 	t = tty->termios;
-	if (!wasi_isatty(0))
+	if (!wasi_isatty(__wasm_import_wasi_cli_terminal_stdin_get_terminal_stdin,
+			 __wasm_import_wasi_cli_terminal_input_terminal_input_drop))
 		t.c_lflag &= ~(ECHO | ECHONL);
-	if (!wasi_isatty(1))
+	if (!wasi_isatty(__wasm_import_wasi_cli_terminal_stdout_get_terminal_stdout,
+			 __wasm_import_wasi_cli_terminal_output_terminal_output_drop))
 		t.c_oflag &= ~OPOST;
 	tty_set_termios(tty, &t);
 out:
@@ -163,6 +182,18 @@ static const struct hv_ops wasi_hv_ops = {
 	.notifier_add = wasi_notifier_add,
 };
 
+static irqreturn_t wasi_console_interrupt(int irq, void *dev_id)
+{
+	hvc_kick();
+	return IRQ_HANDLED;
+}
+
+/* (the host's, on a thread of its own: a pollable is ready) */
+static void wasi_console_notify(void)
+{
+	lkl_trigger_irq(wasi_console_irq);
+}
+
 static int __init wasi_console_init(void)
 {
 	hvc_instantiate(0, 0, &wasi_hv_ops);
@@ -172,6 +203,17 @@ console_initcall(wasi_console_init);
 
 static int __init wasi_console_dev_init(void)
 {
+	int irq;
+
+	/* (without the host's waits on its pollables: polled on hvc's timer) */
+	if (lkl_ops->poll_watch) {
+		irq = lkl_get_free_irq("wasi_console");
+		if (irq >= 0 && !request_irq(irq, wasi_console_interrupt, 0,
+					     "wasi_console", NULL)) {
+			wasi_console_irq = irq;
+			lkl_ops->poll_watch(watched, WATCHES, wasi_console_notify);
+		}
+	}
 	return PTR_ERR_OR_ZERO(hvc_alloc(0, 0, &wasi_hv_ops, 256));
 }
 device_initcall(wasi_console_dev_init);
