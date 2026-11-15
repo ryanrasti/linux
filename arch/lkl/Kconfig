@@ -40,6 +40,15 @@ config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
 
+config LKL_HOSTSOCK
+	bool "The guest's sockets on the host's network"
+	depends on INET
+	default n
+	help
+	  The guest's AF_INET and AF_INET6 sockets: a loopback peer's local,
+	  inside the kernel; any other's the host's, made through the sock_*
+	  host operations. Listeners are offered to the host first.
+
 config LKL_WASI
 	bool "Linked into a WASI program"
 	depends on LKL_WASM && TTY
