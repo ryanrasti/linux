@@ -38,19 +38,10 @@ static int __init setup_mem_size(char *str)
 }
 early_param("mem", setup_mem_size);
 
-extern initcall_entry_t __initcallrootfs_start[];
-
 void __init setup_arch(char **cl)
 {
 	*cl = cmd_line;
 	panic_blink = lkl_panic_blink;
-	/*
-	 * wasm-ld keeps a section only if something live refers to it, and
-	 * nothing else refers to rootfs's initcalls (initcall_levels has no
-	 * bound of theirs; wasm-first.c defines it)
-	 */
-	if (IS_ENABLED(CONFIG_LKL_WASM))
-		asm volatile("" : : "r"(__initcallrootfs_start));
 	parse_early_param();
 	bootmem_init(mem_size);
 }
