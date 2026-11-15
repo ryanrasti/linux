@@ -153,6 +153,10 @@ enum lkl_prot {
  * @task_exit - the calling host thread's task exited in a syscall (exit,
  * exit_group, a fatal signal), with the given wait status; the thread ends,
  * without returning. Without it, the thread waits forever.
+ *
+ * @random - fill buf with len cryptographically random bytes; returns 0 or a
+ * negative errno. Seeds the kernel's RNG, as a CPU's random instructions
+ * would (see asm/archrandom.h). Optional.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -217,6 +221,8 @@ struct lkl_host_operations {
 	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
 					 unsigned long stack);
 	void (*task_exit)(int status);
+
+	int (*random)(void *buf, unsigned long len);
 };
 
 /**
