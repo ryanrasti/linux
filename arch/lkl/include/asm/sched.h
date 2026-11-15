@@ -24,5 +24,8 @@ static inline void thread_sched_jb(void)
 
 void switch_to_host_task(struct task_struct *);
 int host_task_stub(void *unused);
+struct kernel_clone_args;
+int copy_user_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args);
 
 #endif /*  _ASM_LKL_SCHED_H */

@@ -141,6 +141,18 @@ enum lkl_prot {
  * @munmap - unmap previously mapped memory
  *
  * @pci_ops - pointer to PCI host operations
+ *
+ * @vm_thread_create - create the host thread of a task cloned from userspace
+ * with CLONE_VM (a thread of the caller's process), called on the parent's
+ * host thread inside the syscall. The thread runs f(arg), which returns once
+ * the kernel has first scheduled the task and made it the thread's host
+ * task, with the CPU released; the host then starts the thread at the
+ * function its libc left at stack (the clone's new stack pointer). Returns a
+ * thread handle, or 0 if it could not be created. Without it, clone from
+ * userspace fails with -ENOSYS.
+ * @task_exit - the calling host thread's task exited in a syscall (exit,
+ * exit_group, a fatal signal), with the given wait status; the thread ends,
+ * without returning. Without it, the thread waits forever.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -201,6 +213,10 @@ struct lkl_host_operations {
 				enum lkl_prot prot);
 
 	struct lkl_dev_pci_ops *pci_ops;
+
+	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
+					 unsigned long stack);
+	void (*task_exit)(int status);
 };
 
 /**

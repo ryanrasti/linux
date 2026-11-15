@@ -166,6 +166,49 @@ out:
 	return ret;
 }
 
+/*
+ * A thread of a host task's process (clone with CLONE_VM, on a stack of its
+ * own) runs on a new host thread. It waits there like any new thread until
+ * the kernel first schedules it, then becomes the thread's host task, leaves
+ * the kernel, and returns to the host, which starts it at the function its
+ * libc left on that stack.
+ */
+static void vm_thread_bootstrap(void *arg)
+{
+	struct thread_info *ti = arg;
+
+	lkl_ops->sem_down(ti->sched_sem);
+	/* copy_process() failed after copy_thread(); see kill_thread() */
+	if (ti->dead)
+		lkl_ops->thread_exit();
+
+	set_ti_thread_flag(ti, TIF_HOST_THREAD);
+	lkl_ops->tls_set(task_key, ti->task);
+	if (ti->prev_sched)
+		schedule_tail(ti->prev_sched);
+	lkl_cpu_put();
+}
+
+int copy_user_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args)
+{
+	struct thread_info *ti = task_thread_info(p);
+
+	if (!lkl_ops->vm_thread_create || !lkl_ops->tls_set ||
+	    !test_thread_flag(TIF_HOST_THREAD))
+		return -ENOSYS;
+	/* no copies of a process's memory (fork); threads on a stack given */
+	if (!(args->flags & CLONE_VM) || !args->stack)
+		return -EINVAL;
+
+	/* a plain thread, which kill_thread() can end, until it first runs */
+	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+	clear_ti_thread_flag(ti, TIF_SCHED_JB);
+	ti->tid = lkl_ops->vm_thread_create(vm_thread_bootstrap, ti, args->stack);
+
+	return ti->tid ? 0 : -ENOMEM;
+}
+
 static struct task_struct *idle_host_task;
 
 /*
