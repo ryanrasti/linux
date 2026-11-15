@@ -4,7 +4,8 @@
 #define __SYSCALL(x, y)
 #endif
 
-#if __BITS_PER_LONG == 32
+/* (with the syscall wrapper, its entries split 64-bit arguments themselves) */
+#if __BITS_PER_LONG == 32 && !defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER)
 __SYSCALL(__NR3264_truncate, sys32_truncate64)
 __SYSCALL(__NR3264_ftruncate, sys32_ftruncate64)
 

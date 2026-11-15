@@ -15,6 +15,15 @@ endif
 LINUXINCLUDE := -isystem arch/lkl/include/system $(LINUXINCLUDE)
 # workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=52991
 KBUILD_CFLAGS += -mno-ms-bitfields -D__DISABLE_EXPORTS
+else ifeq ($(exec_format),wasm)
+# wasm32: built to vmlinux.a only, linked into a program by wasm-ld
+UTS_MACHINE := wasm32
+# no modules, and EXPORT_SYMBOL emits ELF-only section asm
+KBUILD_CFLAGS += -D__DISABLE_EXPORTS
+# wasm can't inspect its call stack or take label addresses: a
+# placeholder for caller/IP tracking (debug info only)
+KBUILD_CFLAGS += '-D__builtin_return_address(n)=((void*)0xdeadcafe)'
+KBUILD_CFLAGS += '-D_THIS_IP_=(0xdeadcafeUL)'
 else ifneq (,$(CONFIG_OUTPUT_FORMAT))
 $(error Unrecognized platform: $(CONFIG_OUTPUT_FORMAT))
 endif
@@ -80,7 +89,12 @@ arch/lkl/include/generated/uapi/asm/config.h: FORCE
 
 archprepare: arch/lkl/include/generated/uapi/asm/config.h
 
+ifeq ($(exec_format),wasm)
+PHONY += vmlinux-wasm
+vmlinux-wasm: vmlinux.a
+else
 all: lkl.o arch/lkl/include/generated/uapi/asm/syscall_defs.h
+endif
 
 # The recipe runs on every build because 'vmlinux' is PHONY in the top-level
 # Makefile, so we cannot use $(if_changed) (newer-prereqs filters out PHONY,

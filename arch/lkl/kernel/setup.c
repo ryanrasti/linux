@@ -4,6 +4,7 @@
 #include <linux/personality.h>
 #include <linux/reboot.h>
 #include <linux/fs.h>
+#include <linux/fdtable.h>
 #include <linux/start_kernel.h>
 #include <linux/syscalls.h>
 #include <linux/tick.h>
@@ -37,10 +38,19 @@ static int __init setup_mem_size(char *str)
 }
 early_param("mem", setup_mem_size);
 
+extern initcall_entry_t __initcallrootfs_start[];
+
 void __init setup_arch(char **cl)
 {
 	*cl = cmd_line;
 	panic_blink = lkl_panic_blink;
+	/*
+	 * wasm-ld keeps a section only if something live refers to it, and
+	 * nothing else refers to rootfs's initcalls (initcall_levels has no
+	 * bound of theirs; wasm-first.c defines it)
+	 */
+	if (IS_ENABLED(CONFIG_LKL_WASM))
+		asm volatile("" : : "r"(__initcallrootfs_start));
 	parse_early_param();
 	bootmem_init(mem_size);
 }
@@ -208,9 +218,9 @@ static int __init fs_setup(void)
 	// emit an error. The kernel's strncpy implementation attempts to read
 	// 8 bytes at once and, thus, triggers KASan violation for the 6-byte
 	// string.
-	fd = sys_open("/init\0\0", O_CREAT, 0700);
+	fd = do_sys_open(AT_FDCWD, "/init\0\0", O_CREAT, 0700);
 	WARN_ON(fd < 0);
-	sys_close(fd);
+	close_fd(fd);
 
 	register_binfmt(&lkl_run_init_binfmt);
 

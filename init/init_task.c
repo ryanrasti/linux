@@ -227,5 +227,15 @@ EXPORT_SYMBOL(init_task);
  * linker map entry.
  */
 #ifndef CONFIG_THREAD_INFO_IN_TASK
+#ifdef __wasm__
+/* no linker script to place init_thread_info at the base of init_stack */
+union thread_union init_thread_union __aligned(THREAD_SIZE) = {
+	.thread_info = INIT_THREAD_INFO(init_task),
+};
+extern struct thread_info init_thread_info __alias(init_thread_union);
+extern unsigned long init_stack[THREAD_SIZE / sizeof(unsigned long)]
+	__alias(init_thread_union);
+#else
 struct thread_info init_thread_info __init_thread_info = INIT_THREAD_INFO(init_task);
+#endif
 #endif
