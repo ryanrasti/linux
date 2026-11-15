@@ -158,9 +158,10 @@ enum lkl_prot {
  * (none free)
  *
  * @window_fork - a window for a fork's child of the process whose window's
- * base is base, the program's data copied into it (its mappings the
- * kernel's to copy): the new one's base (*dirty as window_exec's), or
- * -errno
+ * base is base, reaching need at least (a user address: what the parent's
+ * mappings reach), the program's data copied into it (its mappings the
+ * kernel's to copy): the new one's base, its end (*hi, a user address: the
+ * child's mappings' room), *dirty as window_exec's; or -errno
  *
  * @window_free - a process's window released, its mappings' memory used up
  * to used (a user address: past it, still as the window was given)
@@ -276,7 +277,8 @@ struct lkl_host_operations {
 
 	long (*window_exec)(unsigned int index, unsigned long *lo,
 			    unsigned long *hi, unsigned long *dirty);
-	long (*window_fork)(unsigned long base, unsigned long *dirty);
+	long (*window_fork)(unsigned long base, unsigned long need,
+			    unsigned long *dirty, unsigned long *hi);
 	void (*window_free)(unsigned long base, unsigned long used);
 	lkl_thread_t (*fork_thread_create)(void (*f)(void *), void *arg,
 					   unsigned long base);

@@ -251,7 +251,7 @@ bool lkl_in_window(unsigned long addr)
 int lkl_window_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 {
 	struct lkl_window *old = oldmm->context.win, *w;
-	unsigned long dirty;
+	unsigned long dirty, hi, need = old->hi;
 	struct extent *e, *c;
 	long base, delta;
 
@@ -259,11 +259,19 @@ int lkl_window_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 	mm->context.base = 0;
 	if (!old || !lkl_ops->window_fork)
 		return -EINVAL;
-	base = lkl_ops->window_fork(oldmm->context.base, &dirty);
+	/* (what the parent's mappings reach: its last free range's start) */
+	if (!list_empty(&old->free)) {
+		e = list_last_entry(&old->free, struct extent, node);
+		if (e->end == old->hi)
+			need = e->start;
+	}
+	base = lkl_ops->window_fork(oldmm->context.base, need - oldmm->context.base,
+				    &dirty, &hi);
 	if (IS_ERR_VALUE(base))
 		return base;
 	delta = base - oldmm->context.base;
-	w = window_new(old->lo + delta, old->hi + delta);
+	/* (the child's window maybe smaller: its free ranges cut at its end) */
+	w = window_new(old->lo + delta, hi + base);
 	if (!w) {
 		lkl_ops->window_free(base, old->lo - oldmm->context.base);
 		return -ENOMEM;
@@ -280,7 +288,11 @@ int lkl_window_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 			return -ENOMEM;
 		}
 		c->start = e->start + delta;
-		c->end = e->end + delta;
+		c->end = min(e->end + delta, w->hi);
+		if (c->start >= c->end) {
+			kfree(c);
+			continue;
+		}
 		list_add_tail(&c->node, &w->free);
 	}
 	/*
