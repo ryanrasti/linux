@@ -1660,6 +1660,15 @@ config FUTEX_PI
 	depends on FUTEX && RT_MUTEXES
 	default y
 
+config FUTEX_PRIVATE_MM
+	bool
+	depends on FUTEX
+	default MMU
+	help
+	  Key a private futex by its mm as well as its address, as with an
+	  MMU: selected by an arch without one whose processes can use the
+	  same addresses for memory of their own (a fork's child's copy).
+
 config EPOLL
 	bool "Enable eventpoll support" if EXPERT
 	default y

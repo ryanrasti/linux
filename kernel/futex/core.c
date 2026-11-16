@@ -258,14 +258,10 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 		 * On no-MMU, shared futexes are treated as private, therefore
 		 * we must not include the current process in the key. Since
 		 * there is only one address space, the address is a unique key
-		 * on its own.
-		 *
-		 * LKL on WASI: no MMU, but a process's memory can be a window
-		 * of its own (arch/lkl/mm/window.c: a fork's child, at the same
-		 * addresses as its parent), so the same address in two
-		 * processes is two futexes: key by mm, as with an MMU.
+		 * on its own. (Unless an arch without one gives processes
+		 * memory of their own at the same addresses: FUTEX_PRIVATE_MM.)
 		 */
-		if (IS_ENABLED(CONFIG_MMU) || IS_ENABLED(CONFIG_LKL_WASI))
+		if (IS_ENABLED(CONFIG_FUTEX_PRIVATE_MM))
 			key->private.mm = mm;
 		else
 			key->private.mm = NULL;
