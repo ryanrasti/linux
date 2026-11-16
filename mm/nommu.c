@@ -1810,9 +1810,16 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		mm->context.base = 0;
 		return 0;
 	}
+	/*
+	 * (the parent's mappings, and its window's free ranges, as they are:
+	 * another of its threads may map or unmap meanwhile, as the copy
+	 * allocates; the child's not linked in yet, as dup_mmap's)
+	 */
+	mmap_write_lock(oldmm);
+	mmap_write_lock_nested(mm, SINGLE_DEPTH_NESTING);
 	ret = lkl_window_fork(mm, oldmm);
 	if (ret)
-		return ret;
+		goto out;
 	delta = mm->context.base - oldmm->context.base;
 	if (lkl_ops->user_sp && current->mm == oldmm)
 		sp = lkl_ops->user_sp() + oldmm->context.base;
@@ -1823,7 +1830,6 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	mm->total_vm = oldmm->total_vm;
 	mm->map_count = 0;
 
-	mmap_write_lock(oldmm);
 	for_each_vma(vmi, vma) {
 		VMA_ITERATOR(nvmi, mm, 0);
 
@@ -1891,6 +1897,8 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		mm->map_count++;
 		ret = 0;
 	}
+out:
+	mmap_write_unlock(mm);
 	mmap_write_unlock(oldmm);
 	return ret;
 }
