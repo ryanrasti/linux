@@ -476,7 +476,8 @@ static long hs_read(struct hsock *hs, void *buf, unsigned long len, bool peek)
 			hs_set(hs, HS_EOF, true);
 			return 0;
 		}
-		n = r.len;
+		/* (no more than asked for, whatever the host gave) */
+		n = min_t(size_t, r.len, peek ? PEEK_SIZE : len);
 		if (!n) {
 			wasi_list_u8_free(&r);
 			hs_set(hs, HS_READABLE, false);

@@ -107,7 +107,8 @@ static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 		buf[0] = 4;
 		return 1;
 	}
-	count = r.len;
+	/* (no more than asked for, whatever the host gave) */
+	count = min_t(size_t, r.len, count);
 	memcpy(buf, r.ptr, count);
 	wasi_list_u8_free(&r);
 	/* none yet: polled again once there is */
