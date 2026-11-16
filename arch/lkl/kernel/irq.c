@@ -136,6 +136,9 @@ int show_interrupts(struct seq_file *p, void *v)
 	return 0;
 }
 
+/* (the irq descriptors made: init_IRQ's) */
+static bool irqs_ready;
+
 int lkl_get_free_irq(const char *user)
 {
 	int i;
@@ -145,7 +148,7 @@ int lkl_get_free_irq(const char *user)
 	for (i = 1; i < NR_IRQS; i++) {
 		if (!irqs[i].user) {
 			irqs[i].user = user;
-			if (lkl_is_running())
+			if (irqs_ready)
 				irq_set_chip_and_handler(i, &dummy_irq_chip,
 							 handle_simple_irq);
 			ret = i;
@@ -172,7 +175,7 @@ int lkl_get_free_irq_block(const char *user, int nr_irqs)
 
 		for (j = 0; j < nr_irqs; j++) {
 			irqs[i + j].user = user;
-			if (lkl_is_running())
+			if (irqs_ready)
 				irq_set_chip_and_handler(i + j, &dummy_irq_chip,
 							 handle_simple_irq);
 		}
@@ -214,12 +217,18 @@ void arch_local_irq_restore(unsigned long flags)
 	irqs_enabled = flags;
 }
 
+/*
+ * each irq given out its chip, as it's given out (lkl_get_free_irq), not
+ * all NR_IRQS of them here: some 1 us each, a millisecond of the boot
+ */
 void init_IRQ(void)
 {
 	int i;
 
 	for (i = 0; i < NR_IRQS; i++)
-		irq_set_chip_and_handler(i, &dummy_irq_chip, handle_simple_irq);
+		if (irqs[i].user)
+			irq_set_chip_and_handler(i, &dummy_irq_chip, handle_simple_irq);
+	irqs_ready = true;
 
 	pr_info("lkl: irqs initialized\n");
 }
