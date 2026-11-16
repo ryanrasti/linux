@@ -3259,6 +3259,13 @@ extern void setup_per_cpu_pageset(void);
 extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);
 bool arch_page_fresh(struct page *page);
+#ifndef arch_mm_user_addr
+/*
+ * a user address of mm's as the kernel reaches it, without an MMU: the
+ * same, unless an arch offsets a process's memory (as uaccess does then)
+ */
+#define arch_mm_user_addr(mm, addr) (addr)
+#endif
 
 /* interval_tree.c */
 void vma_interval_tree_insert(struct vm_area_struct *node,

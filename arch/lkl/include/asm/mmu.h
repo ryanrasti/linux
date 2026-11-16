@@ -19,6 +19,11 @@ typedef struct {
 	unsigned long base;
 	struct lkl_window *win;
 } mm_context_t;
+
+#ifdef CONFIG_LKL_WASI
+/* (a process's user address, the kernel's: plus its base) */
+#define arch_mm_user_addr(mm, addr) ((addr) + (mm)->context.base)
+#endif
 #endif
 
 #endif

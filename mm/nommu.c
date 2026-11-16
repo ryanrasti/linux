@@ -2382,6 +2382,7 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
 		return 0;
 
 	/* the access must start within one of the target process's mappings */
+	addr = arch_mm_user_addr(mm, addr);
 	vma = vma_lookup(mm, addr);
 	if (vma) {
 		/* don't overrun this mapping */
