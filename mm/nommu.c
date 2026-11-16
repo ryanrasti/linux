@@ -1880,6 +1880,12 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		VMA_ITERATOR(nvmi, mm, 0);
 
 		old = vma->vm_region;
+		/* (MADV_DONTFORK: not the child's, its window's range free) */
+		if (vma->vm_flags & VM_DONTCOPY) {
+			lkl_window_release(old->vm_start + delta, old->vm_top + delta);
+			mm->total_vm -= vma_pages(vma);
+			continue;
+		}
 		ret = -ENOMEM;
 		region = kmem_cache_alloc(vm_region_jar, GFP_KERNEL);
 		if (!region)
@@ -1924,7 +1930,13 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		 */
 		if (oldmm->start_brk >= old->vm_start && oldmm->start_brk < old->vm_end)
 			to = min(to, PAGE_ALIGN(oldmm->brk));
-		if (to > from)
+		/*
+		 * (MADV_WIPEONFORK: zeros in the child, as a new mapping's;
+		 * its window maybe not zeros there)
+		 */
+		if (vma->vm_flags & VM_WIPEONFORK)
+			clear_nonzero((void *)new->vm_start, new->vm_end - new->vm_start);
+		else if (to > from)
 			lkl_window_copy(mm, (void *)region->vm_start + (from - old->vm_start),
 					(void *)from, to - from);
 
@@ -2230,9 +2242,49 @@ static bool madvise_behavior_valid(int behavior)
  * MADV_DONTNEED: private memory as a fresh mapping's again (zeroed, or the
  * file's bytes); a shared mapping's kept, as Linux's
  */
+/* the fork flags: what a fork's child gets of a mapping (nommu_dup_mmap) */
+static int madvise_fork(struct vm_area_struct *vma, unsigned long start,
+			unsigned long end, unsigned long behavior)
+{
+	vm_flags_t set = 0, clear = 0;
+
+	switch (behavior) {
+	case MADV_DONTFORK:
+		set = VM_DONTCOPY;
+		break;
+	case MADV_DOFORK:
+		if (vma->vm_flags & VM_IO)
+			return -EINVAL;
+		clear = VM_DONTCOPY;
+		break;
+	case MADV_WIPEONFORK:
+		/* (private anonymous memory only, as Linux's) */
+		if (vma->vm_file || (vma->vm_flags & VM_SHARED))
+			return -EINVAL;
+		set = VM_WIPEONFORK;
+		break;
+	case MADV_KEEPONFORK:
+		clear = VM_WIPEONFORK;
+		break;
+	}
+	vma = vma_cut(vma, start, end);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+	vm_flags_reset(vma, (vma->vm_flags & ~clear) | set);
+	return 0;
+}
+
+static bool madvise_fork_flags(int behavior)
+{
+	return behavior == MADV_DONTFORK || behavior == MADV_DOFORK ||
+	       behavior == MADV_WIPEONFORK || behavior == MADV_KEEPONFORK;
+}
+
 static int madvise_vma(struct vm_area_struct *vma, unsigned long start,
 		       unsigned long end, unsigned long behavior)
 {
+	if (madvise_fork_flags(behavior))
+		return madvise_fork(vma, start, end, behavior);
 	if (behavior != MADV_DONTNEED && behavior != MADV_DONTNEED_LOCKED)
 		return 0;
 	if (vma->vm_flags & VM_SHARED)
@@ -2264,6 +2316,14 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 		return -EINVAL;
 	if (end == start)
 		return 0;
+	/* (the fork flags change the mappings: split, their flags set) */
+	if (madvise_fork_flags(behavior)) {
+		if (mmap_write_lock_killable(mm))
+			return -EINTR;
+		ret = walk_vmas(mm, start, end, behavior, madvise_vma);
+		mmap_write_unlock(mm);
+		return ret;
+	}
 	if (mmap_read_lock_killable(mm))
 		return -EINTR;
 	ret = walk_vmas(mm, start, end, behavior, madvise_vma);
