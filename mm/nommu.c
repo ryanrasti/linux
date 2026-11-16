@@ -1188,17 +1188,24 @@ static void drop_snapshot(struct vm_area_struct *vma)
 	}
 }
 
+static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
+				      unsigned long start, unsigned long end);
+
 /*
  * MAP_FIXED: only over memory of the process's own already there (as
  * InnoDB commits the buffer pool it reserved): it is the new mapping then,
- * zeroed or the file's bytes read in. A shared file mapping can't be made
- * so, nor one anywhere else (no MMU to place it).
+ * split off (vma_cut), zeroed or the file's bytes read in, with the new
+ * protection. A shared file mapping can't be made so, nor one anywhere
+ * else (no MMU to place it); the rest is checked as for a mapping made
+ * anywhere (a file that can be mapped: no pipe, socket or /proc file, which
+ * a read here, under the mmap_lock, could block on for good).
  */
 static unsigned long do_mmap_fixed(struct file *file, unsigned long addr,
 				   unsigned long len, unsigned long prot,
 				   unsigned long flags, unsigned long pgoff)
 {
 	struct vm_area_struct *vma;
+	unsigned long capabilities;
 	int ret;
 
 	len = PAGE_ALIGN(len);
@@ -1206,12 +1213,19 @@ static unsigned long do_mmap_fixed(struct file *file, unsigned long addr,
 		return -EINVAL;
 	if (file && (flags & MAP_TYPE) != MAP_PRIVATE)
 		return -EINVAL;
-	if (file && !(file->f_mode & FMODE_READ))
-		return -EACCES;
+	ret = validate_mmap_request(file, addr, len, prot, flags & ~MAP_FIXED,
+				    pgoff, &capabilities);
+	if (ret < 0)
+		return ret;
+	if (!(capabilities & NOMMU_MAP_COPY))
+		return -ENODEV;
 	vma = vma_lookup(current->mm, addr);
 	if (!vma || addr + len > vma->vm_end || !vma_is_own_copy(vma) ||
 	    vma_is_shared_copy(vma))
 		return -EINVAL;
+	vma = vma_cut(vma, addr, addr + len);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
 	if (file) {
 		ret = read_file_into(file, addr, len, (loff_t)pgoff << PAGE_SHIFT);
 		if (ret)
@@ -1219,7 +1233,10 @@ static unsigned long do_mmap_fixed(struct file *file, unsigned long addr,
 	} else {
 		clear_nonzero((void *)addr, len);
 	}
-	vm_flags_set(vma, calc_vm_prot_bits(prot, 0));
+	/* (a new mapping's: the protection given, no fork flags) */
+	vm_flags_reset(vma, (vma->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC |
+					       VM_WIPEONFORK | VM_DONTCOPY)) |
+			    calc_vm_prot_bits(prot, 0));
 	return addr;
 }
 
