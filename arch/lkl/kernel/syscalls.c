@@ -72,10 +72,11 @@ void *syscall_table[__NR_syscalls] = {
 static long run_syscall(long no, long *params)
 {
 	long ret, args[6];
-	syscall_handler_t handler = (syscall_handler_t)syscall_table[no];
+	syscall_handler_t handler;
 
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
+	handler = (syscall_handler_t)syscall_table[no];
 	/* AF_INET(6) sockets, local or wasi:sockets' (drivers/wasi_sock.c) */
 	if (no == __NR_socket)
 		params[0] = wasi_sock_family(params[0], params[1]);
