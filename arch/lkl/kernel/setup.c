@@ -132,6 +132,14 @@ int lkl_is_running(void)
 
 void machine_halt(void)
 {
+	/*
+	 * A process's reboot (PID 1's at its shutdown: systemd's), where the
+	 * host runs the processes (a blob): the machine's end, PID 1's, status
+	 * 0, as its exit_group's (there's no restart: the host may start
+	 * another)
+	 */
+	if (lkl_ops->task_exit && current->mm)
+		lkl_ops->task_exit(1, 0);
 	lkl_cpu_shutdown();
 }
 
