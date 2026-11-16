@@ -19,40 +19,22 @@
 #include <asm/wasi.h>
 #include "../../../drivers/tty/hvc/hvc_console.h"
 
-#define CLI(iface, name) WASI_IMPORT("wasi:cli/" iface, name)
-
-CLI("stdin", "get-stdin") s32 __wasm_import_wasi_cli_stdin_get_stdin(void);
-CLI("stdout", "get-stdout") s32 __wasm_import_wasi_cli_stdout_get_stdout(void);
-CLI("terminal-stdin", "get-terminal-stdin")
-void __wasm_import_wasi_cli_terminal_stdin_get_terminal_stdin(void *);
-CLI("terminal-stdout", "get-terminal-stdout")
-void __wasm_import_wasi_cli_terminal_stdout_get_terminal_stdout(void *);
-CLI("terminal-input", "[resource-drop]terminal-input")
-void __wasm_import_wasi_cli_terminal_input_terminal_input_drop(s32);
-CLI("terminal-output", "[resource-drop]terminal-output")
-void __wasm_import_wasi_cli_terminal_output_terminal_output_drop(s32);
-
-/* option<own<terminal-...>> */
-struct wasi_ret_option {
-	u8 is_some;
-	s32 handle;
-};
-
 /* the streams, each got once (0: not yet) */
-static s32 wasi_stdin, wasi_stdout;
+static wasi_io_streams_own_input_stream_t wasi_stdin;
+static wasi_io_streams_own_output_stream_t wasi_stdout;
 
-static s32 wasi_stdin_get(void)
+static wasi_io_streams_borrow_input_stream_t wasi_stdin_get(void)
 {
-	if (!wasi_stdin)
-		wasi_stdin = __wasm_import_wasi_cli_stdin_get_stdin();
-	return wasi_stdin;
+	if (!wasi_stdin.__handle)
+		wasi_stdin = wasi_cli_stdin_get_stdin();
+	return wasi_io_streams_borrow_input_stream(wasi_stdin);
 }
 
-static s32 wasi_stdout_get(void)
+static wasi_io_streams_borrow_output_stream_t wasi_stdout_get(void)
 {
-	if (!wasi_stdout)
-		wasi_stdout = __wasm_import_wasi_cli_stdout_get_stdout();
-	return wasi_stdout;
+	if (!wasi_stdout.__handle)
+		wasi_stdout = wasi_cli_stdout_get_stdout();
+	return wasi_io_streams_borrow_output_stream(wasi_stdout);
 }
 
 /*
@@ -61,42 +43,41 @@ static s32 wasi_stdout_get(void)
  */
 enum { W_IN, W_OUT, WATCHES };
 static unsigned int watched[WATCHES];
-static s32 pollable[WATCHES];	/* each made once it's first waited on */
+static wasi_io_poll_own_pollable_t pollable[WATCHES];	/* each made once it's first waited on */
 static int wasi_console_irq = -1;
 
 static void wasi_console_watch(int k)
 {
 	if (wasi_console_irq < 0)
 		return;
-	if (!pollable[k])
+	if (!pollable[k].__handle)
 		pollable[k] = k == W_IN ?
-			__wasm_import_wasi_io_streams_method_input_stream_subscribe(wasi_stdin_get()) :
-			__wasm_import_wasi_io_streams_method_output_stream_subscribe(wasi_stdout_get());
-	watched[k] = pollable[k];
+			wasi_io_streams_method_input_stream_subscribe(wasi_stdin_get()) :
+			wasi_io_streams_method_output_stream_subscribe(wasi_stdout_get());
+	watched[k] = pollable[k].__handle;
 }
 
 static ssize_t wasi_put_chars(u32 vtermno, const u8 *buf, size_t count)
 {
-	struct wasi_ret_u64 room;
-	struct wasi_ret_stream r;
-	s32 out = wasi_stdout_get();
+	wasi_io_streams_borrow_output_stream_t out = wasi_stdout_get();
+	wasi_io_streams_stream_error_t err;
+	wasi_list_u8_t list;
+	u64 room;
 
-	__wasm_import_wasi_io_streams_method_output_stream_check_write(out, &room);
-	if (room.is_err) {
-		wasi_stream_failed(&room.err);
+	if (!wasi_io_streams_method_output_stream_check_write(out, &room, &err)) {
+		wasi_stream_failed(&err);
 		return -EIO;
 	}
-	if (!room.ok) {
+	if (!room) {
 		/* (hvc keeps it, and writes it again once there's room) */
 		wasi_console_watch(W_OUT);
 		return 0;
 	}
-	count = min_t(u64, count, room.ok);
-	__wasm_import_wasi_io_streams_method_output_stream_write(out, buf, count, &r);
-	if (!r.is_err)
-		__wasm_import_wasi_io_streams_method_output_stream_flush(out, &r);
-	if (r.is_err) {
-		wasi_stream_failed(&r.err);
+	count = min_t(u64, count, room);
+	list = (wasi_list_u8_t){ (u8 *)buf, count };
+	if (!wasi_io_streams_method_output_stream_write(out, &list, &err) ||
+	    !wasi_io_streams_method_output_stream_flush(out, &err)) {
+		wasi_stream_failed(&err);
 		return -EIO;
 	}
 	return count;
@@ -110,14 +91,14 @@ static bool wasi_stdin_ended;
 
 static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 {
-	struct wasi_ret_list r;
+	wasi_io_streams_stream_error_t err;
+	wasi_list_u8_t r;
 
 	if (wasi_stdin_ended)
 		return 0;
-	__wasm_import_wasi_io_streams_method_input_stream_read(wasi_stdin_get(), count, &r);
-	if (r.is_err) {
-		if (!r.err.closed) {
-			wasi_stream_failed(&r.err);
+	if (!wasi_io_streams_method_input_stream_read(wasi_stdin_get(), count, &r, &err)) {
+		if (err.tag != WASI_IO_STREAMS_STREAM_ERROR_CLOSED) {
+			wasi_stream_failed(&err);
 			return -EIO;
 		}
 		wasi_stdin_ended = true;
@@ -126,24 +107,35 @@ static ssize_t wasi_get_chars(u32 vtermno, u8 *buf, size_t count)
 		buf[0] = 4;
 		return 1;
 	}
-	count = r.ok.len;
-	memcpy(buf, r.ok.ptr, count);
-	lkl_ops->mem_free(r.ok.ptr);
+	count = r.len;
+	memcpy(buf, r.ptr, count);
+	wasi_list_u8_free(&r);
 	/* none yet: polled again once there is */
 	if (!count)
 		wasi_console_watch(W_IN);
 	return count;
 }
 
-/* stdin or stdout is a terminal's: WASI's terminal-stdin, terminal-stdout */
-static bool wasi_isatty(void (*get)(void *), void (*drop)(s32))
+/* stdin is a terminal's: WASI's terminal-stdin */
+static bool wasi_stdin_isatty(void)
 {
-	struct wasi_ret_option t;
+	wasi_cli_terminal_input_own_terminal_input_t t;
 
-	get(&t);
-	if (t.is_some)
-		drop(t.handle);
-	return t.is_some;
+	if (!wasi_cli_terminal_stdin_get_terminal_stdin(&t))
+		return false;
+	wasi_cli_terminal_input_terminal_input_drop_own(t);
+	return true;
+}
+
+/* ...and stdout: terminal-stdout */
+static bool wasi_stdout_isatty(void)
+{
+	wasi_cli_terminal_output_own_terminal_output_t t;
+
+	if (!wasi_cli_terminal_stdout_get_terminal_stdout(&t))
+		return false;
+	wasi_cli_terminal_output_terminal_output_drop_own(t);
+	return true;
 }
 
 /*
@@ -164,11 +156,9 @@ static int wasi_notifier_add(struct hvc_struct *hp, int data)
 		goto out;
 	set = true;
 	t = tty->termios;
-	if (!wasi_isatty(__wasm_import_wasi_cli_terminal_stdin_get_terminal_stdin,
-			 __wasm_import_wasi_cli_terminal_input_terminal_input_drop))
+	if (!wasi_stdin_isatty())
 		t.c_lflag &= ~(ECHO | ECHONL);
-	if (!wasi_isatty(__wasm_import_wasi_cli_terminal_stdout_get_terminal_stdout,
-			 __wasm_import_wasi_cli_terminal_output_terminal_output_drop))
+	if (!wasi_stdout_isatty())
 		t.c_oflag &= ~OPOST;
 	tty_set_termios(tty, &t);
 out:
@@ -187,16 +177,16 @@ void lkl_wasi_release(void)
 	int k;
 
 	for (k = 0; k < WATCHES; k++) {
-		if (pollable[k])
-			__wasm_import_wasi_io_poll_pollable_drop(pollable[k]);
-		pollable[k] = 0;
+		if (pollable[k].__handle)
+			wasi_io_poll_pollable_drop_own(pollable[k]);
+		pollable[k].__handle = 0;
 		watched[k] = 0;
 	}
-	if (wasi_stdin)
-		__wasm_import_wasi_io_streams_input_stream_drop(wasi_stdin);
-	if (wasi_stdout)
-		__wasm_import_wasi_io_streams_output_stream_drop(wasi_stdout);
-	wasi_stdin = wasi_stdout = 0;
+	if (wasi_stdin.__handle)
+		wasi_io_streams_input_stream_drop_own(wasi_stdin);
+	if (wasi_stdout.__handle)
+		wasi_io_streams_output_stream_drop_own(wasi_stdout);
+	wasi_stdin.__handle = wasi_stdout.__handle = 0;
 	if (IS_ENABLED(CONFIG_LKL_WASI_SOCK))
 		wasi_sock_network_drop();
 }

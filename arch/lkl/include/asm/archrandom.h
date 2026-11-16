@@ -16,15 +16,14 @@ static inline size_t __must_check arch_get_random_longs(unsigned long *v, size_t
 }
 
 #ifdef CONFIG_LKL_WASI
-u64 __wasm_import_wasi_random_random_get_random_u64(void)
-	__attribute__((import_module("wasi:random/random@0.2.12"), import_name("get-random-u64")));
+#include <asm/wasi.h>
 
 static inline size_t __must_check arch_get_random_seed_longs(unsigned long *v, size_t max_longs)
 {
 	size_t i;
 
 	for (i = 0; i < max_longs; i++)
-		v[i] = __wasm_import_wasi_random_random_get_random_u64();
+		v[i] = wasi_random_random_get_random_u64();
 	return max_longs;
 }
 #else

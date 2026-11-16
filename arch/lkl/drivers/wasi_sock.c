@@ -49,68 +49,15 @@
 /* bytes read ahead for MSG_PEEK */
 #define PEEK_SIZE	4096
 
-/* wasi:sockets (asm/wasi.h: the ABI, and wasi:io's) */
-#define TCP(name) WASI_IMPORT("wasi:sockets/tcp", name)
+/* wasi:sockets' tcp-socket's methods (asm/wasi.h), on a socket */
+#define TCP(name, sock, ...) \
+	wasi_sockets_tcp_method_tcp_socket_##name(wasi_sockets_tcp_borrow_tcp_socket(sock), \
+						  ##__VA_ARGS__)
 
-#define ADDR_ARGS s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32
-
-WASI_IMPORT("wasi:sockets/instance-network", "instance-network")
-s32 __wasm_import_wasi_sockets_instance_network_instance_network(void);
-WASI_IMPORT("wasi:sockets/network", "[resource-drop]network")
-void __wasm_import_wasi_sockets_network_network_drop(s32);
-WASI_IMPORT("wasi:sockets/tcp-create-socket", "create-tcp-socket")
-void __wasm_import_wasi_sockets_tcp_create_socket_create_tcp_socket(s32, void *);
-TCP("[method]tcp-socket.start-bind")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_start_bind(s32, s32, ADDR_ARGS, void *);
-TCP("[method]tcp-socket.finish-bind")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_bind(s32, void *);
-TCP("[method]tcp-socket.start-connect")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_start_connect(s32, s32, ADDR_ARGS, void *);
-TCP("[method]tcp-socket.finish-connect")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_connect(s32, void *);
-TCP("[method]tcp-socket.start-listen")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_start_listen(s32, void *);
-TCP("[method]tcp-socket.finish-listen")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_listen(s32, void *);
-TCP("[method]tcp-socket.accept")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_accept(s32, void *);
-TCP("[method]tcp-socket.local-address")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_local_address(s32, void *);
-TCP("[method]tcp-socket.remote-address")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_remote_address(s32, void *);
-TCP("[method]tcp-socket.set-listen-backlog-size")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size(s32, s64, void *);
-TCP("[method]tcp-socket.shutdown")
-void __wasm_import_wasi_sockets_tcp_method_tcp_socket_shutdown(s32, s32, void *);
-TCP("[method]tcp-socket.subscribe")
-s32 __wasm_import_wasi_sockets_tcp_method_tcp_socket_subscribe(s32);
-TCP("[resource-drop]tcp-socket")
-void __wasm_import_wasi_sockets_tcp_tcp_socket_drop(s32);
-
-/* result<_, error-code> */
-struct ret_void {
-	u8 is_err, err;
-};
-
-/* result<handles, error-code> (an error's code the first's low byte) */
-struct ret_handles {
-	u8 is_err;
-	u32 h[3];
-};
-
-/*
- * result<ip-socket-address, error-code>: at 4, the variant's tag (or the
- * error's code); at 8, the port; ipv4's address bytes at 10, ipv6's
- * 16-bit words at 16
- */
-struct ret_addr {
-	u8 r[36];
-} __aligned(4);
-
-#define WOULD_BLOCK	8	/* error-code's would-block */
+#define WOULD_BLOCK	WASI_SOCKETS_NETWORK_ERROR_CODE_WOULD_BLOCK
 
 /* wasi:sockets' error code, as an errno */
-static int hs_errno(u8 e)
+static int hs_errno(wasi_sockets_network_error_code_t e)
 {
 	static const short errnos[] = {
 		EIO,		/* unknown */
@@ -163,8 +110,11 @@ struct hsock {
 	int peer_len;
 	/* REMOTE, with its wasi:sockets socket (sock: 0 until it has one) */
 	int slot;			/* in remote[] */
-	u32 sock, in, out;		/* tcp-socket, and its streams once connected */
-	u32 pollable[WATCHES];		/* each made once it's first waited on */
+	wasi_sockets_tcp_own_tcp_socket_t sock;
+	/* its streams once connected */
+	wasi_io_streams_own_input_stream_t in;
+	wasi_io_streams_own_output_stream_t out;
+	wasi_io_poll_own_pollable_t pollable[WATCHES];	/* each made once it's first waited on */
 	unsigned int state;		/* HS_* */
 	int err;			/* HS_FAILED's errno */
 	bool connecting;
@@ -179,25 +129,25 @@ static const struct proto_ops wasi_sock_stream_ops, wasi_sock_dgram_ops;
 static bool wasi_sock_on;
 static int wasi_sock_irq;
 static struct work_struct wasi_sock_work;
-static s32 network;			/* instance-network's (0: not yet) */
+static wasi_sockets_network_own_network_t network;	/* instance-network's (0: not yet) */
 
 /*
  * the host's network, got at its first use, not at boot: a boot done ahead
  * of time (a blob's snapshot) holds no handle of the instance's
  */
-static s32 network_get(void)
+static wasi_sockets_network_borrow_network_t network_get(void)
 {
-	if (!network)
-		network = __wasm_import_wasi_sockets_instance_network_instance_network();
-	return network;
+	if (!network.__handle)
+		network = wasi_sockets_instance_network_instance_network();
+	return wasi_sockets_network_borrow_network(network);
 }
 
 /* (lkl_wasi_release's: no socket is open, the host's snapshot) */
 void wasi_sock_network_drop(void)
 {
-	if (network)
-		__wasm_import_wasi_sockets_network_network_drop(network);
-	network = 0;
+	if (network.__handle)
+		wasi_sockets_network_network_drop_own(network);
+	network.__handle = 0;
 }
 static struct hsock *remote[SOCKETS];
 /*
@@ -232,9 +182,9 @@ static bool hs_wants(struct hsock *hs, int k)
 	case W_SOCK:
 		return hs->listener ? !(hs->state & HS_ACCEPTABLE) : hs->connecting;
 	case W_IN:
-		return hs->in && !(hs->state & (HS_READABLE | HS_EOF));
+		return hs->in.__handle && !(hs->state & (HS_READABLE | HS_EOF));
 	default:
-		return hs->out && !(hs->state & HS_WRITABLE);
+		return hs->out.__handle && !(hs->state & HS_WRITABLE);
 	}
 }
 
@@ -248,13 +198,14 @@ static void hs_watch(struct hsock *hs)
 			watched[hs->slot][k] = 0;
 			continue;
 		}
-		if (!hs->pollable[k])
-			hs->pollable[k] = k == W_SOCK ?
-				__wasm_import_wasi_sockets_tcp_method_tcp_socket_subscribe(hs->sock) :
+		if (!hs->pollable[k].__handle)
+			hs->pollable[k] = k == W_SOCK ? TCP(subscribe, hs->sock) :
 				k == W_IN ?
-				__wasm_import_wasi_io_streams_method_input_stream_subscribe(hs->in) :
-				__wasm_import_wasi_io_streams_method_output_stream_subscribe(hs->out);
-		watched[hs->slot][k] = hs->pollable[k];
+				wasi_io_streams_method_input_stream_subscribe(
+					wasi_io_streams_borrow_input_stream(hs->in)) :
+				wasi_io_streams_method_output_stream_subscribe(
+					wasi_io_streams_borrow_output_stream(hs->out));
+		watched[hs->slot][k] = hs->pollable[k].__handle;
 	}
 }
 
@@ -272,10 +223,10 @@ static void hs_set(struct hsock *hs, unsigned int bits, bool on)
 /* hs's wasi:sockets socket, made now (a REMOTE socket's first need) */
 static int hs_open(struct hsock *hs)
 {
-	struct ret_handles r;
+	wasi_sockets_network_error_code_t e;
 	int slot;
 
-	if (hs->sock)
+	if (hs->sock.__handle)
 		return 0;
 	if (hs->sk.sk_type != SOCK_STREAM)	/* (no UDP yet) */
 		return -EOPNOTSUPP;
@@ -283,11 +234,11 @@ static int hs_open(struct hsock *hs)
 		;
 	if (slot == SOCKETS)
 		return -EMFILE;
-	__wasm_import_wasi_sockets_tcp_create_socket_create_tcp_socket(
-		hs->family == AF_INET6, &r);	/* (ip-address-family: ipv4, ipv6) */
-	if (r.is_err)
-		return -hs_errno(r.h[0]);
-	hs->sock = r.h[0];
+	if (!wasi_sockets_tcp_create_socket_create_tcp_socket(
+		hs->family == AF_INET6 ? WASI_SOCKETS_NETWORK_IP_ADDRESS_FAMILY_IPV6 :
+					 WASI_SOCKETS_NETWORK_IP_ADDRESS_FAMILY_IPV4,
+		&hs->sock, &e))
+		return -hs_errno(e);
 	hs->slot = slot;
 	remote[slot] = hs;
 	return 0;
@@ -300,17 +251,17 @@ static void hs_close(struct hsock *hs)
 
 	for (k = 0; k < WATCHES; k++) {
 		watched[hs->slot][k] = 0;
-		if (hs->pollable[k])
-			__wasm_import_wasi_io_poll_pollable_drop(hs->pollable[k]);
-		hs->pollable[k] = 0;
+		if (hs->pollable[k].__handle)
+			wasi_io_poll_pollable_drop_own(hs->pollable[k]);
+		hs->pollable[k].__handle = 0;
 	}
-	if (hs->in) {
-		__wasm_import_wasi_io_streams_input_stream_drop(hs->in);
-		__wasm_import_wasi_io_streams_output_stream_drop(hs->out);
-		hs->in = hs->out = 0;
+	if (hs->in.__handle) {
+		wasi_io_streams_input_stream_drop_own(hs->in);
+		wasi_io_streams_output_stream_drop_own(hs->out);
+		hs->in.__handle = hs->out.__handle = 0;
 	}
-	__wasm_import_wasi_sockets_tcp_tcp_socket_drop(hs->sock);
-	hs->sock = 0;
+	wasi_sockets_tcp_tcp_socket_drop_own(hs->sock);
+	hs->sock.__handle = 0;
 	remote[hs->slot] = NULL;
 	kfree(hs->peek);
 	hs->peek = NULL;
@@ -319,94 +270,106 @@ static void hs_close(struct hsock *hs)
 	hs->connecting = false;
 }
 
-/* a Linux sockaddr_in or sockaddr_in6, as wasi:sockets has an address (flat) */
-static int hs_flat_addr(const struct sockaddr *addr, int len, s32 a[12])
+/* ipv6-address: a tuple of its eight 16-bit words, in order */
+static_assert(sizeof(wasi_sockets_network_ipv6_address_t) == 8 * sizeof(u16));
+
+/* a Linux sockaddr_in or sockaddr_in6, as wasi:sockets has an address */
+static int hs_wasi_addr(const struct sockaddr *addr, int len,
+			wasi_sockets_network_ip_socket_address_t *a)
 {
 	int i;
 
-	memset(a, 0, 12 * sizeof(*a));
+	memset(a, 0, sizeof(*a));
 	if (addr->sa_family == AF_INET && len >= (int)sizeof(struct sockaddr_in)) {
 		const struct sockaddr_in *in = (const void *)addr;
 		const u8 *ip = (const u8 *)&in->sin_addr;
 
-		a[0] = 0;	/* ipv4 */
-		a[1] = ntohs(in->sin_port);
-		for (i = 0; i < 4; i++)
-			a[2 + i] = ip[i];
+		a->tag = WASI_SOCKETS_NETWORK_IP_SOCKET_ADDRESS_IPV4;
+		a->val.ipv4.port = ntohs(in->sin_port);
+		a->val.ipv4.address = (wasi_sockets_network_ipv4_address_t){
+			ip[0], ip[1], ip[2], ip[3] };
 		return 0;
 	}
 	if (addr->sa_family == AF_INET6 && len >= (int)sizeof(struct sockaddr_in6)) {
 		const struct sockaddr_in6 *in6 = (const void *)addr;
+		u16 ip[8];
 
-		a[0] = 1;	/* ipv6: port, flow info, address, scope (0s) */
-		a[1] = ntohs(in6->sin6_port);
+		/* (flow info and scope 0s) */
+		a->tag = WASI_SOCKETS_NETWORK_IP_SOCKET_ADDRESS_IPV6;
+		a->val.ipv6.port = ntohs(in6->sin6_port);
 		for (i = 0; i < 8; i++)
-			a[3 + i] = ntohs(in6->sin6_addr.s6_addr16[i]);
+			ip[i] = ntohs(in6->sin6_addr.s6_addr16[i]);
+		memcpy(&a->val.ipv6.address, ip, sizeof(ip));
 		return 0;
 	}
 	return -EAFNOSUPPORT;
 }
 
-/* wasi:sockets' address (r's), as a Linux one: its length */
-static int hs_sockaddr(const struct ret_addr *ra, struct sockaddr *addr)
+/* wasi:sockets' address, as a Linux one: its length */
+static int hs_sockaddr(const wasi_sockets_network_ip_socket_address_t *a,
+		       struct sockaddr *addr)
 {
-	const u8 *r = ra->r;
-	u16 port = *(const u16 *)(r + 8);
 	int i;
 
-	if (r[4] == 0) {	/* ipv4 */
+	if (a->tag == WASI_SOCKETS_NETWORK_IP_SOCKET_ADDRESS_IPV4) {
+		const wasi_sockets_network_ipv4_address_t *ip = &a->val.ipv4.address;
 		struct sockaddr_in *in = (void *)addr;
+		u8 *to = (u8 *)&in->sin_addr;
 
 		memset(in, 0, sizeof(*in));
 		in->sin_family = AF_INET;
-		in->sin_port = htons(port);
-		memcpy(&in->sin_addr, r + 10, 4);
+		in->sin_port = htons(a->val.ipv4.port);
+		to[0] = ip->f0;
+		to[1] = ip->f1;
+		to[2] = ip->f2;
+		to[3] = ip->f3;
 		return sizeof(*in);
 	}
 	{
 		struct sockaddr_in6 *in6 = (void *)addr;
+		u16 ip[8];
 
+		memcpy(ip, &a->val.ipv6.address, sizeof(ip));
 		memset(in6, 0, sizeof(*in6));
 		in6->sin6_family = AF_INET6;
-		in6->sin6_port = htons(port);
+		in6->sin6_port = htons(a->val.ipv6.port);
 		for (i = 0; i < 8; i++)
-			in6->sin6_addr.s6_addr16[i] = htons(*(const u16 *)(r + 16 + 2 * i));
+			in6->sin6_addr.s6_addr16[i] = htons(ip[i]);
 		return sizeof(*in6);
 	}
 }
 
 /* a start/finish pair's finish, waited for (the whole program) while it would block */
-static int hs_finish(struct hsock *hs, void (*finish)(s32, void *))
+static int hs_finish(struct hsock *hs,
+		     bool (*finish)(wasi_sockets_tcp_borrow_tcp_socket_t,
+				    wasi_sockets_network_error_code_t *))
 {
-	struct ret_void r;
+	wasi_sockets_network_error_code_t e;
 
 	for (;;) {
-		s32 p;
+		wasi_io_poll_own_pollable_t p;
 
-		finish(hs->sock, &r);
-		if (!r.is_err)
+		if (finish(wasi_sockets_tcp_borrow_tcp_socket(hs->sock), &e))
 			return 0;
-		if (r.err != WOULD_BLOCK)
-			return -hs_errno(r.err);
-		p = __wasm_import_wasi_sockets_tcp_method_tcp_socket_subscribe(hs->sock);
-		__wasm_import_wasi_io_poll_method_pollable_block(p);
-		__wasm_import_wasi_io_poll_pollable_drop(p);
+		if (e != WOULD_BLOCK)
+			return -hs_errno(e);
+		p = TCP(subscribe, hs->sock);
+		wasi_io_poll_method_pollable_block(wasi_io_poll_borrow_pollable(p));
+		wasi_io_poll_pollable_drop_own(p);
 	}
 }
 
 /* start connecting to addr: then connected (or failed) once it's ready */
 static int hs_connect(struct hsock *hs, const struct sockaddr *addr, int len)
 {
-	struct ret_void r;
-	s32 a[12];
-	int err = hs_flat_addr(addr, len, a);
+	wasi_sockets_network_ip_socket_address_t a;
+	wasi_sockets_network_error_code_t e;
+	int err = hs_wasi_addr(addr, len, &a);
 
 	if (err)
 		return err;
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_connect(hs->sock, network_get(),
-		a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], &r);
-	if (r.is_err)
-		return -hs_errno(r.err);
+	if (!TCP(start_connect, hs->sock, network_get(), &a, &e))
+		return -hs_errno(e);
 	hs->connecting = true;
 	hs_watch(hs);
 	return 0;
@@ -415,19 +378,20 @@ static int hs_connect(struct hsock *hs, const struct sockaddr *addr, int len)
 /* a connecting socket's connection, made or failed, once it's ready */
 static void hs_connected(struct hsock *hs)
 {
-	struct ret_handles r;
+	wasi_sockets_tcp_tuple2_own_input_stream_own_output_stream_t r;
+	wasi_sockets_network_error_code_t e;
 
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_connect(hs->sock, &r);
-	if (r.is_err && (u8)r.h[0] == WOULD_BLOCK)
-		return;
-	hs->connecting = false;
-	if (r.is_err) {
-		hs->err = hs_errno(r.h[0]);
+	if (!TCP(finish_connect, hs->sock, &r, &e)) {
+		if (e == WOULD_BLOCK)
+			return;
+		hs->connecting = false;
+		hs->err = hs_errno(e);
 		hs->state |= HS_FAILED;
 		return;
 	}
-	hs->in = r.h[0];
-	hs->out = r.h[1];
+	hs->connecting = false;
+	hs->in = r.f0;
+	hs->out = r.f1;
 	hs->state |= HS_CONNECTED | HS_WRITABLE;
 }
 
@@ -435,25 +399,21 @@ static void hs_connected(struct hsock *hs)
 static int hs_listen(struct hsock *hs, const struct sockaddr *addr, int len,
 		     int backlog)
 {
-	struct ret_void r;
-	s32 a[12];
-	int err = hs_flat_addr(addr, len, a);
+	wasi_sockets_network_ip_socket_address_t a;
+	wasi_sockets_network_error_code_t e;
+	int err = hs_wasi_addr(addr, len, &a);
 
 	if (err)
 		return err;
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_bind(hs->sock, network_get(),
-		a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], &r);
-	if (r.is_err)
-		return -hs_errno(r.err);
-	err = hs_finish(hs, __wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_bind);
+	if (!TCP(start_bind, hs->sock, network_get(), &a, &e))
+		return -hs_errno(e);
+	err = hs_finish(hs, wasi_sockets_tcp_method_tcp_socket_finish_bind);
 	if (err)
 		return err;
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size(hs->sock,
-										 backlog, &r);
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_listen(hs->sock, &r);
-	if (r.is_err)
-		return -hs_errno(r.err);
-	return hs_finish(hs, __wasm_import_wasi_sockets_tcp_method_tcp_socket_finish_listen);
+	TCP(set_listen_backlog_size, hs->sock, backlog, &e);
+	if (!TCP(start_listen, hs->sock, &e))
+		return -hs_errno(e);
+	return hs_finish(hs, wasi_sockets_tcp_method_tcp_socket_finish_listen);
 }
 
 /*
@@ -462,26 +422,27 @@ static int hs_listen(struct hsock *hs, const struct sockaddr *addr, int len,
  */
 static long hs_write(struct hsock *hs, const void *buf, unsigned long len)
 {
-	struct wasi_ret_u64 room;
-	struct wasi_ret_stream r;
+	wasi_io_streams_borrow_output_stream_t out;
+	wasi_io_streams_stream_error_t err;
+	wasi_list_u8_t list;
+	u64 room;
 
-	if (!hs->out)
+	if (!hs->out.__handle)
 		return -ENOTCONN;
-	__wasm_import_wasi_io_streams_method_output_stream_check_write(hs->out, &room);
-	if (room.is_err) {
-		wasi_stream_failed(&room.err);
+	out = wasi_io_streams_borrow_output_stream(hs->out);
+	if (!wasi_io_streams_method_output_stream_check_write(out, &room, &err)) {
+		wasi_stream_failed(&err);
 		return -EPIPE;
 	}
-	if (!room.ok) {
+	if (!room) {
 		hs_set(hs, HS_WRITABLE, false);
 		return -EAGAIN;
 	}
-	len = min_t(u64, len, room.ok);
-	__wasm_import_wasi_io_streams_method_output_stream_write(hs->out, buf, len, &r);
-	if (!r.is_err)
-		__wasm_import_wasi_io_streams_method_output_stream_flush(hs->out, &r);
-	if (r.is_err) {
-		wasi_stream_failed(&r.err);
+	len = min_t(u64, len, room);
+	list = (wasi_list_u8_t){ (u8 *)buf, len };
+	if (!wasi_io_streams_method_output_stream_write(out, &list, &err) ||
+	    !wasi_io_streams_method_output_stream_flush(out, &err)) {
+		wasi_stream_failed(&err);
 		return -EPIPE;
 	}
 	return len;
@@ -495,41 +456,41 @@ static long hs_read(struct hsock *hs, void *buf, unsigned long len, bool peek)
 {
 	unsigned long n;
 
-	if (!hs->in)
+	if (!hs->in.__handle)
 		return -ENOTCONN;
 	/* what peek read ahead first */
 	if (!hs->peeked) {
-		struct wasi_ret_list r;
+		wasi_io_streams_stream_error_t err;
+		wasi_list_u8_t r;
 
 		if (peek && !hs->peek) {
 			hs->peek = kmalloc(PEEK_SIZE, GFP_KERNEL);
 			if (!hs->peek)
 				return -ENOMEM;
 		}
-		__wasm_import_wasi_io_streams_method_input_stream_read(hs->in,
-			peek ? PEEK_SIZE : len, &r);
-		if (r.is_err) {
-			wasi_stream_failed(&r.err);
+		if (!wasi_io_streams_method_input_stream_read(
+			wasi_io_streams_borrow_input_stream(hs->in), peek ? PEEK_SIZE : len,
+			&r, &err)) {
+			wasi_stream_failed(&err);
 			hs_set(hs, HS_READABLE, false);
 			hs_set(hs, HS_EOF, true);
 			return 0;
 		}
-		/* (the list is the host's mem_alloc's, as cabi_realloc's) */
-		n = r.ok.len;
+		n = r.len;
 		if (!n) {
-			lkl_ops->mem_free(r.ok.ptr);
+			wasi_list_u8_free(&r);
 			hs_set(hs, HS_READABLE, false);
 			return -EAGAIN;
 		}
 		if (!peek) {
-			memcpy(buf, r.ok.ptr, n);
-			lkl_ops->mem_free(r.ok.ptr);
+			memcpy(buf, r.ptr, n);
+			wasi_list_u8_free(&r);
 			hs_set(hs, HS_READABLE, false);
 			return n;
 		}
-		memcpy(hs->peek, r.ok.ptr, n);
+		memcpy(hs->peek, r.ptr, n);
 		hs->peeked = n;
-		lkl_ops->mem_free(r.ok.ptr);
+		wasi_list_u8_free(&r);
 	}
 	n = min(len, hs->peeked);
 	memcpy(buf, hs->peek, n);
@@ -632,7 +593,7 @@ static void wasi_sock_ready(struct work_struct *work)
 		if (!hs)
 			continue;
 		for (k = 0; k < WATCHES; k++)
-			ready[k] = hs->pollable[k] && hs_wants(hs, k) && !watched[i][k];
+			ready[k] = hs->pollable[k].__handle && hs_wants(hs, k) && !watched[i][k];
 		was = hs->state;
 		if (ready[W_SOCK]) {
 			if (hs->listener)
@@ -725,7 +686,7 @@ static int wasi_sock_release(struct socket *sock)
 	if (!sk)
 		return 0;
 	hs = hs_sk(sk);
-	if (hs->sock)
+	if (hs->sock.__handle)
 		hs_close(hs);
 	if (hs->inner) {
 		if (hs->listener) {
@@ -902,15 +863,15 @@ static int hs_accept_local(struct hsock *hs, struct socket *newsock,
 static int hs_accept_remote(struct hsock *hs, struct socket *newsock,
 			    struct proto_accept_arg *arg)
 {
+	wasi_sockets_tcp_tuple3_own_tcp_socket_own_input_stream_own_output_stream_t r;
+	wasi_sockets_network_error_code_t e;
 	struct hsock *child;
-	struct ret_handles r;
 	int slot;
 
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_accept(hs->sock, &r);
-	if (r.is_err) {
-		if ((u8)r.h[0] == WOULD_BLOCK)
+	if (!TCP(accept, hs->sock, &r, &e)) {
+		if (e == WOULD_BLOCK)
 			hs_set(hs, HS_ACCEPTABLE, false);
-		return -hs_errno(r.h[0]);
+		return -hs_errno(e);
 	}
 	for (slot = 0; slot < SOCKETS && remote[slot]; slot++)
 		;
@@ -918,15 +879,15 @@ static int hs_accept_remote(struct hsock *hs, struct socket *newsock,
 		hs_new(sock_net(&hs->sk), newsock, hs->family, 0, arg->kern, NULL) :
 		ERR_PTR(-EMFILE);
 	if (IS_ERR(child)) {
-		__wasm_import_wasi_io_streams_input_stream_drop(r.h[1]);
-		__wasm_import_wasi_io_streams_output_stream_drop(r.h[2]);
-		__wasm_import_wasi_sockets_tcp_tcp_socket_drop(r.h[0]);
+		wasi_io_streams_input_stream_drop_own(r.f1);
+		wasi_io_streams_output_stream_drop_own(r.f2);
+		wasi_sockets_tcp_tcp_socket_drop_own(r.f0);
 		return PTR_ERR(child);
 	}
 	child->mode = REMOTE;
-	child->sock = r.h[0];
-	child->in = r.h[1];
-	child->out = r.h[2];
+	child->sock = r.f0;
+	child->in = r.f1;
+	child->out = r.f2;
 	child->slot = slot;
 	remote[slot] = child;
 	hs_set(child, HS_CONNECTED | HS_WRITABLE, true);
@@ -966,7 +927,9 @@ static int wasi_sock_accept(struct socket *sock, struct socket *newsock,
 static int wasi_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 {
 	struct hsock *hs = hs_sk(sock->sk);
-	struct ret_addr r;
+	wasi_sockets_network_ip_socket_address_t a;
+	wasi_sockets_network_error_code_t e;
+	bool ok;
 
 	if (hs->mode != REMOTE)
 		return hs->inner->ops->getname(hs->inner, addr, peer);
@@ -976,11 +939,9 @@ static int wasi_sock_getname(struct socket *sock, struct sockaddr *addr, int pee
 		memcpy(addr, &hs->peer, hs->peer_len);
 		return hs->peer_len;
 	}
-	if (peer)
-		__wasm_import_wasi_sockets_tcp_method_tcp_socket_remote_address(hs->sock, &r);
-	else
-		__wasm_import_wasi_sockets_tcp_method_tcp_socket_local_address(hs->sock, &r);
-	return r.r[0] ? -hs_errno(r.r[4]) : hs_sockaddr(&r, addr);
+	ok = peer ? TCP(remote_address, hs->sock, &a, &e) :
+		    TCP(local_address, hs->sock, &a, &e);
+	return ok ? hs_sockaddr(&a, addr) : -hs_errno(e);
 }
 
 static __poll_t wasi_sock_poll(struct file *file, struct socket *sock,
@@ -1007,7 +968,7 @@ static __poll_t wasi_sock_poll(struct file *file, struct socket *sock,
 		return mask;
 	}
 	sock_poll_wait(file, sock, wait);
-	if (!hs->sock)	/* (a datagram socket that hasn't sent) */
+	if (!hs->sock.__handle)	/* (a datagram socket that hasn't sent) */
 		return EPOLLOUT | EPOLLWRNORM;
 	state = hs->state;
 	if (hs->listener)
@@ -1047,7 +1008,7 @@ static int wasi_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 static int wasi_sock_shutdown(struct socket *sock, int how)
 {
 	struct hsock *hs = hs_sk(sock->sk);
-	struct ret_void r;
+	wasi_sockets_network_error_code_t e;
 
 	if (hs->mode != REMOTE)
 		return hs->inner->ops->shutdown(hs->inner, how);
@@ -1056,9 +1017,8 @@ static int wasi_sock_shutdown(struct socket *sock, int how)
 	if (sock->state != SS_CONNECTED)
 		return -ENOTCONN;
 	/* (SHUT_RD 0, SHUT_WR 1, SHUT_RDWR 2: as shutdown-type numbers them) */
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_shutdown(hs->sock, how, &r);
-	if (r.is_err)
-		return -hs_errno(r.err);
+	if (!TCP(shutdown, hs->sock, how, &e))
+		return -hs_errno(e);
 	sock->sk->sk_shutdown |= how + 1;	/* (RCV/SEND_SHUTDOWN) */
 	return 0;
 }
@@ -1215,7 +1175,7 @@ static int wasi_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len
 {
 	struct hsock *hs = hs_sk(sock->sk);
 
-	if (hs->mode != REMOTE || !hs->sock)
+	if (hs->mode != REMOTE || !hs->sock.__handle)
 		return hs->inner->ops->recvmsg(hs->inner, msg, len, flags);
 	return hs_recv(hs, msg, len, flags);
 }
