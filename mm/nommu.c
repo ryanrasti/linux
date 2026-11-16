@@ -1577,10 +1577,6 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	/* most fields are the same, copy all, and then fixup */
 	*region = *vma->vm_region;
 	new->vm_region = region;
-	if (region->vm_file) {
-		get_file(region->vm_file);
-		get_file(new->vm_file);
-	}
 
 	npages = (addr - vma->vm_start) >> PAGE_SHIFT;
 
@@ -1598,6 +1594,11 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		goto err_vmi_preallocate;
 	}
 
+	/* (a file's copy: the new mapping and region each hold the file) */
+	if (region->vm_file) {
+		get_file(region->vm_file);
+		get_file(new->vm_file);
+	}
 	if (new->vm_ops && new->vm_ops->open)
 		new->vm_ops->open(new);
 
