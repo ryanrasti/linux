@@ -183,9 +183,10 @@ enum lkl_prot {
  * exit_group, a fatal signal); the thread ends, without returning. If the
  * task was the last of its process's threads, pid is the process's (its
  * thread group's id) and status its wait status; else pid is 0. PID 1's
- * end (its exit_group, or its last thread's exit) is called with pid 1
- * before the kernel's exit, which would panic: the host ends then. Without
- * it, the thread waits forever.
+ * end (its last thread's exit: exit_group, exit or a fatal signal) is
+ * called with pid 1 from the task's exit, its memory torn down and its
+ * files closed (exit_thread), and doesn't return: the host ends then.
+ * Without it, the thread waits forever (PID 1's end: a panic).
  * @signal_handler - run a process's signal handler, a function of the
  * program's, for sig: called at a syscall's return to the program, on the
  * task's host thread (its own stack), with the CPU released. info: the

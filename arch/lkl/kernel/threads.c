@@ -76,7 +76,7 @@ void arch_free_thread_stack(struct task_struct *tsk)
  * A task's exit (do_exit's, after its mm's): an exec's old memory it had
  * left, which its next syscall would have released (wasi_exec.c): a task
  * killed at the exec's return, or by its failure past the point of no
- * return, has none.
+ * return, has none. And PID 1's, the system's end.
  */
 void exit_thread(struct task_struct *tsk)
 {
@@ -85,6 +85,25 @@ void exit_thread(struct task_struct *tsk)
 	if (ti->exec_old_mm) {
 		mmput(ti->exec_old_mm);
 		ti->exec_old_mm = NULL;
+	}
+
+	/*
+	 * PID 1's end, its last thread's (exit_group, exit, or a fatal
+	 * signal: a failed exec's SIGSEGV), is the host's, with its wait
+	 * status, once its memory is torn down (exit_mm: a shared mapping's
+	 * copy written back) and its files closed: as a container runtime
+	 * ends a container whose init died, rather than Linux's panic
+	 */
+	if (IS_ENABLED(CONFIG_ARCH_INIT_EXIT_ENDS_SYSTEM) && tsk == current &&
+	    is_global_init(tsk) && (tsk->flags & PF_EXITING) &&
+	    !atomic_read(&tsk->signal->live)) {
+		struct signal_struct *sig = tsk->signal;
+		int status = sig->flags & SIGNAL_GROUP_EXIT ?
+			     sig->group_exit_code : tsk->exit_code;
+
+		if (lkl_ops->task_exit)
+			lkl_ops->task_exit(1, status);
+		panic("Attempted to kill init! exitcode=0x%08x\n", status);
 	}
 }
 

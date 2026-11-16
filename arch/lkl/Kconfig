@@ -45,6 +45,7 @@ config LKL_WASI
 	bool "Linked into a WASI program"
 	depends on LKL_WASM && TTY
 	select HVC_DRIVER
+	select ARCH_INIT_EXIT_ENDS_SYSTEM
 	default n
 	help
 	  The kernel as a library OS, linked into a WASI 0.2 component with

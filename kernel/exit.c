@@ -902,9 +902,11 @@ void __noreturn do_exit(long code)
 	if (group_dead) {
 		/*
 		 * If the last thread of global init has exited, panic
-		 * immediately to get a useable coredump.
+		 * immediately to get a useable coredump. (Unless init's end
+		 * is the system's: exit_thread() ends it.)
 		 */
-		if (unlikely(is_global_init(tsk)))
+		if (unlikely(is_global_init(tsk)) &&
+		    !IS_ENABLED(CONFIG_ARCH_INIT_EXIT_ENDS_SYSTEM))
 			panic("Attempted to kill init! exitcode=0x%08x\n",
 				tsk->signal->group_exit_code ?: (int)code);
 

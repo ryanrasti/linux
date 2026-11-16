@@ -269,15 +269,6 @@ long lkl_syscall(long no, long *params)
 		task_thread_info(task)->exec_old_mm = NULL;
 	}
 
-	/*
-	 * PID 1's end (its exit_group, or its last thread's exit) is the
-	 * host's, with its wait status: Linux would panic (do_exit)
-	 */
-	if (is_global_init(task) && lkl_ops->task_exit &&
-	    (no == __NR_exit_group ||
-	     (no == __NR_exit && atomic_read(&task->signal->live) == 1)))
-		lkl_ops->task_exit(1, (params[0] & 0xff) << 8);
-
 	ret = run_syscall(no, params);
 
 	if (no == __NR_reboot) {
