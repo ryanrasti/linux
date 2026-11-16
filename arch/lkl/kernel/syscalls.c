@@ -193,8 +193,9 @@ static bool syscall_restarts(long *ret, struct k_sigaction *ka)
  * but without a frame: a pending signal's handler, a function of the
  * program's, is called by the host on the task's own stack, and when it
  * returns, sigreturn's work is done here (the mask restored; then more
- * signals, or the syscall again). A fatal signal exits the task in
- * get_signal(), which doesn't return (__switch_to(): task_exit).
+ * signals, or the syscall again, unless the host says the handler moved
+ * the program on). A fatal signal exits the task in get_signal(), which
+ * doesn't return (__switch_to(): task_exit).
  */
 static long syscall_exit_signals(long no, long *params, long ret)
 {
@@ -220,9 +221,12 @@ static long syscall_exit_signals(long no, long *params, long ret)
 
 			/* in the program */
 			lkl_cpu_put();
-			lkl_ops->signal_handler((unsigned long)ksig.ka.sa.sa_handler,
-						ksig.sig, si ? &info : NULL,
-						&mask);
+			if (!lkl_ops->signal_handler((unsigned long)ksig.ka.sa.sa_handler,
+						     ksig.sig, si ? &info : NULL,
+						     &mask, restart) && restart) {
+				restart = false;
+				ret = -EINTR;
+			}
 			if (lkl_cpu_get() < 0)
 				return -EINTR;	/* (the kernel halted) */
 			switch_to_host_task(task);

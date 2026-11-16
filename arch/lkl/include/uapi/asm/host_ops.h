@@ -192,8 +192,12 @@ enum lkl_prot {
  * siginfo_t for an SA_SIGINFO handler, which takes (sig, info, ucontext);
  * NULL for a plain handler, which takes (sig). mask: the signal mask
  * (sigset_t) that sigreturn restores once the handler returns, the
- * ucontext's uc_sigmask, which the handler may change. Without it,
- * processes get no signals delivered.
+ * ucontext's uc_sigmask, which the handler may change. restart: whether
+ * the syscall the signal interrupted runs again after the handler (its
+ * -ERESTART* result, SA_RESTART's); the host's return is whether it does,
+ * 0 ending it with -EINTR instead (a handler that moved the program on, as
+ * one changing a native ucontext's program counter: musl's cancellation).
+ * Without it, processes get no signals delivered.
  *
  * @poll_watch - WASI: the kernel's waits on wasi:io pollables of its own
  * (arch/lkl/drivers: the sockets', the console's). Each time the host's
@@ -267,8 +271,8 @@ struct lkl_host_operations {
 	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
 					 unsigned long stack);
 	void (*task_exit)(int pid, int status);
-	void (*signal_handler)(unsigned long handler, int sig, void *info,
-			       void *mask);
+	int (*signal_handler)(unsigned long handler, int sig, void *info,
+			      void *mask, int restart);
 
 	void (*poll_watch)(unsigned int *pollables, int n, void (*ready)(void));
 
