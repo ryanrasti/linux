@@ -69,7 +69,7 @@ static int wasi_err(wasi_filesystem_types_error_code_t e)
 
 /* a file's attributes: its stat and its identity (the metadata hash's) */
 struct wasifs_stat {
-	u32 ino;		/* 0: the host has none */
+	u64 key;		/* the hash's lower half (0: the host has none) */
 	u8 type;
 	u64 nlink;
 	u64 size;
@@ -83,19 +83,25 @@ static struct timespec64 wasi_timespec(const wasi_filesystem_types_option_dateti
 }
 
 /*
- * the hash as an inode number (i_ino's 32 bits): its lower half's (the
- * upper may be derived from it: Wasmtime's is the lower xor a constant);
- * 0 if the host has none
+ * A file's identity is the hash's lower half (the upper may be derived from
+ * it: Wasmtime's is the lower xor a constant), 0 if the host has none: an
+ * inode's key, its 64 bits compared (two files whose inode numbers are the
+ * same aren't one); its inode number (i_ino's 32 bits) the key folded.
  */
-static u32 wasi_ino(bool ok, const wasi_filesystem_types_metadata_hash_value_t *h)
+static u64 wasi_key(bool ok, const wasi_filesystem_types_metadata_hash_value_t *h)
 {
-	return ok ? (u32)(h->lower ^ (h->lower >> 32)) : 0;
+	return ok ? h->lower : 0;
 }
 
-static void wasifs_stat_of(const wasi_filesystem_types_descriptor_stat_t *r, u32 ino,
+static u32 wasi_ino(u64 key)
+{
+	return key ^ (key >> 32);
+}
+
+static void wasifs_stat_of(const wasi_filesystem_types_descriptor_stat_t *r, u64 key,
 			   struct wasifs_stat *st)
 {
-	st->ino = ino;
+	st->key = key;
 	st->type = r->type;
 	st->nlink = r->link_count;
 	st->size = r->size;
@@ -115,7 +121,7 @@ static int wasi_stat_at(s32 fd, const char *path, struct wasifs_stat *st)
 	if (!WASI_FS(stat_at, fd, 0, WASI_STR(path), &r, &err))
 		return wasi_err(err);
 	ok = WASI_FS(metadata_hash_at, fd, 0, WASI_STR(path), &h, &err);
-	wasifs_stat_of(&r, wasi_ino(ok, &h), st);
+	wasifs_stat_of(&r, wasi_key(ok, &h), st);
 	return 0;
 }
 
@@ -130,7 +136,7 @@ static int wasi_stat(s32 fd, struct wasifs_stat *st)
 	if (!WASI_FS(stat, fd, &r, &err))
 		return wasi_err(err);
 	ok = WASI_FS(metadata_hash, fd, &h, &err);
-	wasifs_stat_of(&r, wasi_ino(ok, &h), st);
+	wasifs_stat_of(&r, wasi_key(ok, &h), st);
 	return 0;
 }
 
@@ -204,17 +210,33 @@ static void wasifs_fill(struct inode *inode, const struct wasifs_stat *st)
 	inode_set_ctime_to_ts(inode, st->ctime);
 }
 
+/* an inode, with its key */
+struct wasifs_inode {
+	struct inode vfs_inode;
+	u64 key;
+};
+
+static struct kmem_cache *wasifs_inode_cache;
+
+static struct wasifs_inode *WASIFS_I(struct inode *inode)
+{
+	return container_of(inode, struct wasifs_inode, vfs_inode);
+}
+
 static int wasifs_test(struct inode *inode, void *data)
 {
 	const struct wasifs_stat *st = data;
 
-	return inode->i_ino == st->ino &&
+	return WASIFS_I(inode)->key == st->key &&
 	       (inode->i_mode & S_IFMT) == (wasi_mode(st->type) & S_IFMT);
 }
 
 static int wasifs_set(struct inode *inode, void *data)
 {
-	inode->i_ino = ((const struct wasifs_stat *)data)->ino;
+	const struct wasifs_stat *st = data;
+
+	WASIFS_I(inode)->key = st->key;
+	inode->i_ino = wasi_ino(st->key);
 	return 0;
 }
 
@@ -222,8 +244,8 @@ static struct inode *wasifs_iget(struct super_block *sb, struct wasifs_stat *st)
 {
 	struct inode *inode;
 
-	if (st->ino) {
-		inode = iget5_locked(sb, st->ino, wasifs_test, wasifs_set, st);
+	if (st->key) {
+		inode = iget5_locked(sb, wasi_ino(st->key), wasifs_test, wasifs_set, st);
 	} else {
 		/* a runtime without inode numbers: an inode each time */
 		inode = new_inode(sb);
@@ -850,7 +872,7 @@ static u32 wasifs_entry_ino(struct file *file, const u8 *name, u32 len)
 		return 0;
 	ok = WASI_FS(metadata_hash_at, root_fd(file->f_path.dentry->d_sb), 0, WASI_STR(path),
 		     &h, &e);
-	ino = wasi_ino(ok, &h);
+	ino = wasi_ino(wasi_key(ok, &h));
 	kfree(path);
 	return ino;
 }
@@ -919,7 +941,21 @@ static int wasifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return 0;
 }
 
+static struct inode *wasifs_alloc_inode(struct super_block *sb)
+{
+	struct wasifs_inode *wi = alloc_inode_sb(sb, wasifs_inode_cache, GFP_KERNEL);
+
+	return wi ? &wi->vfs_inode : NULL;
+}
+
+static void wasifs_free_inode(struct inode *inode)
+{
+	kmem_cache_free(wasifs_inode_cache, WASIFS_I(inode));
+}
+
 static const struct super_operations wasifs_sops = {
+	.alloc_inode = wasifs_alloc_inode,
+	.free_inode = wasifs_free_inode,
 	.statfs = wasifs_statfs,
 };
 
@@ -1015,8 +1051,20 @@ static struct file_system_type wasifs_type = {
 	.kill_sb = wasifs_kill_sb,
 };
 
+static void wasifs_inode_init_once(void *p)
+{
+	struct wasifs_inode *wi = p;
+
+	inode_init_once(&wi->vfs_inode);
+}
+
 static int __init wasifs_init(void)
 {
+	wasifs_inode_cache = kmem_cache_create("wasifs_inode", sizeof(struct wasifs_inode), 0,
+					       SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT,
+					       wasifs_inode_init_once);
+	if (!wasifs_inode_cache)
+		return -ENOMEM;
 	return register_filesystem(&wasifs_type);
 }
 fs_initcall(wasifs_init);
