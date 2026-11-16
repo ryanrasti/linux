@@ -1713,6 +1713,35 @@ static int munmap_vma_range(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 /*
+ * a change to [start, end) of a mapping only (its protection, its fork
+ * flags): memory of its own (vma_is_own_copy) split there, as Linux's
+ * would be, the part in the range returned; a file's own memory can't be
+ * split, and is the whole mapping's, returned whole. Or an ERR_PTR.
+ */
+static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
+				      unsigned long start, unsigned long end)
+{
+	VMA_ITERATOR(vmi, vma->vm_mm, vma->vm_start);
+	int ret;
+
+	if (!vma_is_own_copy(vma))
+		return vma;
+	if (start > vma->vm_start) {
+		/* (the part below split off: vma is [start, its end) then) */
+		ret = split_vma(&vmi, vma, start, 1);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+	if (end < vma->vm_end) {
+		vma_iter_set(&vmi, vma->vm_start);
+		ret = split_vma(&vmi, vma, end, 0);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+	return vma;
+}
+
+/*
  * release the mappings in [start, start + len), as Linux's munmap: what
  * isn't mapped is no matter, a mapping partly in it cut (but not a file's
  * own memory: a shared mapping of it, which NOMMU conditions can only
@@ -2068,17 +2097,22 @@ static int walk_vmas(struct mm_struct *mm, unsigned long start, unsigned long en
 }
 
 /*
- * the whole mapping takes the protection (no MMU enforces it); a shared
- * copy written back as long as it was ever writable
+ * the range takes the protection (recorded: no MMU enforces it), its own
+ * mapping split off (vma_cut); a shared copy written back as long as it
+ * was ever writable
  */
 static int mprotect_vma(struct vm_area_struct *vma, unsigned long start,
 			unsigned long end, unsigned long prot)
 {
-	vm_flags_t keep = vma_is_shared_copy(vma) ? VM_WRITE : 0;
+	vm_flags_t keep;
 
 	if ((prot & PROT_WRITE) && vma->vm_file && (vma->vm_flags & VM_SHARED) &&
 	    !(vma->vm_file->f_mode & FMODE_WRITE))
 		return -EACCES;
+	vma = vma_cut(vma, start, end);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+	keep = vma_is_shared_copy(vma) ? VM_WRITE : 0;
 	vm_flags_reset(vma, (vma->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC)) |
 			    (vma->vm_flags & keep) | calc_vm_prot_bits(prot, 0));
 	return 0;
