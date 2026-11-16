@@ -1001,8 +1001,21 @@ static int wasi_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 
 	if (hs->mode != REMOTE)
 		return hs->inner->ops->ioctl(hs->inner, cmd, arg);
-	if (cmd == SIOCINQ)
+	if (cmd == SIOCINQ) {
+		/*
+		 * what's readable: what peek read ahead, and if none, what the
+		 * stream has now, read ahead (the stream can't say how much
+		 * it has: at least this much)
+		 */
+		if (!hs->peeked && hs->in.__handle) {
+			u8 none;
+			long err = hs_read(hs, &none, 0, true);
+
+			if (err < 0 && err != -EAGAIN)
+				return err;
+		}
 		return put_user((int)hs->peeked, (int __user *)arg);
+	}
 	return -ENOIOCTLCMD;
 }
 
