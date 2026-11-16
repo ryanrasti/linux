@@ -1766,6 +1766,7 @@ static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
  */
 int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list_head *uf)
 {
+	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
 	unsigned long end;
 	int ret;
@@ -1777,6 +1778,12 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list
 		return -EINVAL;
 
 	end = start + len;
+	/* (checked first: none unmapped if one can't be) */
+	vma_iter_init(&vmi, mm, start);
+	for_each_vma_range(vmi, vma, end)
+		if ((start > vma->vm_start || end < vma->vm_end) &&
+		    !vma_is_own_copy(vma))
+			return -EINVAL;
 	while ((vma = find_vma_intersection(mm, start, end))) {
 		ret = munmap_vma_range(mm, vma, max(start, vma->vm_start),
 				       min(end, vma->vm_end));
@@ -2020,6 +2027,7 @@ static unsigned long do_mremap(unsigned long addr,
 	struct vm_area_struct *vma;
 	unsigned long populate, prot, map_flags, ret;
 	struct file *file;
+	int err;
 
 	/* insanity checks first */
 	old_len = PAGE_ALIGN(old_len);
@@ -2051,6 +2059,10 @@ static unsigned long do_mremap(unsigned long addr,
 		return addr;
 	if (!(flags & MREMAP_MAYMOVE))
 		return (unsigned long) -ENOMEM;
+	/* (a file's own memory can't be cut: the old range unmapped whole) */
+	if ((addr != vma->vm_start || addr + old_len != vma->vm_end) &&
+	    !vma_is_own_copy(vma))
+		return (unsigned long) -EINVAL;
 
 	file = vma->vm_file;
 	prot = (vma->vm_flags & VM_READ ? PROT_READ : 0) |
@@ -2076,7 +2088,12 @@ static unsigned long do_mremap(unsigned long addr,
 		if (vma->vm_flags & VM_WRITE)
 			vm_flags_set(new, VM_WRITE);
 	}
-	do_munmap(mm, addr, old_len, NULL);
+	/* (the old range kept, if it can't go: then not the new one) */
+	err = do_munmap(mm, addr, old_len, NULL);
+	if (err) {
+		do_munmap(mm, ret, new_len, NULL);
+		return err;
+	}
 	return ret;
 }
 
