@@ -1097,8 +1097,8 @@ static int read_file_into(struct file *file, unsigned long addr,
  * directly), written back: what of [start, end) is within the file, at the
  * mapping's offset, by its file (an O_APPEND one's too: where it was
  * mapped). At msync, munmap, mremap, and exit or exec (exit_mmap); the
- * file's readers see the mapping's writes then, and a write by another
- * meanwhile is overwritten. Only once the mapping was writable.
+ * file's readers see the mapping's writes then. Only once the mapping was
+ * writable; only within the file (it isn't grown).
  */
 static int write_back_range(struct vm_area_struct *vma, unsigned long start,
 			    unsigned long end)
@@ -1139,53 +1139,128 @@ static int write_back_range(struct vm_area_struct *vma, unsigned long start,
 }
 
 /*
- * A fork's child's copy of a shared file mapping (in a window: LKL on WASI)
- * has a snapshot of it as the fork made it (vm_private_data): its parent's
- * bytes, which the parent writes back. Only the pages the child changed
- * since are its to write back (as natively, where both see the one page),
- * and the snapshot then follows them.
+ * A shared file mapping's copy, in a file opened for writing, has a
+ * snapshot (vm_private_data): the bytes of the file it last knew, as read
+ * when it was mapped (a fork's child's: its parent's copy as it was, the
+ * parent's to write back) and as written back since. Only the bytes the
+ * mapping changed since are written back, as natively only the stores to
+ * the one page cache reach the file: not what a write(2) wrote meanwhile
+ * (this process's, another's), nor past the file's end, an append's, which
+ * the copy holds as zeros. Its pages are the file's (the snapshot's byte
+ * at a file position), so a split or cut mapping shares it.
  */
-static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
-			    unsigned long end)
+struct nommu_snapshot {
+	refcount_t ref;
+	loff_t pos;		/* the file position of data[0] */
+	unsigned long len;
+	char data[];
+};
+
+/* a snapshot of [vma's start, its end) as the copy holds it now, or NULL */
+static struct nommu_snapshot *snapshot_new(struct vm_area_struct *vma)
 {
-	char *snap = vma->vm_private_data;
-	unsigned long p, run = 0;
-	int ret = 0, r;
+	unsigned long len = vma->vm_end - vma->vm_start;
+	struct nommu_snapshot *snap = kvmalloc(struct_size(snap, data, len), GFP_KERNEL);
 
-	if (!snap || !vma_is_shared_copy(vma))
-		return write_back_range(vma, start, end);
-	start = max(start, vma->vm_start) & PAGE_MASK;
-	end = min(end, vma->vm_end);
-	for (p = start; p < end; p += PAGE_SIZE) {
-		unsigned long n = min(end - p, PAGE_SIZE);
-		char *s = snap + (p - vma->vm_start);
+	if (!snap)
+		return NULL;
+	refcount_set(&snap->ref, 1);
+	snap->pos = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
+	snap->len = len;
+	memcpy(snap->data, (void *)vma->vm_start, len);
+	return snap;
+}
 
-		if (memcmp((void *)p, s, n)) {
-			memcpy(s, (void *)p, n);
-			if (!run)
-				run = p;
-			continue;
-		}
-		if (run) {
-			r = write_back_range(vma, run, p);
-			ret = ret ?: r;
-			run = 0;
-		}
-	}
-	if (run) {
-		r = write_back_range(vma, run, end);
-		ret = ret ?: r;
-	}
+/* whether a mapping needs one: a shared copy that may be written back */
+static bool vma_needs_snapshot(struct vm_area_struct *vma)
+{
+	return vma_is_shared_copy(vma) && (vma->vm_file->f_mode & FMODE_WRITE) &&
+	       vma->vm_file->f_op->write_iter;
+}
+
+static void snapshot_put(struct nommu_snapshot *snap)
+{
+	if (snap && refcount_dec_and_test(&snap->ref))
+		kvfree(snap);
+}
+
+/* (the vma's snapshot, if it's a shared copy's: a driver's vma has its own) */
+static struct nommu_snapshot *vma_snapshot(struct vm_area_struct *vma)
+{
+	return vma_is_shared_copy(vma) ? vma->vm_private_data : NULL;
+}
+
+static void drop_snapshot(struct vm_area_struct *vma)
+{
+	snapshot_put(vma_snapshot(vma));
+	if (vma_is_shared_copy(vma))
+		vma->vm_private_data = NULL;
+}
+
+/*
+ * [run, end) of the copy written back, and its snapshot (send: the
+ * snapshot's byte at end) then the same
+ */
+static int write_back_run(struct vm_area_struct *vma, char *send,
+			  unsigned long run, unsigned long end)
+{
+	int ret = write_back_range(vma, run, end);
+
+	if (!ret)
+		memcpy(send - (end - run), (void *)run, end - run);
 	return ret;
 }
 
-/* (its snapshot dropped: whole again, its write-back all of it) */
-static void drop_snapshot(struct vm_area_struct *vma)
+static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end)
 {
-	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
-		kvfree(vma->vm_private_data);
-		vma->vm_private_data = NULL;
+	struct nommu_snapshot *snap = vma_snapshot(vma);
+	unsigned long p, run = 0;
+	int ret = 0, r;
+	char *s;
+
+	if (!snap)
+		return write_back_range(vma, start, end);
+	start = max(start, vma->vm_start);
+	end = min(end, vma->vm_end);
+	if (start >= end)
+		return 0;
+	s = snap->data + ((loff_t)vma->vm_pgoff << PAGE_SHIFT) - snap->pos +
+	    (start - vma->vm_start);
+	for (p = start; p < end; ) {
+		unsigned long n = min(end - p, PAGE_SIZE - offset_in_page(p));
+		char *m = (char *)p;
+		unsigned long i;
+
+		/* (a page as it was: the run before it ends) */
+		if (!memcmp(m, s, n)) {
+			if (run) {
+				r = write_back_run(vma, s, run, p);
+				ret = ret ?: r;
+				run = 0;
+			}
+			p += n;
+			s += n;
+			continue;
+		}
+		for (i = 0; i < n; i++) {
+			if (m[i] != s[i]) {
+				if (!run)
+					run = p + i;
+			} else if (run) {
+				r = write_back_run(vma, s + i, run, p + i);
+				ret = ret ?: r;
+				run = 0;
+			}
+		}
+		p += n;
+		s += n;
 	}
+	if (run) {
+		r = write_back_run(vma, s, run, end);
+		ret = ret ?: r;
+	}
+	return ret;
 }
 
 static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
@@ -1436,6 +1511,15 @@ unsigned long do_mmap(struct file *file,
 		ret = do_mmap_private(vma, region, len, capabilities);
 	if (ret < 0)
 		goto error_just_free;
+	/* (a shared copy: the file's bytes as read, nommu_write_back's) */
+	if (vma_needs_snapshot(vma)) {
+		vma->vm_private_data = snapshot_new(vma);
+		if (!vma->vm_private_data) {
+			free_page_series(region->vm_start, region->vm_top);
+			ret = -ENOMEM;
+			goto error_just_free;
+		}
+	}
 	add_nommu_region(region);
 
 	/* clear anonymous mappings that don't ask for uninitialized data */
@@ -1573,11 +1657,6 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	 * only usage of its region: anonymous memory, a file's copy) */
 	if (!vma_is_own_copy(vma))
 		return -ENOMEM;
-	/* (a fork's snapshot: what's changed written back, then whole) */
-	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
-		nommu_write_back(vma, vma->vm_start, vma->vm_end);
-		drop_snapshot(vma);
-	}
 
 	mm = vma->vm_mm;
 	if (mm->map_count >= sysctl_max_map_count)
@@ -1616,6 +1695,9 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		get_file(region->vm_file);
 		get_file(new->vm_file);
 	}
+	/* (and its snapshot, the file's bytes: both halves') */
+	if (vma_snapshot(new))
+		refcount_inc(&vma_snapshot(new)->ref);
 	if (new->vm_ops && new->vm_ops->open)
 		new->vm_ops->open(new);
 
@@ -1656,8 +1738,6 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 {
 	struct vm_region *region;
 
-	/* (written back already: munmap_vma_range) */
-	drop_snapshot(vma);
 	/* adjust the VMA's pointers, which may reposition it in the MM's tree
 	 * and list */
 	vma_unlink_file(vma);
@@ -1914,12 +1994,19 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		new->vm_region = region;
 		new->vm_start += delta;
 		new->vm_end += delta;
-		new->vm_private_data = NULL;
-		if (vma_is_shared_copy(vma) && (vma->vm_flags & VM_WRITE)) {
-			new->vm_private_data = kvmalloc(vma->vm_end - vma->vm_start, GFP_KERNEL);
-			if (new->vm_private_data)
-				memcpy(new->vm_private_data, (void *)vma->vm_start,
-				       vma->vm_end - vma->vm_start);
+		/*
+		 * (a shared copy's snapshot, the child's own: its parent's
+		 * copy as it is, so what the parent wrote and didn't write
+		 * back is the parent's to, the child's what it writes after)
+		 */
+		if (vma_snapshot(vma)) {
+			new->vm_private_data = NULL;
+			new->vm_private_data = snapshot_new(vma);
+			if (!new->vm_private_data) {
+				region->vm_top = region->vm_start;
+				delete_vma(mm, new);
+				break;
+			}
 		}
 		/*
 		 * (the forking thread's stack: below its stack pointer, dead
@@ -1979,15 +2066,22 @@ static int mremap_grow_in_place(struct mm_struct *mm, struct vm_area_struct *vma
 {
 	struct vm_region *region = vma->vm_region;
 	unsigned long old_end = vma->vm_end;
+	struct nommu_snapshot *snap = NULL;
 	VMA_ITERATOR(vmi, mm, vma->vm_start);
 	int ret;
 
 	if (!vma_is_own_copy(vma) || region->vm_end != old_end ||
 	    new_end > region->vm_top)
 		return -ENOMEM;
-	if (vma->vm_private_data && vma_is_shared_copy(vma)) {
+	/*
+	 * (a shared copy's snapshot, written back, then one as large: the
+	 * file's bytes read in past the old end)
+	 */
+	if (vma_snapshot(vma)) {
 		nommu_write_back(vma, vma->vm_start, vma->vm_end);
-		drop_snapshot(vma);
+		snap = kvmalloc(struct_size(snap, data, new_end - vma->vm_start), GFP_KERNEL);
+		if (!snap)
+			return -ENOMEM;
 	}
 	if (vma->vm_file)
 		ret = read_file_into(vma->vm_file, old_end, new_end - old_end,
@@ -1995,11 +2089,23 @@ static int mremap_grow_in_place(struct mm_struct *mm, struct vm_area_struct *vma
 				     (old_end - vma->vm_start));
 	else
 		ret = (clear_new_pages((void *)old_end, new_end - old_end), 0);
-	if (ret)
+	if (!ret) {
+		vma_iter_config(&vmi, vma->vm_start, new_end);
+		if (vma_iter_prealloc(&vmi, vma))
+			ret = -ENOMEM;
+	}
+	if (ret) {
+		kvfree(snap);
 		return ret;
-	vma_iter_config(&vmi, vma->vm_start, new_end);
-	if (vma_iter_prealloc(&vmi, vma))
-		return -ENOMEM;
+	}
+	if (snap) {
+		refcount_set(&snap->ref, 1);
+		snap->pos = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
+		snap->len = new_end - vma->vm_start;
+		memcpy(snap->data, (void *)vma->vm_start, snap->len);
+		drop_snapshot(vma);
+		vma->vm_private_data = snap;
+	}
 	vma_unlink_file(vma);
 	down_write(&nommu_region_sem);
 	region->vm_end = new_end;
