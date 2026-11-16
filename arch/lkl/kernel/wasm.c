@@ -31,3 +31,5 @@ EMPTY_RANGE(__start_ftrace_events, __stop_ftrace_events);
 EMPTY_RANGE(__start_ftrace_eval_maps, __stop_ftrace_eval_maps);
 EMPTY_RANGE(__start___trace_bprintk_fmt, __stop___trace_bprintk_fmt);
 EMPTY_RANGE(__start___tracepoint_str, __stop___tracepoint_str);
+/* (/sys/kernel/notes: none, its size 0) */
+EMPTY_RANGE(__start_notes, __stop_notes);
