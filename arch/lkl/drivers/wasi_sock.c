@@ -56,6 +56,8 @@
 
 WASI_IMPORT("wasi:sockets/instance-network", "instance-network")
 s32 __wasm_import_wasi_sockets_instance_network_instance_network(void);
+WASI_IMPORT("wasi:sockets/network", "[resource-drop]network")
+void __wasm_import_wasi_sockets_network_network_drop(s32);
 WASI_IMPORT("wasi:sockets/tcp-create-socket", "create-tcp-socket")
 void __wasm_import_wasi_sockets_tcp_create_socket_create_tcp_socket(s32, void *);
 TCP("[method]tcp-socket.start-bind")
@@ -177,7 +179,26 @@ static const struct proto_ops wasi_sock_stream_ops, wasi_sock_dgram_ops;
 static bool wasi_sock_on;
 static int wasi_sock_irq;
 static struct work_struct wasi_sock_work;
-static s32 network;			/* instance-network's */
+static s32 network;			/* instance-network's (0: not yet) */
+
+/*
+ * the host's network, got at its first use, not at boot: a boot done ahead
+ * of time (a blob's snapshot) holds no handle of the instance's
+ */
+static s32 network_get(void)
+{
+	if (!network)
+		network = __wasm_import_wasi_sockets_instance_network_instance_network();
+	return network;
+}
+
+/* (lkl_wasi_release's: no socket is open, the host's snapshot) */
+void wasi_sock_network_drop(void)
+{
+	if (network)
+		__wasm_import_wasi_sockets_network_network_drop(network);
+	network = 0;
+}
 static struct hsock *remote[SOCKETS];
 /*
  * the pollables the host's scheduler waits on (poll_watch): remote[i]'s at
@@ -382,7 +403,7 @@ static int hs_connect(struct hsock *hs, const struct sockaddr *addr, int len)
 
 	if (err)
 		return err;
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_connect(hs->sock, network,
+	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_connect(hs->sock, network_get(),
 		a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], &r);
 	if (r.is_err)
 		return -hs_errno(r.err);
@@ -420,7 +441,7 @@ static int hs_listen(struct hsock *hs, const struct sockaddr *addr, int len,
 
 	if (err)
 		return err;
-	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_bind(hs->sock, network,
+	__wasm_import_wasi_sockets_tcp_method_tcp_socket_start_bind(hs->sock, network_get(),
 		a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], &r);
 	if (r.is_err)
 		return -hs_errno(r.err);
@@ -1264,7 +1285,6 @@ static int __init wasi_sock_init(void)
 	/* (no wait for pollables in the host: AF_INET stays the kernel's, loopback only) */
 	if (!lkl_ops->poll_watch)
 		return 0;
-	network = __wasm_import_wasi_sockets_instance_network_instance_network();
 	INIT_WORK(&wasi_sock_work, wasi_sock_ready);
 	wasi_sock_irq = lkl_get_free_irq("wasi_sock");
 	if (wasi_sock_irq < 0)

@@ -182,6 +182,25 @@ static const struct hv_ops wasi_hv_ops = {
 	.notifier_add = wasi_notifier_add,
 };
 
+void lkl_wasi_release(void)
+{
+	int k;
+
+	for (k = 0; k < WATCHES; k++) {
+		if (pollable[k])
+			__wasm_import_wasi_io_poll_pollable_drop(pollable[k]);
+		pollable[k] = 0;
+		watched[k] = 0;
+	}
+	if (wasi_stdin)
+		__wasm_import_wasi_io_streams_input_stream_drop(wasi_stdin);
+	if (wasi_stdout)
+		__wasm_import_wasi_io_streams_output_stream_drop(wasi_stdout);
+	wasi_stdin = wasi_stdout = 0;
+	if (IS_ENABLED(CONFIG_LKL_WASI_SOCK))
+		wasi_sock_network_drop();
+}
+
 static irqreturn_t wasi_console_interrupt(int irq, void *dev_id)
 {
 	hvc_kick();

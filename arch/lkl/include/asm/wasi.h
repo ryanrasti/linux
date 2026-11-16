@@ -73,6 +73,15 @@ void __wasm_import_wasi_io_poll_pollable_drop(s32);
 WASI_IMPORT("wasi:io/error", "[resource-drop]error")
 void __wasm_import_wasi_io_error_error_drop(s32);
 
+/*
+ * the drivers' WASI handles dropped, each got again at its next use (the
+ * console's streams and pollables, the sockets' network): a boot done
+ * ahead of time, the host's snapshot, holds none of the instance's.
+ * lkl_wasi_release is the host's call (the kernel's thread then idle).
+ */
+void lkl_wasi_release(void);
+void wasi_sock_network_drop(void);
+
 /* a stream's failure, its error resource dropped */
 static inline void wasi_stream_failed(const struct wasi_stream_error *e)
 {
