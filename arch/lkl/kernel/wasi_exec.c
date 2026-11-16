@@ -59,8 +59,9 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 	if (!args)
 		return -ENOMEM;
 	/*
-	 * The old memory stays until the task's next syscall: the task runs
-	 * on its stack until this one returns (the kernel's code on it too).
+	 * The old memory stays until the task's next syscall (or its exit,
+	 * exit_thread, if it dies first): the task runs on its stack until
+	 * this one returns.
 	 */
 	old_mm = current->mm;
 	if (old_mm)

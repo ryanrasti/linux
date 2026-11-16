@@ -2,6 +2,7 @@
 #include <linux/slab.h>
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <asm/host_ops.h>
 #include <asm/cpu.h>
 #include <asm/sched.h>
@@ -69,6 +70,22 @@ void arch_free_thread_stack(struct task_struct *tsk)
 
 	kill_thread(ti);
 	kfree(ti);
+}
+
+/*
+ * A task's exit (do_exit's, after its mm's): an exec's old memory it had
+ * left, which its next syscall would have released (wasi_exec.c): a task
+ * killed at the exec's return, or by its failure past the point of no
+ * return, has none.
+ */
+void exit_thread(struct task_struct *tsk)
+{
+	struct thread_info *ti = task_thread_info(tsk);
+
+	if (ti->exec_old_mm) {
+		mmput(ti->exec_old_mm);
+		ti->exec_old_mm = NULL;
+	}
 }
 
 struct thread_info *_current_thread_info = &init_thread_union.thread_info;
