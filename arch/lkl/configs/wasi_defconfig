@@ -44,20 +44,15 @@ CONFIG_PARTITION_ADVANCED=y
 # CONFIG_SYSVIPC is not set
 # CONFIG_TMPFS is not set
 CONFIG_PROC_FS=y
-# CONFIG_SYSFS is not set
 CONFIG_POSIX_TIMERS=y
 CONFIG_EPOLL=y
-# CONFIG_SIGNALFD is not set
-# CONFIG_TIMERFD is not set
 CONFIG_EVENTFD=y
 CONFIG_MEMFD_CREATE=y
 CONFIG_FILE_LOCKING=y
 # CONFIG_DNOTIFY is not set
-# CONFIG_INOTIFY_USER is not set
 # CONFIG_FANOTIFY is not set
 # CONFIG_KALLSYMS is not set
 # CONFIG_BUG is not set
-# CONFIG_MULTIUSER is not set
 # CONFIG_CRYPTO is not set
 # CONFIG_MQ_IOSCHED_DEADLINE is not set
 # CONFIG_MQ_IOSCHED_KYBER is not set
@@ -75,3 +70,14 @@ CONFIG_OVERLAY_FS=y
 CONFIG_LKL_HOST_MEMCPY=y
 CONFIG_LKL_HOST_MEMSET=y
 CONFIG_LKL_HOST_MEMMOVE=y
+# What systemd needs as PID 1: sysfs, cgroups (v2), signalfd, timerfd,
+# inotify, users and capabilities, file handles (mount ids); its tmpfs
+# mounts are ramfs without an MMU (no shmem); no namespaces, keyrings, BPF
+# or seccomp
+CONFIG_SYSFS=y
+CONFIG_CGROUPS=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_INOTIFY_USER=y
+CONFIG_MULTIUSER=y
+CONFIG_FHANDLE=y
