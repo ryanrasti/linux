@@ -15,6 +15,19 @@ CONFIG_LKL_WASI_FS=y
 # CONFIG_IPV6 is not set
 # CONFIG_WIRELESS is not set
 # CONFIG_ETHTOOL_NETLINK is not set
+# What a blob never uses, its code and its boot's initcalls: socket
+# diagnostics (ss), busy polling, partition tables (the image is a whole
+# disk), /dev/mem, EROFS on a file (it's on its block device), the
+# debugging checks
+# CONFIG_INET_DIAG is not set
+# CONFIG_NET_RX_BUSY_POLL is not set
+CONFIG_PARTITION_ADVANCED=y
+# CONFIG_MSDOS_PARTITION is not set
+# CONFIG_EFI_PARTITION is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_EROFS_FS_BACKED_BY_FILE is not set
+# CONFIG_BLOCK_LEGACY_AUTOLOAD is not set
+# CONFIG_DEBUG_MISC is not set
 # CONFIG_PCI is not set
 # CONFIG_VT is not set
 # CONFIG_LEGACY_PTYS is not set
