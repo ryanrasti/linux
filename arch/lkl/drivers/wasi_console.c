@@ -188,6 +188,7 @@ void lkl_wasi_release(void)
 	if (wasi_stdout.__handle)
 		wasi_io_streams_output_stream_drop_own(wasi_stdout);
 	wasi_stdin.__handle = wasi_stdout.__handle = 0;
+	wasi_stdin_ended = false;
 	if (IS_ENABLED(CONFIG_LKL_WASI_SOCK))
 		wasi_sock_network_drop();
 }
