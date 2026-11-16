@@ -42,23 +42,6 @@
 #include <asm/mmu_context.h>
 #include "internal.h"
 
-/*
- * a process whose memory is a window of the module's (LKL on WASI, a blob's
- * program: arch/lkl/mm/window.c): its mappings made there, not by the page
- * allocator, and copied at fork
- */
-#ifdef CONFIG_LKL_WASI
-#include <asm/window.h>
-#include <asm/host_ops.h>
-#define mm_window(mm) ((mm)->context.win)
-#else
-#define mm_window(mm) NULL
-#define lkl_window_alloc(mm, len) NULL
-#define lkl_window_release(from, to) false
-#define lkl_in_window(addr) false
-#define lkl_window_exit(mm) do { } while (0)
-#endif
-
 void *high_memory;
 EXPORT_SYMBOL(high_memory);
 struct page *mem_map;
@@ -404,13 +387,36 @@ bool __weak arch_page_fresh(struct page *page)
 }
 
 /*
- * zero a new mapping's pages, just allocated: those not fresh
+ * A process whose memory is an arch's own, not the page allocator's (LKL
+ * on WASI: a window of the module's, arch/lkl/mm/window.c, which a fork
+ * copies whole): its mappings' memory is arch_nommu_alloc()'s, zeroed, and
+ * arch_nommu_release() takes it back; a file's own memory is never mapped
+ * into it (a shared mapping is a copy, written back).
+ */
+bool __weak arch_nommu_mm_memory(struct mm_struct *mm)
+{
+	return false;
+}
+
+void * __weak arch_nommu_alloc(struct mm_struct *mm, unsigned long len)
+{
+	return NULL;
+}
+
+/* whether [from, to) was the arch's memory: then released to it */
+bool __weak arch_nommu_release(unsigned long from, unsigned long to)
+{
+	return false;
+}
+
+/*
+ * zero a new mapping's pages of current's, just allocated: those not fresh
  * (arch_page_fresh) as clear_nonzero does, the fresh left untouched
  */
 static void clear_new_pages(void *addr, unsigned long len)
 {
-	/* (a window's: zeroed as it was allocated) */
-	if (lkl_in_window((unsigned long)addr))
+	/* (the arch's memory: zeroed as it was allocated) */
+	if (arch_nommu_mm_memory(current->mm))
 		return;
 	for (; len; addr += PAGE_SIZE, len -= min(len, PAGE_SIZE))
 		if (!arch_page_fresh(virt_to_page(addr)))
@@ -555,7 +561,7 @@ static void delete_nommu_region(struct vm_region *region)
  */
 static void free_page_series(unsigned long from, unsigned long to)
 {
-	if (lkl_window_release(from, to)) {
+	if (arch_nommu_release(from, to)) {
 		atomic_long_sub((to - from) >> PAGE_SHIFT, &mmap_pages_allocated);
 		return;
 	}
@@ -1006,8 +1012,8 @@ static int do_mmap_private(struct vm_area_struct *vma,
 	    !(vma->vm_flags & VM_MAPPED_COPY))
 		total = point;
 
-	if (mm_window(current->mm))
-		base = lkl_window_alloc(current->mm, total << PAGE_SHIFT);
+	if (arch_nommu_mm_memory(current->mm))
+		base = arch_nommu_alloc(current->mm, total << PAGE_SHIFT);
 	else
 		base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
 	if (!base)
@@ -1359,11 +1365,13 @@ unsigned long do_mmap(struct file *file,
 	len = PAGE_ALIGN(len);
 
 	/*
-	 * a process in a window: its mappings all in it (a fork copies the
-	 * window), so a shared file mapping is a copy written back (as where
-	 * the file can't be mapped directly), never the file's own memory
+	 * a process whose memory is the arch's: its mappings all in it (a
+	 * fork may copy it), so a shared file mapping is a copy written back
+	 * (as where the file can't be mapped directly), never the file's own
+	 * memory
 	 */
-	if (mm_window(current->mm) && file && (capabilities & NOMMU_MAP_DIRECT)) {
+	if (arch_nommu_mm_memory(current->mm) && file &&
+	    (capabilities & NOMMU_MAP_DIRECT)) {
 		if (!(capabilities & NOMMU_MAP_COPY))
 			return -ENODEV;
 		capabilities &= ~NOMMU_MAP_DIRECT;
@@ -1916,46 +1924,32 @@ void exit_mmap(struct mm_struct *mm)
 	}
 	__mt_destroy(&mm->mm_mt);
 	mmap_write_unlock(mm);
-	lkl_window_exit(mm);
+	/* (the arch's memory for them, once they're released) */
+	arch_exit_mmap(mm);
 }
 
-#ifdef CONFIG_LKL_WASI
 /*
  * A fork's child's mappings (mm, a copy of oldmm's struct, its own maple
- * tree empty): a process in a window gets a window of its own
- * (lkl_window_fork), and a copy of each of its parent's mappings there, at
- * the same user address (its kernel address offset by the bases'
- * difference), the same contents: memory of its own, as the parent's is
- * (anonymous memory, a file's private or shared copy). Else nothing, as
- * nommu has it (vfork's child shares its parent's memory).
+ * tree empty), for an arch whose processes' memory is its own and that
+ * gives the child a copy of it (arch_dup_mmap(), both mms' mmap_lock held):
+ * a copy of each of the parent's mappings, delta past it (its kernel
+ * address; the arch may offset the user's alike, arch_mm_user_addr), the
+ * same contents, copied by copy(): memory of its own, as the parent's is
+ * (anonymous memory, a file's private or shared copy). Left out: a
+ * MADV_DONTFORK mapping (its memory the arch's again), the forking
+ * thread's stack below sp, the break's mapping past the break.
  */
-int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm, long delta,
+		   unsigned long sp,
+		   void (*copy)(struct mm_struct *mm, void *to, const void *from,
+				unsigned long len))
 {
 	VMA_ITERATOR(vmi, oldmm, 0);
 	struct vm_area_struct *vma, *new;
 	struct vm_region *region, *old;
-	unsigned long sp = 0, from, to;
-	long delta;
-	int ret;
+	unsigned long from, to;
+	int ret = 0;
 
-	if (!mm_window(oldmm)) {
-		mm->context.win = NULL;
-		mm->context.base = 0;
-		return 0;
-	}
-	/*
-	 * (the parent's mappings, and its window's free ranges, as they are:
-	 * another of its threads may map or unmap meanwhile, as the copy
-	 * allocates; the child's not linked in yet, as dup_mmap's)
-	 */
-	mmap_write_lock(oldmm);
-	mmap_write_lock_nested(mm, SINGLE_DEPTH_NESTING);
-	ret = lkl_window_fork(mm, oldmm);
-	if (ret)
-		goto out;
-	delta = mm->context.base - oldmm->context.base;
-	if (lkl_ops->user_sp && current->mm == oldmm)
-		sp = lkl_ops->user_sp() + oldmm->context.base;
 	mm->start_brk += delta;
 	mm->brk += delta;
 	mm->context.end_brk += delta;
@@ -1969,7 +1963,7 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		old = vma->vm_region;
 		/* (MADV_DONTFORK: not the child's, its window's range free) */
 		if (vma->vm_flags & VM_DONTCOPY) {
-			lkl_window_release(old->vm_start + delta, old->vm_top + delta);
+			arch_nommu_release(old->vm_start + delta, old->vm_top + delta);
 			mm->total_vm -= vma_pages(vma);
 			continue;
 		}
@@ -2031,8 +2025,8 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (vma->vm_flags & VM_WIPEONFORK)
 			clear_nonzero((void *)new->vm_start, new->vm_end - new->vm_start);
 		else if (to > from)
-			lkl_window_copy(mm, (void *)region->vm_start + (from - old->vm_start),
-					(void *)from, to - from);
+			copy(mm, (void *)region->vm_start + (from - old->vm_start),
+			     (void *)from, to - from);
 
 		vma_iter_config(&nvmi, new->vm_start, new->vm_end);
 		if (vma_iter_prealloc(&nvmi, new)) {
@@ -2049,12 +2043,8 @@ int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		mm->map_count++;
 		ret = 0;
 	}
-out:
-	mmap_write_unlock(mm);
-	mmap_write_unlock(oldmm);
 	return ret;
 }
-#endif
 
 /*
  * grow a mapping in place, over what its region holds past its end (a

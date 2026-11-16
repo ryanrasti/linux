@@ -824,19 +824,21 @@ static inline void mm_free_pgd(struct mm_struct *mm)
 	pgd_free(mm, mm->pgd);
 }
 #else
-int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm);
-
 static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 {
+	int retval;
+
 	mmap_write_lock(oldmm);
 	dup_mm_exe_file(mm, oldmm);
+	/*
+	 * Not linked in yet - no deadlock potential. (An arch whose processes'
+	 * memory is its own may copy it: nommu_dup_mmap().)
+	 */
+	mmap_write_lock_nested(mm, SINGLE_DEPTH_NESTING);
+	retval = arch_dup_mmap(oldmm, mm);
+	mmap_write_unlock(mm);
 	mmap_write_unlock(oldmm);
-#ifdef CONFIG_LKL_WASI
-	/* (a process in a window: its mappings copied, LKL on WASI's fork) */
-	return nommu_dup_mmap(mm, oldmm);
-#else
-	return 0;
-#endif
+	return retval;
 }
 #define mm_alloc_pgd(mm)	(0)
 #define mm_free_pgd(mm)

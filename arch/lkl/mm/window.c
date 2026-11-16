@@ -25,6 +25,7 @@
 #include <asm/host_ops.h>
 #include <asm/window.h>
 #include <asm/unistd.h>
+#include <asm/mmu_context.h>
 
 struct extent {
 	struct list_head node;
@@ -305,7 +306,52 @@ int lkl_window_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 	return 0;
 }
 
-/* the mm's end (exit_mmap): its window back to the host */
+/*
+ * A fork's child's memory (dup_mmap's, both mms' mmap_lock held): a window
+ * of its own (lkl_window_fork) and a copy of each of its parent's mappings
+ * there (nommu_dup_mmap), at the same user addresses: their kernel ones
+ * offset by the bases' difference. Else (a process not in a window) none,
+ * as nommu has it (vfork's child shares its parent's memory).
+ */
+int arch_dup_mmap(struct mm_struct *oldmm, struct mm_struct *mm)
+{
+	unsigned long sp = 0;
+	int ret;
+
+	if (!oldmm->context.win)
+		return 0;
+	ret = lkl_window_fork(mm, oldmm);
+	if (ret)
+		return ret;
+	/* (the forking thread's stack pointer, a kernel address) */
+	if (lkl_ops->user_sp && current->mm == oldmm)
+		sp = lkl_ops->user_sp() + oldmm->context.base;
+	return nommu_dup_mmap(mm, oldmm, mm->context.base - oldmm->context.base,
+			      sp, lkl_window_copy);
+}
+
+/* a process in a window: its mappings' memory the window's (nommu's mmap) */
+bool arch_nommu_mm_memory(struct mm_struct *mm)
+{
+	return mm && mm->context.win;
+}
+
+void *arch_nommu_alloc(struct mm_struct *mm, unsigned long len)
+{
+	return lkl_window_alloc(mm, len);
+}
+
+bool arch_nommu_release(unsigned long from, unsigned long to)
+{
+	return lkl_window_release(from, to);
+}
+
+void arch_exit_mmap(struct mm_struct *mm)
+{
+	lkl_window_exit(mm);
+}
+
+/* the mm's end (exit_mmap's, its mappings released): its window back to the host */
 void lkl_window_exit(struct mm_struct *mm)
 {
 	struct lkl_window *w = mm->context.win;
