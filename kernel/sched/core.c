@@ -2189,7 +2189,7 @@ int task_state_match(struct task_struct *p, unsigned int state)
  */
 unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state)
 {
-	int running, queued, match;
+	int running, queued, match, yields = 0;
 	struct rq_flags rf;
 	unsigned long ncsw;
 	struct rq *rq;
@@ -2274,9 +2274,11 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 			 * LKL has one CPU, so a queued task can only run once
 			 * we give up the CPU: yield to it rather than sleep a
 			 * whole tick, which kthread_bind() etc. hit repeatedly
-			 * during boot.
+			 * during boot. A few times only: yield() doesn't run
+			 * a task of a lower class or priority than ours (an RT
+			 * caller's), which the sleep below lets run.
 			 */
-			if (IS_ENABLED(CONFIG_LKL)) {
+			if (IS_ENABLED(CONFIG_LKL) && yields++ < 8) {
 				yield();
 				continue;
 			}
