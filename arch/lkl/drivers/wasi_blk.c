@@ -85,9 +85,11 @@ static int __init wblk_init(void)
 	set_disk_ro(disk, 1);
 	ret = add_disk(disk);
 	if (ret)
-		goto out_tags;
+		goto out_disk;
 	return 0;
 
+out_disk:
+	put_disk(disk);
 out_tags:
 	blk_mq_free_tag_set(&wblk_set);
 out_unreg:
