@@ -733,6 +733,12 @@ static ssize_t wasifs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 				ret = wasi_err(e);
 				goto stop;
 			}
+			/* (none written, and no error: it won't write more) */
+			if (!w) {
+				ret = -EIO;
+				goto stop;
+			}
+			w = min_t(u64, w, n - off);
 			off += w;
 			iocb->ki_pos += w;
 			done += w;
