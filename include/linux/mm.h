@@ -3262,7 +3262,6 @@ bool arch_page_fresh(struct page *page);
 bool arch_nommu_mm_memory(struct mm_struct *mm);
 void *arch_nommu_alloc(struct mm_struct *mm, unsigned long len);
 bool arch_nommu_release(unsigned long from, unsigned long to);
-int nommu_sync_file_copies(struct file *file);
 int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm, long delta,
 		   unsigned long sp,
 		   void (*copy)(struct mm_struct *mm, void *to, const void *from,
