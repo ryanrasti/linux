@@ -151,7 +151,8 @@ static int nommu_vma_show(struct seq_file *m, struct vm_area_struct *vma)
 		   flags & VM_READ ? 'r' : '-',
 		   flags & VM_WRITE ? 'w' : '-',
 		   flags & VM_EXEC ? 'x' : '-',
-		   flags & VM_MAYSHARE ? flags & VM_SHARED ? 'S' : 's' : 'p',
+		   flags & VM_MAYSHARE ? flags & VM_SHARED ? 'S' : 's' :
+		   flags & VM_SHARED ? 's' : 'p',	/* (a shared copy: 's') */
 		   pgoff,
 		   MAJOR(dev), MINOR(dev), ino);
 

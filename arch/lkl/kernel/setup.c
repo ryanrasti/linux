@@ -4,6 +4,7 @@
 #include <linux/personality.h>
 #include <linux/reboot.h>
 #include <linux/fs.h>
+#include <linux/fdtable.h>
 #include <linux/start_kernel.h>
 #include <linux/syscalls.h>
 #include <linux/tick.h>
@@ -110,6 +111,8 @@ int __init lkl_start_kernel(const char *fmt, ...)
 	lkl_ops->sem_free(init_sem);
 	current_thread_info()->tid = lkl_ops->thread_self();
 	lkl_cpu_change_owner(current_thread_info()->tid);
+	/* init (PID 1) this thread's task: the first program's */
+	syscalls_init_thread();
 
 	lkl_cpu_put();
 	is_running = 1;
@@ -129,6 +132,14 @@ int lkl_is_running(void)
 
 void machine_halt(void)
 {
+	/*
+	 * A process's reboot (PID 1's at its shutdown: systemd's), where the
+	 * host runs the processes (a blob): the machine's end, PID 1's, status
+	 * 0, as its exit_group's (there's no restart: the host may start
+	 * another)
+	 */
+	if (lkl_ops->task_exit && current->mm)
+		lkl_ops->task_exit(1, 0);
 	lkl_cpu_shutdown();
 }
 
@@ -188,7 +199,12 @@ static int lkl_run_init(struct linux_binprm *bprm)
 
 	set_binfmt(&lkl_run_init_binfmt);
 
-	init_pid_ns.child_reaper = 0;
+	/*
+	 * init is the first program's process (syscalls_init_thread): its
+	 * break and stack, as an exec's (a Go program's runtime, which the
+	 * host doesn't exec, has its own stack)
+	 */
+	WARN_ON(IS_ERR_VALUE(lkl_process_mem()));
 
 	syscalls_init();
 
@@ -208,9 +224,9 @@ static int __init fs_setup(void)
 	// emit an error. The kernel's strncpy implementation attempts to read
 	// 8 bytes at once and, thus, triggers KASan violation for the 6-byte
 	// string.
-	fd = sys_open("/init\0\0", O_CREAT, 0700);
+	fd = do_sys_open(AT_FDCWD, "/init\0\0", O_CREAT, 0700);
 	WARN_ON(fd < 0);
-	sys_close(fd);
+	close_fd(fd);
 
 	register_binfmt(&lkl_run_init_binfmt);
 

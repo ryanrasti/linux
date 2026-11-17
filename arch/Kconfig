@@ -1086,6 +1086,16 @@ config HAVE_EXIT_THREAD
 	help
 	  An architecture implements exit_thread.
 
+config ARCH_INIT_EXIT_ENDS_SYSTEM
+	bool
+	depends on HAVE_EXIT_THREAD
+	help
+	  The system ends with its init, as a container's does (a library
+	  OS's first program): the exit of init's last thread is no panic,
+	  and the architecture's exit_thread() ends the system with init's
+	  exit status, before exit_notify() (which would wait for every other
+	  process of init's namespace).
+
 config ARCH_MMAP_RND_BITS_MIN
 	int
 

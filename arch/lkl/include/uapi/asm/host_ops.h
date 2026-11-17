@@ -141,6 +141,77 @@ enum lkl_prot {
  * @munmap - unmap previously mapped memory
  *
  * @pci_ops - pointer to PCI host operations
+ *
+ * @vm_thread_create - create the host thread of a task cloned from userspace
+ * with CLONE_VM (a thread of the caller's process), called on the parent's
+ * host thread inside the syscall. The thread runs f(arg), which returns once
+ * the kernel has first scheduled the task and made it the thread's host
+ * task, with the CPU released; the host then starts the thread at the
+ * function its libc left at stack (the clone's new stack pointer). Returns a
+ * thread handle, or 0 if it could not be created. Without it, clone from
+ * userspace fails with -ENOSYS.
+ * @window_exec - the memory of a process about to exec program index (a
+ * blob's: arch/lkl/mm/window.c), a window of the module's: its base (what
+ * its user addresses are offset by: 0, the program where it was linked),
+ * the range its mappings are made in (*lo to *hi, user addresses), and how
+ * far into it a process before wrote (*dirty: past it, zeros); or -errno
+ * (none free)
+ *
+ * @window_exec_room - whether window_exec would find a window, counting the
+ * one whose base is own (the exec's old memory's, to be released first;
+ * -1: none)
+ *
+ * @window_fork - a window for a fork's child of the process whose window's
+ * base is base, reaching need at least (a user address: what the parent's
+ * mappings reach), the program's data copied into it (its mappings the
+ * kernel's to copy): the new one's base, its end (*hi, a user address: the
+ * child's mappings' room), *dirty as window_exec's; or -errno
+ *
+ * @window_free - a process's window released, its mappings' memory used up
+ * to used (a user address: past it, still as the window was given)
+ *
+ * @fork_thread_create - the host thread of a fork's child (clone without
+ * CLONE_VM), on the parent's host thread in the syscall: f(arg) then the
+ * parent's user code resumed there (the host saved its frames as the
+ * syscall began), in memory whose base is base; the syscall returns 0 in it
+ *
+ * @user_sp - the calling thread's user stack pointer at its syscall (a
+ * fork's: below it, its stack's frames are dead, not copied)
+ *
+ * @exec_prog - exec of a program linked into the module (arch/lkl/kernel/
+ * wasi_exec.c): program index's start, with args (argc strings, then envc,
+ * each NUL-ended, len bytes in all), in place of the calling task's program
+ * once the syscall returns, on the stack whose top is stack (the new
+ * process's: its argv, envp and auxv go at the top)
+ * @task_exit - the calling host thread's task exited in a syscall (exit,
+ * exit_group, a fatal signal); the thread ends, without returning. If the
+ * task was the last of its process's threads, pid is the process's (its
+ * thread group's id) and status its wait status; else pid is 0. PID 1's
+ * end (its last thread's exit: exit_group, exit or a fatal signal) is
+ * called with pid 1 from the task's exit, its memory torn down and its
+ * files closed (exit_thread), and doesn't return: the host ends then.
+ * Without it, the thread waits forever (PID 1's end: a panic).
+ * @signal_handler - run a process's signal handler, a function of the
+ * program's, for sig: called at a syscall's return to the program, on the
+ * task's host thread (its own stack), with the CPU released. info: the
+ * siginfo_t for an SA_SIGINFO handler, which takes (sig, info, ucontext);
+ * NULL for a plain handler, which takes (sig). mask: the signal mask
+ * (sigset_t) that sigreturn restores once the handler returns, the
+ * ucontext's uc_sigmask, which the handler may change. restart: whether
+ * the syscall the signal interrupted runs again after the handler (its
+ * -ERESTART* result, SA_RESTART's); the host's return is whether it does,
+ * 0 ending it with -EINTR instead (a handler that moved the program on, as
+ * one changing a native ucontext's program counter: musl's cancellation).
+ * Without it, processes get no signals delivered.
+ *
+ * @poll_watch - WASI: the kernel's waits on wasi:io pollables of its own
+ * (arch/lkl/drivers: the sockets', the console's). Each time the host's
+ * scheduler waits, it waits on pollables[0..n) too, each a pollable's
+ * handle (0: none); one it finds ready it sets to 0, and then calls
+ * ready() on a thread of its own. The kernel owns the pollables. Lists the
+ * kernel's imports return are the module's cabi_realloc's, which the host
+ * gives mem_alloc's (freed with mem_free). Called at boot, once by each
+ * driver that waits so (its own pollables and ready).
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -201,6 +272,27 @@ struct lkl_host_operations {
 				enum lkl_prot prot);
 
 	struct lkl_dev_pci_ops *pci_ops;
+
+	lkl_thread_t (*vm_thread_create)(void (*f)(void *), void *arg,
+					 unsigned long stack);
+	void (*task_exit)(int pid, int status);
+	int (*signal_handler)(unsigned long handler, int sig, void *info,
+			      void *mask, int restart);
+
+	void (*poll_watch)(unsigned int *pollables, int n, void (*ready)(void));
+
+	int (*exec_prog)(unsigned int index, const char *args, unsigned long len,
+			 int argc, int envc, unsigned long stack);
+
+	long (*window_exec)(unsigned int index, unsigned long *lo,
+			    unsigned long *hi, unsigned long *dirty);
+	int (*window_exec_room)(long own);
+	long (*window_fork)(unsigned long base, unsigned long need,
+			    unsigned long *dirty, unsigned long *hi);
+	void (*window_free)(unsigned long base, unsigned long used);
+	lkl_thread_t (*fork_thread_create)(void (*f)(void *), void *arg,
+					   unsigned long base);
+	unsigned long (*user_sp)(void);
 };
 
 /**

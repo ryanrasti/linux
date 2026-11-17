@@ -14,7 +14,8 @@ config LKL
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
 	select HAVE_ARCH_KASAN
-	select TRACING
+	select HAVE_EXIT_THREAD
+	select TRACING if !LKL_WASM
 
 config LKL_FUZZING
 	bool "LLVM fuzzing instrumentation"
@@ -39,6 +40,60 @@ config LKL_LINE_COV
 config OUTPUT_FORMAT
 	string "Output format"
 	default $(shell,$(srctree)/arch/lkl/scripts/cc-objdump-file-format.sh)
+
+config LKL_WASI
+	bool "Linked into a WASI program"
+	depends on LKL_WASM && TTY
+	select HVC_DRIVER
+	select ARCH_INIT_EXIT_ENDS_SYSTEM
+	select NOMMU_LINUX_MAPPINGS if !MMU
+	select FUTEX_PRIVATE_MM if FUTEX
+	default n
+	help
+	  The kernel as a library OS, linked into a WASI 0.2 component with
+	  its libc. Its console is an hvc console (/dev/hvc0) on the
+	  program's WASI stdin and stdout (wasi:cli's streams).
+
+config LKL_WASI_SOCK
+	bool "Sockets on WASI 0.2's wasi:sockets"
+	depends on INET && LKL_WASI
+	default n
+	help
+	  The guest's AF_INET and AF_INET6 sockets: a loopback peer's local,
+	  inside the kernel; any other's on wasi:sockets, which the kernel
+	  calls itself. Listeners are offered to the host's network too. Its
+	  host layer waits on the kernel's pollables (the poll_watch host
+	  operation).
+
+config LKL_WASI_BLK
+	bool "A read-only block device over an image embedded in the program"
+	depends on BLOCK && LKL_WASI
+	default n
+	help
+	  The system image, embedded in the program as a data symbol
+	  (__wasi_image), served as /dev/wblk0 and mounted as the root.
+
+config LKL_WASI_FS
+	bool "WASI's preopened directories as filesystems (wasifs)"
+	depends on LKL_WASI
+	default n
+	help
+	  wasifs: a preopened directory of the WASI program, mounted by its
+	  name (mount -t wasifs /data /data), its files through
+	  wasi:filesystem's descriptors.
+
+config LKL_WASM
+	def_bool OUTPUT_FORMAT = "wasm"
+	select ARCH_HAS_SYSCALL_WRAPPER
+
+config ARCH_FORCE_MAX_ORDER
+	int
+	default 16 if LKL_WASM
+	default 10
+	help
+	  The page allocator's largest block, 2^order pages. Without an MMU
+	  each mapping of a process is one block, trimmed: on wasm (a large
+	  pool, backed as it's used) 256 MiB, for a database's buffer pool.
 
 config ARCH_DMA_ADDR_T_64BIT
 	def_bool 64BIT

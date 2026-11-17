@@ -2189,7 +2189,7 @@ int task_state_match(struct task_struct *p, unsigned int state)
  */
 unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state)
 {
-	int running, queued, match;
+	int running, queued, match, yields = 0;
 	struct rq_flags rf;
 	unsigned long ncsw;
 	struct rq *rq;
@@ -2269,6 +2269,19 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		 */
 		if (unlikely(queued)) {
 			ktime_t to = NSEC_PER_SEC / HZ;
+
+			/*
+			 * LKL has one CPU, so a queued task can only run once
+			 * we give up the CPU: yield to it rather than sleep a
+			 * whole tick, which kthread_bind() etc. hit repeatedly
+			 * during boot. A few times only: yield() doesn't run
+			 * a task of a lower class or priority than ours (an RT
+			 * caller's), which the sleep below lets run.
+			 */
+			if (IS_ENABLED(CONFIG_LKL) && yields++ < 8) {
+				yield();
+				continue;
+			}
 
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_hrtimeout(&to, HRTIMER_MODE_REL_HARD);
@@ -5365,6 +5378,24 @@ bool single_task_running(void)
 	return raw_rq()->nr_running == 1;
 }
 EXPORT_SYMBOL(single_task_running);
+
+/*
+ * The tasks runnable on this CPU, the current one among them, less @except
+ * if it's queued: nr_running less the fair server, a deadline entity
+ * counted there while it's queued but not a task. (LKL's host tasks let
+ * another task run when one is runnable.)
+ */
+unsigned int nr_running_tasks(struct task_struct *except)
+{
+	struct rq *rq = raw_rq();
+	unsigned int n = rq->nr_running;
+
+	if (!RB_EMPTY_NODE(&rq->fair_server.rb_node))
+		n--;
+	if (except && task_on_rq_queued(except))
+		n--;
+	return n;
+}
 
 unsigned long long nr_context_switches_cpu(int cpu)
 {

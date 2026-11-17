@@ -9,13 +9,46 @@
 #include <linux/task_work.h>
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
+#include <linux/completion.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/stat.h>
+#include <linux/mman.h>
+#include <linux/sizes.h>
+#include <linux/signal.h>
 #include <linux/platform_device.h>
+#include <linux/tick.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
 #include <asm/syscalls_32.h>
 #include <asm/cpu.h>
 #include <asm/sched.h>
+#include <asm/wasi_sock.h>
+#include <asm/window.h>
 
+#ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
+/* one type for every entry (asm/syscall_wrapper.h) */
+typedef long (*syscall_handler_t)(const long *args);
+
+static long __lkl_sys_ni_syscall(const long *args)
+{
+	return sys_ni_syscall();
+}
+
+/* indirect, so the table's aliases (asm/syscalls.h) expand before pasting */
+#define __LKL_SYM(sym) __lkl_##sym
+
+#undef __SYSCALL
+#define __SYSCALL(nr, sym) long __LKL_SYM(sym)(const long *args);
+#include <asm/unistd.h>
+#if __BITS_PER_LONG == 32
+#include <asm/unistd_32.h>
+#endif
+
+#undef __SYSCALL
+#define __SYSCALL(nr, sym)[nr] = __LKL_SYM(sym),
+#define __LKL_SYS_NI __lkl_sys_ni_syscall
+#else
 static asmlinkage long sys_virtio_mmio_device_add(long base, long size,
 						  unsigned int irq);
 
@@ -25,9 +58,11 @@ typedef long (*syscall_handler_t)(long arg1, ...);
 
 #undef __SYSCALL
 #define __SYSCALL(nr, sym)[nr] = sym,
+#define __LKL_SYS_NI sys_ni_syscall
+#endif
 
 void *syscall_table[__NR_syscalls] = {
-	[0 ... __NR_syscalls - 1] =  sys_ni_syscall,
+	[0 ... __NR_syscalls - 1] =  __LKL_SYS_NI,
 #include <asm/unistd.h>
 
 #if __BITS_PER_LONG == 32
@@ -37,14 +72,24 @@ void *syscall_table[__NR_syscalls] = {
 
 static long run_syscall(long no, long *params)
 {
-	long ret;
-	syscall_handler_t handler = (syscall_handler_t)syscall_table[no];
+	long ret, args[6];
+	syscall_handler_t handler;
 
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
+	handler = (syscall_handler_t)syscall_table[no];
+	/* AF_INET(6) sockets, local or wasi:sockets' (drivers/wasi_sock.c) */
+	if (no == __NR_socket)
+		params[0] = wasi_sock_family(params[0], params[1]);
+	/* (a process in a window: its mappings' addresses the kernel's) */
+	lkl_user_addrs(no, params, args);
 
-	ret = handler(params[0], params[1], params[2], params[3], params[4],
-		      params[5]);
+#ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
+	ret = handler(args);
+#else
+	ret = handler(args[0], args[1], args[2], args[3], args[4], args[5]);
+#endif
+	ret = lkl_user_result(no, ret);
 
 	task_work_run();
 
@@ -56,25 +101,41 @@ static long run_syscall(long no, long *params)
 		     CLONE_SIGHAND | SIGCHLD)
 
 static int host_task_id;
+/*
+ * The task host calls are made as when a host thread has none of its own,
+ * and the thread group of each host thread's: a kernel thread (kthreadd's
+ * child, not init's), its signals ignored, so exited host tasks are reaped.
+ */
 static struct task_struct *host0;
 
 static int new_host_task(struct task_struct **task, int new_tg_leader)
 {
 	pid_t pid;
-	unsigned long flags = CLONE_FLAGS;
 
 	switch_to_host_task(host0);
 
+	/*
+	 * A new thread group is a process of its own, as init is: a user
+	 * mode thread (a kernel thread, PF_KTHREAD, can't exec a program),
+	 * its files and fs a copy of host0's and its signals' actions the
+	 * defaults, so its children can be waited for.
+	 */
 	if (new_tg_leader)
-		flags &= ~CLONE_THREAD;
-
-	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
+		pid = user_mode_thread(host_task_stub, NULL, SIGCHLD);
+	else
+		pid = kernel_thread(host_task_stub, NULL, NULL, CLONE_FLAGS);
 	if (pid < 0)
 		return pid;
 
 	rcu_read_lock();
 	*task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+
+	if (new_tg_leader) {
+		spin_lock_irq(&(*task)->sighand->siglock);
+		flush_signal_handlers(*task, 1);
+		spin_unlock_irq(&(*task)->sighand->siglock);
+	}
 
 	host_task_id++;
 
@@ -102,6 +163,85 @@ static void del_host_task(void *arg)
 }
 
 static struct lkl_tls_key *task_key;
+
+/*
+ * Whether a syscall a signal interrupted runs again (an -ERESTART* ret;
+ * any other is its result): if not, it ends with -EINTR. ka: the handler
+ * about to run, or NULL.
+ */
+static bool syscall_restarts(long *ret, struct k_sigaction *ka)
+{
+	switch (*ret) {
+	case -ERESTARTNOHAND:
+	case -ERESTART_RESTARTBLOCK:
+		if (!ka)
+			return true;
+		break;
+	case -ERESTARTSYS:
+		if (!ka || ka->sa.sa_flags & SA_RESTART)
+			return true;
+		break;
+	case -ERESTARTNOINTR:
+		return true;
+	default:
+		return false;
+	}
+	*ret = -EINTR;
+	return false;
+}
+
+/*
+ * A syscall's return to the program, as an arch's (arch_do_signal_or_restart)
+ * but without a frame: a pending signal's handler, a function of the
+ * program's, is called by the host on the task's own stack, and when it
+ * returns, sigreturn's work is done here (the mask restored; then more
+ * signals, or the syscall again, unless the host says the handler moved
+ * the program on). A fatal signal exits the task in get_signal(), which
+ * doesn't return (__switch_to(): task_exit).
+ */
+static long syscall_exit_signals(long no, long *params, long ret)
+{
+	struct task_struct *task = current;
+	struct ksignal ksig;
+	siginfo_t info;
+	sigset_t mask;
+	bool restart, si;
+
+	for (;;) {
+		if (!signal_pending(task) || !get_signal(&ksig)) {
+			restart = syscall_restarts(&ret, NULL);
+			restore_saved_sigmask();
+			if (!restart)
+				return ret;
+		} else {
+			restart = syscall_restarts(&ret, &ksig.ka);
+			si = ksig.ka.sa.sa_flags & SA_SIGINFO;
+			if (si)
+				copy_siginfo_to_external(&info, &ksig.info);
+			mask = *sigmask_to_save();
+			signal_setup_done(0, &ksig, 0);
+
+			/* in the program */
+			lkl_cpu_put();
+			if (!lkl_ops->signal_handler((unsigned long)ksig.ka.sa.sa_handler,
+						     ksig.sig, si ? &info : NULL,
+						     &mask, restart) && restart) {
+				restart = false;
+				ret = -EINTR;
+			}
+			if (lkl_cpu_get() < 0)
+				return -EINTR;	/* (the kernel halted) */
+			switch_to_host_task(task);
+			/* sigreturn */
+			set_current_blocked(&mask);
+			if (!restart)
+				continue;
+		}
+		if (ret == -ERESTART_RESTARTBLOCK)
+			no = __NR_restart_syscall;
+		ret = run_syscall(no, params);
+	}
+}
 
 long lkl_syscall(long no, long *params)
 {
@@ -131,19 +271,147 @@ long lkl_syscall(long no, long *params)
 		return ret;
 	}
 
+	/* a process's (a kernel thread's signals are the kernel's own) */
+	if (!(task->flags & PF_KTHREAD) && lkl_ops->signal_handler)
+		ret = syscall_exit_signals(no, params, ret);
+
 out:
 	lkl_cpu_put();
 
 	return ret;
 }
 
+/*
+ * A thread of a host task's process (clone with CLONE_VM, on a stack of its
+ * own) runs on a new host thread. It waits there like any new thread until
+ * the kernel first schedules it, then becomes the thread's host task, leaves
+ * the kernel, and returns to the host, which starts it at the function its
+ * libc left on that stack.
+ */
+static void vm_thread_bootstrap(void *arg)
+{
+	struct thread_info *ti = arg;
+
+	lkl_ops->sem_down(ti->sched_sem);
+	/* copy_process() failed after copy_thread(); see kill_thread() */
+	if (ti->dead)
+		lkl_ops->thread_exit();
+
+	set_ti_thread_flag(ti, TIF_HOST_THREAD);
+	lkl_ops->tls_set(task_key, ti->task);
+	if (ti->prev_sched)
+		schedule_tail(ti->prev_sched);
+	lkl_cpu_put();
+}
+
+int copy_user_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args)
+{
+	struct thread_info *ti = task_thread_info(p);
+
+	if (!lkl_ops->vm_thread_create || !lkl_ops->tls_set ||
+	    !test_thread_flag(TIF_HOST_THREAD))
+		return -ENOSYS;
+	/*
+	 * a copy of a process's memory (fork): its window's copy (copy_mm's,
+	 * nommu_dup_mmap), a host thread that resumes the parent's user code
+	 * in it; else a thread on a stack given
+	 */
+	if (!(args->flags & CLONE_VM)) {
+		if (!lkl_ops->fork_thread_create || !p->mm || !p->mm->context.win)
+			return -EINVAL;
+		clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+		clear_ti_thread_flag(ti, TIF_SCHED_JB);
+		ti->tid = lkl_ops->fork_thread_create(vm_thread_bootstrap, ti,
+						      p->mm->context.base);
+		return ti->tid ? 0 : -ENOMEM;
+	}
+	if (!args->stack)
+		return -EINVAL;
+
+	/* a plain thread, which kill_thread() can end, until it first runs */
+	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+	clear_ti_thread_flag(ti, TIF_SCHED_JB);
+	ti->tid = lkl_ops->vm_thread_create(vm_thread_bootstrap, ti, args->stack);
+
+	return ti->tid ? 0 : -ENOMEM;
+}
+
 static struct task_struct *idle_host_task;
 
-/* called from idle, don't failed, don't block */
-void wakeup_idle_host_task(void)
+/*
+ * Whether a task other than current (and the idle host task, which only
+ * stands for host tasks being in user mode) is runnable: then a host task
+ * leaving the kernel lets it run (lkl_cpu_put). Counting a queued idle host
+ * task made a host task that kept making syscalls switch to it and back at
+ * every one. The fair server, a deadline entity counted in nr_running while
+ * it's queued, isn't a task either: counting it made the idle host task
+ * switch to the idle task and back until its runtime ran out, a busy loop
+ * where the tick no longer charges an idle kernel's time.
+ */
+bool others_runnable(void)
 {
-	if (!need_resched() && idle_host_task)
+	return nr_running_tasks(current != idle_host_task ?
+				idle_host_task : NULL) > 1;
+}
+
+/*
+ * called from idle, don't failed, don't block; returns false if there is no
+ * idle host task yet
+ */
+bool wakeup_idle_host_task(void)
+{
+	if (!idle_host_task)
+		return false;
+	if (!need_resched())
 		wake_up_process(idle_host_task);
+	return true;
+}
+
+/*
+ * The kernel is idle while the CPU is free and the idle host task current:
+ * the idle task's loop switched to it and ended, and so did its tick's
+ * idle (NO_HZ_IDLE), so it's the idle host task's. Its tick stops until the
+ * next timer, as the idle loop's would, else an idle kernel wakes its host
+ * HZ times a second. PF_IDLE meanwhile, so an interrupt's irq_enter brings
+ * jiffies up to date, as it does for the idle task.
+ */
+static bool host_idle;
+
+/* the CPU released with the idle host task current: the kernel idle */
+void idle_host_task_idle(void)
+{
+	unsigned long flags;
+
+	if (!idle_host_task || current != idle_host_task || irqs_disabled())
+		return;
+	if (!host_idle) {
+		host_idle = true;
+		current->flags |= PF_IDLE;
+		tick_nohz_idle_enter();
+	}
+	local_irq_save(flags);
+	tick_nohz_idle_stop_tick();
+	local_irq_restore(flags);
+}
+
+/* an interrupt's end, idle: its timers in the next tick (tick_irq_exit's) */
+void idle_host_task_irq_exit(void)
+{
+	if (host_idle && !need_resched()) {
+		tick_nohz_irq_exit();
+		tick_nohz_idle_stop_tick();
+	}
+}
+
+/* the CPU taken from the idle kernel: by a host thread, or to schedule */
+void idle_host_task_busy(void)
+{
+	if (!host_idle)
+		return;
+	host_idle = false;
+	current->flags &= ~PF_IDLE;
+	tick_nohz_idle_exit();
 }
 
 static int idle_host_task_loop(void *unused)
@@ -165,20 +433,37 @@ static int idle_host_task_loop(void *unused)
 	}
 }
 
-int syscalls_init(void)
+static DECLARE_COMPLETION(host0_made);
+static int host0_ret;
+
+/*
+ * host0: a kernel thread that becomes a host task (its host thread ends,
+ * as init's does in lkl_run_init), the idle host task a thread of its group
+ */
+static int host0_init(void *unused)
 {
-	snprintf(current->comm, sizeof(current->comm), "host0");
+	/* its files its own (host tasks' descriptors), not the kernel threads' */
+	host0_ret = ksys_unshare(CLONE_FILES);
+	if (!host0_ret &&
+	    kernel_thread(idle_host_task_loop, NULL, NULL, CLONE_FLAGS) < 0)
+		host0_ret = -ENOMEM;
 	set_thread_flag(TIF_HOST_THREAD);
 	host0 = current;
+	complete(&host0_made);
+	/* asleep until a host thread takes it (switch_to_host_task) */
+	thread_sched_jb();
+	lkl_ops->thread_exit();
+	return 0;
+}
 
-	// Reap zombie host tasks spawned as new thread group leaders via
-	// new_thread_group_leader syscall (otherwise the dead task resources
-	// such as `struct task_struct` won't be reclaimed by kernel).
-	// TODO: currently LKL doesn't support thread signal handling in
-	// user-space, thus, it's safe to ignore this signal here. However,
-	// if user-space signal handling is implemented in future we might want
-	// to remove the line of code below to let user-space handle SIGCHLD.
-	kernel_sigaction(SIGCHLD, SIG_IGN);
+/*
+ * Called by init (PID 1) in its exec of /init, which then stays the task
+ * of the thread that started the kernel (syscalls_init_thread): the first
+ * program's.
+ */
+int syscalls_init(void)
+{
+	struct task_struct *t;
 
 	if (lkl_ops->tls_alloc) {
 		task_key = lkl_ops->tls_alloc(del_host_task);
@@ -186,13 +471,24 @@ int syscalls_init(void)
 			return -1;
 	}
 
-	if (kernel_thread(idle_host_task_loop, NULL, NULL, CLONE_FLAGS) < 0) {
-		if (lkl_ops->tls_free)
-			lkl_ops->tls_free(task_key);
-		return -1;
+	t = kthread_run(host0_init, NULL, "host0");
+	if (!IS_ERR(t)) {
+		wait_for_completion(&host0_made);
+		if (!host0_ret) {
+			set_thread_flag(TIF_HOST_THREAD);
+			return 0;
+		}
 	}
+	if (lkl_ops->tls_free)
+		lkl_ops->tls_free(task_key);
+	return -1;
+}
 
-	return 0;
+/* the thread that started the kernel: init its host task */
+void syscalls_init_thread(void)
+{
+	if (lkl_ops->tls_set)
+		lkl_ops->tls_set(task_key, current);
 }
 
 void syscalls_cleanup(void)
@@ -257,11 +553,73 @@ exit_device_put:
 }
 
 
+/*
+ * A process's memory past its mappings: its break, a mapping of its own
+ * (the program's data is the module's, not the process's), which brk grows
+ * over and shrinks back from; and its main thread's stack, a mapping the
+ * host runs the program on, its argv, envp and auxv at the top as Linux
+ * lays them out (so musl's pthread_getattr_np finds the stack by mremap's
+ * probe, as natively). Their pages are backed as they're written (do_mmap
+ * zeroes only what isn't zero). Returns the stack's top, or an error.
+ */
+#define LKL_BRK_SIZE (1 << 20)
+
+unsigned long lkl_process_mem(void)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long addr, stack;
+
+	addr = vm_mmap(NULL, 0, LKL_BRK_SIZE, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, 0);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+	mm->start_brk = mm->brk = addr;
+	mm->context.end_brk = addr + LKL_BRK_SIZE;
+
+	/* (RLIMIT_STACK's, 8 MiB by default, within reason) */
+	stack = PAGE_ALIGN(clamp_t(unsigned long, rlimit(RLIMIT_STACK),
+				   SZ_128K, SZ_64M));
+	addr = vm_mmap(NULL, 0, stack, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, 0);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+	mm->start_stack = addr + stack;
+	return addr + stack;
+}
+
+/*
+ * A process's memory: an mm of its own (one made from host0, a kernel
+ * thread, has none until here), so its mappings are its own (nommu's mmap)
+ * and freed with it, and a break. exec replaces it, as a native process's.
+ */
+static unsigned long new_process_mm(void)
+{
+	struct task_struct *tsk = current;
+	struct mm_struct *mm, *active_mm;
+
+	if (tsk->mm)
+		return -EEXIST;
+	mm = mm_alloc();
+	if (!mm)
+		return -ENOMEM;
+	task_lock(tsk);
+	active_mm = tsk->active_mm;
+	tsk->active_mm = mm;
+	tsk->mm = mm;
+	task_unlock(tsk);
+	if (active_mm)
+		mmdrop_lazy_tlb(active_mm);
+	return lkl_process_mem();
+}
+
+/*
+ * The task is made in lkl_syscall routine: here its memory. Returns its
+ * stack's top (lkl_process_mem), or an error.
+ */
 SYSCALL_DEFINE0(new_thread_group_leader)
 {
-	// No-op here -- actual handling is done in lkl_syscall routine.
 	if (current->tgid == current->pid)
-		return 0;
+		return new_process_mm();
 	else
-		return -1;
+		return -EINVAL;
 }

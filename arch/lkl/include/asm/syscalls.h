@@ -2,14 +2,19 @@
 #define _ASM_LKL_SYSCALLS_H
 
 int syscalls_init(void);
+void syscalls_init_thread(void);
 void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
-void wakeup_idle_host_task(void);
+bool wakeup_idle_host_task(void);
+bool others_runnable(void);
+void idle_host_task_idle(void);
+void idle_host_task_irq_exit(void);
+void idle_host_task_busy(void);
 long lkl_sys_halt(void);
+unsigned long lkl_process_mem(void);
 
 #define sys_mmap sys_mmap_pgoff
 #define sys_mmap2 sys_mmap_pgoff
-#define sys_clone sys_ni_syscall
 #define sys_vfork sys_ni_syscall
 #define sys_rt_sigreturn sys_ni_syscall
 

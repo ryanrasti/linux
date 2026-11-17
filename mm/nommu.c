@@ -361,6 +361,73 @@ int vm_map_pages_zero(struct vm_area_struct *vma, struct page **pages,
 EXPORT_SYMBOL(vm_map_pages_zero);
 
 /*
+ * zero [addr, addr + len), page by page, writing only the pages that aren't
+ * zero already: memory the host never wrote stays untouched (lazily backed:
+ * a wasm memory's pages are resident only once written)
+ */
+static void clear_nonzero(void *addr, unsigned long len)
+{
+	while (len) {
+		unsigned long n = min(len, PAGE_SIZE - offset_in_page(addr));
+
+		if (memchr_inv(addr, 0, n))
+			memset(addr, 0, n);
+		addr += n;
+		len -= n;
+	}
+}
+
+/*
+ * whether a page the page allocator just gave is still as the host gave it:
+ * zeros never written (an arch with a lazily backed pool may know)
+ */
+bool __weak arch_page_fresh(struct page *page)
+{
+	return false;
+}
+
+/*
+ * A process whose memory is an arch's own, not the page allocator's (LKL
+ * on WASI: a window of the module's, arch/lkl/mm/window.c, which a fork
+ * copies whole): its mappings' memory is arch_nommu_alloc()'s, zeroed, and
+ * arch_nommu_release() takes it back; a file's own memory is never mapped
+ * into it (a shared mapping is a copy, written back).
+ */
+bool __weak arch_nommu_mm_memory(struct mm_struct *mm)
+{
+	return false;
+}
+
+void * __weak arch_nommu_alloc(struct mm_struct *mm, unsigned long len)
+{
+	return NULL;
+}
+
+/* whether [from, to) was the arch's memory: then released to it */
+bool __weak arch_nommu_release(unsigned long from, unsigned long to)
+{
+	return false;
+}
+
+/*
+ * zero a new mapping's pages of current's, just allocated: those not fresh
+ * (arch_page_fresh) as clear_nonzero does, the fresh left untouched
+ */
+static void clear_new_pages(void *addr, unsigned long len)
+{
+	if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+		memset(addr, 0, len);
+		return;
+	}
+	/* (the arch's memory: zeroed as it was allocated) */
+	if (arch_nommu_mm_memory(current->mm))
+		return;
+	for (; len; addr += PAGE_SIZE, len -= min(len, PAGE_SIZE))
+		if (!arch_page_fresh(virt_to_page(addr)))
+			clear_nonzero(addr, min(len, PAGE_SIZE));
+}
+
+/*
  *  sys_brk() for the most part doesn't need the global kernel
  *  lock, except when an application is doing something nasty
  *  like trying to un-brk an area that has already been mapped
@@ -370,6 +437,7 @@ EXPORT_SYMBOL(vm_map_pages_zero);
 SYSCALL_DEFINE1(brk, unsigned long, brk)
 {
 	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
 
 	if (brk < mm->start_brk || brk > mm->context.end_brk)
 		return mm->brk;
@@ -385,11 +453,29 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		return brk;
 	}
 
+	if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+		/*
+		 * Ok, looks good - let it rip.
+		 */
+		flush_icache_user_range(mm->brk, brk);
+		return mm->brk = brk;
+	}
+
 	/*
-	 * Ok, looks good - let it rip.
+	 * Growing: over the break's own mapping, as far as it's still mapped
+	 * (munmap or mremap may have cut it), zeroed as a native break's new
+	 * memory is (a shrink left what was there).
 	 */
-	flush_icache_user_range(mm->brk, brk);
-	return mm->brk = brk;
+	if (mmap_write_lock_killable(mm))
+		return mm->brk;
+	vma = vma_lookup(mm, mm->start_brk);
+	if (vma && brk <= vma->vm_end && mm->brk >= vma->vm_start) {
+		clear_nonzero((void *)mm->brk, brk - mm->brk);
+		flush_icache_user_range(mm->brk, brk);
+		mm->brk = brk;
+	}
+	mmap_write_unlock(mm);
+	return mm->brk;
 }
 
 /*
@@ -487,6 +573,10 @@ static void delete_nommu_region(struct vm_region *region)
  */
 static void free_page_series(unsigned long from, unsigned long to)
 {
+	if (arch_nommu_release(from, to)) {
+		atomic_long_sub((to - from) >> PAGE_SHIFT, &mmap_pages_allocated);
+		return;
+	}
 	for (; from < to; from += PAGE_SIZE) {
 		struct page *page = virt_to_page((void *)from);
 
@@ -549,10 +639,9 @@ static void setup_vma_to_mm(struct vm_area_struct *vma, struct mm_struct *mm)
 	}
 }
 
-static void cleanup_vma_from_mm(struct vm_area_struct *vma)
+/* remove the VMA from its file's mapping (setup_vma_to_mm adds it again) */
+static void vma_unlink_file(struct vm_area_struct *vma)
 {
-	vma->vm_mm->map_count--;
-	/* remove the VMA from the mapping */
 	if (vma->vm_file) {
 		struct address_space *mapping;
 		mapping = vma->vm_file->f_mapping;
@@ -563,6 +652,12 @@ static void cleanup_vma_from_mm(struct vm_area_struct *vma)
 		flush_dcache_mmap_unlock(mapping);
 		i_mmap_unlock_write(mapping);
 	}
+}
+
+static void cleanup_vma_from_mm(struct vm_area_struct *vma)
+{
+	vma->vm_mm->map_count--;
+	vma_unlink_file(vma);
 }
 
 /*
@@ -587,8 +682,11 @@ static int delete_vma_from_mm(struct vm_area_struct *vma)
 /*
  * destroy a VMA record
  */
+static void drop_snapshot(struct vm_area_struct *vma);
+
 static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
 {
+	drop_snapshot(vma);
 	vma_close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
@@ -648,29 +746,6 @@ struct vm_area_struct *expand_stack(struct mm_struct *mm, unsigned long addr)
 {
 	mmap_read_unlock(mm);
 	return NULL;
-}
-
-/*
- * look up the first VMA exactly that exactly matches addr
- * - should be called with mm->mmap_lock at least held readlocked
- */
-static struct vm_area_struct *find_vma_exact(struct mm_struct *mm,
-					     unsigned long addr,
-					     unsigned long len)
-{
-	struct vm_area_struct *vma;
-	unsigned long end = addr + len;
-	VMA_ITERATOR(vmi, mm, addr);
-
-	vma = vma_iter_load(&vmi);
-	if (!vma)
-		return NULL;
-	if (vma->vm_start != addr)
-		return NULL;
-	if (vma->vm_end != end)
-		return NULL;
-
-	return vma;
 }
 
 /*
@@ -761,20 +836,37 @@ static int validate_mmap_request(struct file *file,
 			    (file->f_mode & FMODE_WRITE))
 				return -EACCES;
 
-			if (!(capabilities & NOMMU_MAP_DIRECT))
-				return -ENODEV;
+			if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+				/*
+				 * a file that can't be mapped directly is
+				 * mapped as a copy, written back to it
+				 * (nommu_write_back)
+				 */
+				if (!(capabilities & (NOMMU_MAP_DIRECT | NOMMU_MAP_COPY)))
+					return -ENODEV;
+			} else {
+				if (!(capabilities & NOMMU_MAP_DIRECT))
+					return -ENODEV;
 
-			/* we mustn't privatise shared mappings */
-			capabilities &= ~NOMMU_MAP_COPY;
+				/* we mustn't privatise shared mappings */
+				capabilities &= ~NOMMU_MAP_COPY;
+			}
 		} else {
 			/* we're going to read the file into private memory we
 			 * allocate */
 			if (!(capabilities & NOMMU_MAP_COPY))
 				return -ENODEV;
 
+			/*
+			 * a private mapping is always a copy of its own, never
+			 * the backing device's memory: so it can be split,
+			 * moved and dropped as anonymous memory is
+			 */
+			if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS))
+				capabilities &= ~NOMMU_MAP_DIRECT;
 			/* we don't permit a private writable mapping to be
 			 * shared with the backing device */
-			if (prot & PROT_WRITE)
+			else if (prot & PROT_WRITE)
 				capabilities &= ~NOMMU_MAP_DIRECT;
 		}
 
@@ -784,7 +876,8 @@ static int validate_mmap_request(struct file *file,
 			    ((prot & PROT_EXEC)  && !(capabilities & NOMMU_MAP_EXEC))
 			    ) {
 				capabilities &= ~NOMMU_MAP_DIRECT;
-				if (flags & MAP_SHARED) {
+				if ((flags & MAP_SHARED) &&
+				    !(capabilities & NOMMU_MAP_COPY)) {
 					pr_warn("MAP_SHARED not completely supported on !MMU\n");
 					return -EINVAL;
 				}
@@ -847,17 +940,24 @@ static unsigned long determine_vm_flags(struct file *file,
 	if (!file) {
 		/*
 		 * MAP_ANONYMOUS. MAP_SHARED is mapped to MAP_PRIVATE, because
-		 * there is no fork().
+		 * there is no fork(); but VM_SHARED with Linux's mappings, so
+		 * MADV_DONTNEED keeps it.
 		 */
 		vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+		if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) && (flags & MAP_SHARED))
+			vm_flags |= VM_SHARED;
 	} else if (flags & MAP_PRIVATE) {
-		/* MAP_PRIVATE file mapping */
+		/*
+		 * MAP_PRIVATE file mapping (with Linux's mappings, a copy:
+		 * validate_mmap_request)
+		 */
 		if (capabilities & NOMMU_MAP_DIRECT)
 			vm_flags |= (capabilities & NOMMU_VMFLAGS);
 		else
 			vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
-		if (!(prot & PROT_WRITE) && !current->ptrace)
+		if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) &&
+		    !(prot & PROT_WRITE) && !current->ptrace)
 			/*
 			 * R/O private file mapping which cannot be used to
 			 * modify memory, especially also not via active ptrace
@@ -867,10 +967,16 @@ static unsigned long determine_vm_flags(struct file *file,
 			 * ramfs/tmpfs/shmfs and romfs/cramf.
 			 */
 			vm_flags |= VM_MAYOVERLAY;
-	} else {
-		/* MAP_SHARED file mapping: NOMMU_MAP_DIRECT is set. */
+	} else if (capabilities & NOMMU_MAP_DIRECT) {
+		/* MAP_SHARED file mapping, of the file's own memory */
 		vm_flags |= VM_SHARED | VM_MAYSHARE |
 			    (capabilities & NOMMU_VMFLAGS);
+	} else {
+		/*
+		 * MAP_SHARED file mapping, a copy written back to the file
+		 * (nommu_write_back): shared with no other mapping
+		 */
+		vm_flags |= VM_SHARED | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 	}
 
 	return vm_flags;
@@ -942,11 +1048,19 @@ static int do_mmap_private(struct vm_area_struct *vma,
 	total = 1 << order;
 	point = len >> PAGE_SHIFT;
 
-	/* we don't want to allocate a power-of-2 sized page set */
-	if (sysctl_nr_trim_pages && total - point >= sysctl_nr_trim_pages)
+	/*
+	 * we don't want to allocate a power-of-2 sized page set; but a
+	 * mapping mremap moved (VM_MAPPED_COPY already) keeps it, to grow
+	 * into in place
+	 */
+	if (sysctl_nr_trim_pages && total - point >= sysctl_nr_trim_pages &&
+	    !(vma->vm_flags & VM_MAPPED_COPY))
 		total = point;
 
-	base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
+	if (arch_nommu_mm_memory(current->mm))
+		base = arch_nommu_alloc(current->mm, total << PAGE_SHIFT);
+	else
+		base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
 	if (!base)
 		goto enomem;
 
@@ -997,6 +1111,269 @@ enomem:
 }
 
 /*
+ * whether a mapping is memory of its own, the only one of its region: it can
+ * be split, cut, grown and moved as anonymous memory is (an anonymous or
+ * private file mapping, or a shared file mapping's copy)
+ */
+static bool vma_is_own_copy(struct vm_area_struct *vma)
+{
+	return (vma->vm_flags & VM_MAPPED_COPY) && vma->vm_region->vm_usage == 1;
+}
+
+/* a shared file mapping that's a copy: written back to the file */
+static bool vma_is_shared_copy(struct vm_area_struct *vma)
+{
+	return IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) && vma->vm_file &&
+	       (vma->vm_flags & VM_SHARED) &&
+	       (vma->vm_flags & VM_MAPPED_COPY);
+}
+
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+/*
+ * [addr, addr + len) of a file mapping: the file's bytes at pos, zeros past
+ * its end
+ */
+static int read_file_into(struct file *file, unsigned long addr,
+			  unsigned long len, loff_t pos)
+{
+	ssize_t ret = kernel_read(file, (void *)addr, len, &pos);
+
+	if (ret < 0)
+		return ret;
+	if (ret < len)
+		memset((void *)addr + ret, 0, len - ret);
+	return 0;
+}
+
+#endif
+
+/*
+ * A shared file mapping that's a copy (its file has no memory to map
+ * directly), written back: what of [start, end) is within the file, at the
+ * mapping's offset, by its file (an O_APPEND one's too: where it was
+ * mapped). At msync, munmap, mremap, and exit or exec (exit_mmap); the
+ * file's readers see the mapping's writes then. Only once the mapping was
+ * writable; only within the file (it isn't grown).
+ */
+static int write_back_range(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end)
+{
+	struct file *file = vma->vm_file;
+	loff_t pos, size;
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	struct kvec kv;
+	ssize_t ret = 0;
+
+	if (!vma_is_shared_copy(vma) || !(vma->vm_flags & VM_WRITE) ||
+	    !(file->f_mode & FMODE_WRITE) || !file->f_op->write_iter)
+		return 0;
+	start = max(start, vma->vm_start);
+	end = min(end, vma->vm_end);
+	pos = ((loff_t)vma->vm_pgoff << PAGE_SHIFT) + (start - vma->vm_start);
+	size = i_size_read(file_inode(file));
+	if (start >= end || pos >= size)
+		return 0;
+	end = start + min_t(loff_t, end - start, size - pos);
+	file_start_write(file);
+	while (start < end) {
+		kv.iov_base = (void *)start;
+		kv.iov_len = end - start;
+		iov_iter_kvec(&iter, ITER_SOURCE, &kv, 1, kv.iov_len);
+		init_sync_kiocb(&kiocb, file);
+		kiocb.ki_flags &= ~IOCB_APPEND;
+		kiocb.ki_pos = pos;
+		ret = file->f_op->write_iter(&kiocb, &iter);
+		if (ret <= 0)
+			break;
+		start += ret;
+		pos += ret;
+	}
+	file_end_write(file);
+	return ret < 0 ? ret : 0;
+}
+
+/*
+ * A shared file mapping's copy, in a file opened for writing, has a
+ * snapshot (vm_private_data): the bytes of the file it last knew, as read
+ * when it was mapped (a fork's child's: its parent's copy as it was, the
+ * parent's to write back) and as written back since. Only the bytes the
+ * mapping changed since are written back, as natively only the stores to
+ * the one page cache reach the file: not what a write(2) wrote meanwhile
+ * (this process's, another's), nor past the file's end, an append's, which
+ * the copy holds as zeros. Its pages are the file's (the snapshot's byte
+ * at a file position), so a split or cut mapping shares it.
+ */
+struct nommu_snapshot {
+	refcount_t ref;
+	loff_t pos;		/* the file position of data[0] */
+	unsigned long len;
+	char data[];
+};
+
+/* a snapshot of [vma's start, its end) as the copy holds it now, or NULL */
+static struct nommu_snapshot *snapshot_new(struct vm_area_struct *vma)
+{
+	unsigned long len = vma->vm_end - vma->vm_start;
+	struct nommu_snapshot *snap = kvmalloc(struct_size(snap, data, len), GFP_KERNEL);
+
+	if (!snap)
+		return NULL;
+	refcount_set(&snap->ref, 1);
+	snap->pos = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
+	snap->len = len;
+	memcpy(snap->data, (void *)vma->vm_start, len);
+	return snap;
+}
+
+/* whether a mapping needs one: a shared copy that may be written back */
+static bool vma_needs_snapshot(struct vm_area_struct *vma)
+{
+	return vma_is_shared_copy(vma) && (vma->vm_file->f_mode & FMODE_WRITE) &&
+	       vma->vm_file->f_op->write_iter;
+}
+
+static void snapshot_put(struct nommu_snapshot *snap)
+{
+	if (snap && refcount_dec_and_test(&snap->ref))
+		kvfree(snap);
+}
+
+/* (the vma's snapshot, if it's a shared copy's: a driver's vma has its own) */
+static struct nommu_snapshot *vma_snapshot(struct vm_area_struct *vma)
+{
+	return vma_is_shared_copy(vma) ? vma->vm_private_data : NULL;
+}
+
+static void drop_snapshot(struct vm_area_struct *vma)
+{
+	snapshot_put(vma_snapshot(vma));
+	if (vma_is_shared_copy(vma))
+		vma->vm_private_data = NULL;
+}
+
+/*
+ * [run, end) of the copy written back, and its snapshot (send: the
+ * snapshot's byte at end) then the same
+ */
+static int write_back_run(struct vm_area_struct *vma, char *send,
+			  unsigned long run, unsigned long end)
+{
+	int ret = write_back_range(vma, run, end);
+
+	if (!ret)
+		memcpy(send - (end - run), (void *)run, end - run);
+	return ret;
+}
+
+static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end)
+{
+	struct nommu_snapshot *snap = vma_snapshot(vma);
+	unsigned long p, run = 0;
+	int ret = 0, r;
+	char *s;
+
+	if (!snap)
+		return write_back_range(vma, start, end);
+	start = max(start, vma->vm_start);
+	end = min(end, vma->vm_end);
+	if (start >= end)
+		return 0;
+	s = snap->data + ((loff_t)vma->vm_pgoff << PAGE_SHIFT) - snap->pos +
+	    (start - vma->vm_start);
+	for (p = start; p < end; ) {
+		unsigned long n = min(end - p, PAGE_SIZE - offset_in_page(p));
+		char *m = (char *)p;
+		unsigned long i;
+
+		/* (a page as it was: the run before it ends) */
+		if (!memcmp(m, s, n)) {
+			if (run) {
+				r = write_back_run(vma, s, run, p);
+				ret = ret ?: r;
+				run = 0;
+			}
+			p += n;
+			s += n;
+			continue;
+		}
+		for (i = 0; i < n; i++) {
+			if (m[i] != s[i]) {
+				if (!run)
+					run = p + i;
+			} else if (run) {
+				r = write_back_run(vma, s + i, run, p + i);
+				ret = ret ?: r;
+				run = 0;
+			}
+		}
+		p += n;
+		s += n;
+	}
+	if (run) {
+		r = write_back_run(vma, s, run, end);
+		ret = ret ?: r;
+	}
+	return ret;
+}
+
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
+				      unsigned long start, unsigned long end);
+
+/*
+ * MAP_FIXED: only over memory of the process's own already there (as
+ * InnoDB commits the buffer pool it reserved): it is the new mapping then,
+ * split off (vma_cut), zeroed or the file's bytes read in, with the new
+ * protection. A shared file mapping can't be made so, nor one anywhere
+ * else (no MMU to place it); the rest is checked as for a mapping made
+ * anywhere (a file that can be mapped: no pipe, socket or /proc file, which
+ * a read here, under the mmap_lock, could block on for good).
+ */
+static unsigned long do_mmap_fixed(struct file *file, unsigned long addr,
+				   unsigned long len, unsigned long prot,
+				   unsigned long flags, unsigned long pgoff)
+{
+	struct vm_area_struct *vma;
+	unsigned long capabilities;
+	int ret;
+
+	len = PAGE_ALIGN(len);
+	if (offset_in_page(addr) || !len || addr + len < addr)
+		return -EINVAL;
+	if (file && (flags & MAP_TYPE) != MAP_PRIVATE)
+		return -EINVAL;
+	ret = validate_mmap_request(file, addr, len, prot, flags & ~MAP_FIXED,
+				    pgoff, &capabilities);
+	if (ret < 0)
+		return ret;
+	if (!(capabilities & NOMMU_MAP_COPY))
+		return -ENODEV;
+	vma = vma_lookup(current->mm, addr);
+	if (!vma || addr + len > vma->vm_end || !vma_is_own_copy(vma) ||
+	    vma_is_shared_copy(vma))
+		return -EINVAL;
+	vma = vma_cut(vma, addr, addr + len);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+	if (file) {
+		ret = read_file_into(file, addr, len, (loff_t)pgoff << PAGE_SHIFT);
+		if (ret)
+			return ret;
+	} else {
+		clear_nonzero((void *)addr, len);
+	}
+	/* (a new mapping's: the protection given, no fork flags) */
+	vm_flags_reset(vma, (vma->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC |
+					       VM_WIPEONFORK | VM_DONTCOPY)) |
+			    calc_vm_prot_bits(prot, 0));
+	return addr;
+}
+
+#endif
+
+/*
  * handle mapping creation for uClinux
  */
 unsigned long do_mmap(struct file *file,
@@ -1018,6 +1395,18 @@ unsigned long do_mmap(struct file *file,
 
 	*populate = 0;
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+	/* MAP_SHARED_VALIDATE: no flag past the legacy ones (MAP_SYNC: no DAX) */
+	if ((flags & MAP_TYPE) == MAP_SHARED_VALIDATE) {
+		if (flags & ~LEGACY_MAP_MASK)
+			return -EOPNOTSUPP;
+		flags = (flags & ~MAP_TYPE) | MAP_SHARED;
+	}
+
+	if (flags & MAP_FIXED)
+		return do_mmap_fixed(file, addr, len, prot, flags, pgoff);
+#endif
+
 	/* decide whether we should attempt the mapping, and if so what sort of
 	 * mapping */
 	ret = validate_mmap_request(file, addr, len, prot, flags, pgoff,
@@ -1028,6 +1417,19 @@ unsigned long do_mmap(struct file *file,
 	/* we ignore the address hint */
 	addr = 0;
 	len = PAGE_ALIGN(len);
+
+	/*
+	 * a process whose memory is the arch's: its mappings all in it (a
+	 * fork may copy it), so a shared file mapping is a copy written back
+	 * (as where the file can't be mapped directly), never the file's own
+	 * memory
+	 */
+	if (arch_nommu_mm_memory(current->mm) && file &&
+	    (capabilities & NOMMU_MAP_DIRECT)) {
+		if (!(capabilities & NOMMU_MAP_COPY))
+			return -ENODEV;
+		capabilities &= ~NOMMU_MAP_DIRECT;
+	}
 
 	/* we've determined that we can make the mapping, now translate what we
 	 * now know into VMA flags */
@@ -1150,6 +1552,11 @@ unsigned long do_mmap(struct file *file,
 					goto error_just_free;
 
 				capabilities &= ~NOMMU_MAP_DIRECT;
+				/* (a shared mapping: a copy, written back) */
+				if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+					vm_flags_clear(vma, VM_MAYSHARE);
+					region->vm_flags = vma->vm_flags;
+				}
 			} else {
 				vma->vm_start = region->vm_start = addr;
 				vma->vm_end = region->vm_end = addr + len;
@@ -1162,20 +1569,29 @@ unsigned long do_mmap(struct file *file,
 	/* set up the mapping
 	 * - the region is filled in if NOMMU_MAP_DIRECT is still set
 	 */
-	if (file && vma->vm_flags & VM_SHARED)
+	if (file && vma->vm_flags & VM_MAYSHARE)
 		ret = do_mmap_shared_file(vma);
 	else
 		ret = do_mmap_private(vma, region, len, capabilities);
 	if (ret < 0)
 		goto error_just_free;
+	/* (a shared copy: the file's bytes as read, nommu_write_back's) */
+	if (vma_needs_snapshot(vma)) {
+		vma->vm_private_data = snapshot_new(vma);
+		if (!vma->vm_private_data) {
+			free_page_series(region->vm_start, region->vm_top);
+			ret = -ENOMEM;
+			goto error_just_free;
+		}
+	}
 	add_nommu_region(region);
 
 	/* clear anonymous mappings that don't ask for uninitialized data */
 	if (!vma->vm_file &&
 	    (!IS_ENABLED(CONFIG_MMAP_ALLOW_UNINITIALIZED) ||
 	     !(flags & MAP_UNINITIALIZED)))
-		memset((void *)region->vm_start, 0,
-		       region->vm_end - region->vm_start);
+		clear_new_pages((void *)region->vm_start,
+				region->vm_end - region->vm_start);
 
 	/* okay... we have a mapping; now we have to register it */
 	result = vma->vm_start;
@@ -1301,9 +1717,11 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	unsigned long npages;
 	struct mm_struct *mm;
 
-	/* we're only permitted to split anonymous regions (these should have
-	 * only a single usage on the region) */
-	if (vma->vm_file)
+	/* we're only permitted to split memory of the mapping's own (the
+	 * only usage of its region: anonymous memory, with Linux's mappings
+	 * a file's copy too) */
+	if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) ? !vma_is_own_copy(vma) :
+	    !!vma->vm_file)
 		return -ENOMEM;
 
 	mm = vma->vm_mm;
@@ -1338,9 +1756,18 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		goto err_vmi_preallocate;
 	}
 
+	/* (a file's copy: the new mapping and region each hold the file) */
+	if (region->vm_file) {
+		get_file(region->vm_file);
+		get_file(new->vm_file);
+	}
+	/* (and its snapshot, the file's bytes: both halves') */
+	if (vma_snapshot(new))
+		refcount_inc(&vma_snapshot(new)->ref);
 	if (new->vm_ops && new->vm_ops->open)
 		new->vm_ops->open(new);
 
+	vma_unlink_file(vma);
 	down_write(&nommu_region_sem);
 	delete_nommu_region(vma->vm_region);
 	if (new_below) {
@@ -1379,15 +1806,18 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 
 	/* adjust the VMA's pointers, which may reposition it in the MM's tree
 	 * and list */
+	vma_unlink_file(vma);
 	if (from > vma->vm_start) {
 		if (vma_iter_clear_gfp(vmi, from, vma->vm_end, GFP_KERNEL))
-			return -ENOMEM;
+			goto enomem;
 		vma->vm_end = from;
 	} else {
 		if (vma_iter_clear_gfp(vmi, vma->vm_start, to, GFP_KERNEL))
-			return -ENOMEM;
+			goto enomem;
 		vma->vm_start = to;
+		vma->vm_pgoff += (to - from) >> PAGE_SHIFT;
 	}
+	setup_vma_to_mm(vma, vma->vm_mm);
 
 	/* cut the backing region down to size */
 	region = vma->vm_region;
@@ -1400,14 +1830,119 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 		region->vm_top = region->vm_end = from;
 	} else {
 		region->vm_start = to;
+		region->vm_pgoff = vma->vm_pgoff;
 	}
 	add_nommu_region(region);
 	up_write(&nommu_region_sem);
 
 	free_page_series(from, to);
 	return 0;
+
+enomem:
+	setup_vma_to_mm(vma, vma->vm_mm);
+	return -ENOMEM;
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+/*
+ * release [start, end) of a mapping: all of it, or a part of memory of its
+ * own (vma_is_own_copy); a shared copy's part written back first
+ */
+static int munmap_vma_range(struct mm_struct *mm, struct vm_area_struct *vma,
+			    unsigned long start, unsigned long end)
+{
+	VMA_ITERATOR(vmi, mm, start);
+	int ret;
+
+	nommu_write_back(vma, start, end);
+	if (start == vma->vm_start && end == vma->vm_end) {
+		vma_iter_set(&vmi, vma->vm_start);
+		if (delete_vma_from_mm(vma))
+			return -ENOMEM;
+		delete_vma(mm, vma);
+		return 0;
+	}
+	/* a file's own memory (a shared mapping of it) can't be cut */
+	if (!vma_is_own_copy(vma))
+		return -EINVAL;
+	vma_iter_set(&vmi, vma->vm_start);
+	if (vma_find(&vmi, vma->vm_end) != vma)
+		return -EINVAL;
+	if (start != vma->vm_start && end != vma->vm_end) {
+		ret = split_vma(&vmi, vma, start, 1);
+		if (ret < 0)
+			return ret;
+		/* (the iterator at the part split off: walked again) */
+		vma_iter_set(&vmi, vma->vm_start);
+	}
+	return vmi_shrink_vma(&vmi, vma, start, end);
+}
+
+/*
+ * a change to [start, end) of a mapping only (its protection, its fork
+ * flags): memory of its own (vma_is_own_copy) split there, as Linux's
+ * would be, the part in the range returned; a file's own memory can't be
+ * split, and is the whole mapping's, returned whole. Or an ERR_PTR.
+ */
+static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
+				      unsigned long start, unsigned long end)
+{
+	VMA_ITERATOR(vmi, vma->vm_mm, vma->vm_start);
+	int ret;
+
+	if (!vma_is_own_copy(vma))
+		return vma;
+	if (start > vma->vm_start) {
+		/* (the part below split off: vma is [start, its end) then) */
+		ret = split_vma(&vmi, vma, start, 1);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+	if (end < vma->vm_end) {
+		vma_iter_set(&vmi, vma->vm_start);
+		ret = split_vma(&vmi, vma, end, 0);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+	return vma;
+}
+
+/*
+ * release the mappings in [start, start + len), as Linux's munmap: what
+ * isn't mapped is no matter, a mapping partly in it cut (but not a file's
+ * own memory: a shared mapping of it, which NOMMU conditions can only
+ * release whole)
+ */
+int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list_head *uf)
+{
+	struct vma_iterator vmi;
+	struct vm_area_struct *vma;
+	unsigned long end;
+	int ret;
+
+	if (offset_in_page(start) || start > TASK_SIZE || len > TASK_SIZE - start)
+		return -EINVAL;
+	len = PAGE_ALIGN(len);
+	if (len == 0)
+		return -EINVAL;
+
+	end = start + len;
+	/* (checked first: none unmapped if one can't be) */
+	vma_iter_init(&vmi, mm, start);
+	for_each_vma_range(vmi, vma, end)
+		if ((start > vma->vm_start || end < vma->vm_end) &&
+		    !vma_is_own_copy(vma))
+			return -EINVAL;
+	while ((vma = find_vma_intersection(mm, start, end))) {
+		ret = munmap_vma_range(mm, vma, max(start, vma->vm_start),
+				       min(end, vma->vm_end));
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+#else
 /*
  * release a mapping
  * - under NOMMU conditions the chunk to be unmapped must be backed by a single
@@ -1475,6 +2010,8 @@ erase_whole_vma:
 	return ret;
 }
 
+#endif
+
 int vm_munmap(unsigned long addr, size_t len)
 {
 	struct mm_struct *mm = current->mm;
@@ -1511,12 +2048,305 @@ void exit_mmap(struct mm_struct *mm)
 	 */
 	mmap_write_lock(mm);
 	for_each_vma(vmi, vma) {
+		nommu_write_back(vma, vma->vm_start, vma->vm_end);
 		cleanup_vma_from_mm(vma);
 		delete_vma(mm, vma);
 		cond_resched();
 	}
 	__mt_destroy(&mm->mm_mt);
 	mmap_write_unlock(mm);
+	/* (the arch's memory for them, once they're released) */
+	arch_exit_mmap(mm);
+}
+
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+/*
+ * A fork's child's mappings (mm, a copy of oldmm's struct, its own maple
+ * tree empty), for an arch whose processes' memory is its own and that
+ * gives the child a copy of it (arch_dup_mmap(), both mms' mmap_lock held):
+ * a copy of each of the parent's mappings, delta past it (its kernel
+ * address; the arch may offset the user's alike, arch_mm_user_addr), the
+ * same contents, copied by copy(): memory of its own, as the parent's is
+ * (anonymous memory, a file's private or shared copy). Left out: a
+ * MADV_DONTFORK mapping (its memory the arch's again), the forking
+ * thread's stack below sp, the break's mapping past the break.
+ */
+int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm, long delta,
+		   unsigned long sp,
+		   void (*copy)(struct mm_struct *mm, void *to, const void *from,
+				unsigned long len))
+{
+	VMA_ITERATOR(vmi, oldmm, 0);
+	struct vm_area_struct *vma, *new;
+	struct vm_region *region, *old;
+	unsigned long from, to;
+	int ret = 0;
+
+	mm->start_brk += delta;
+	mm->brk += delta;
+	mm->context.end_brk += delta;
+	mm->start_stack += delta;
+	mm->total_vm = oldmm->total_vm;
+	mm->map_count = 0;
+
+	for_each_vma(vmi, vma) {
+		VMA_ITERATOR(nvmi, mm, 0);
+
+		old = vma->vm_region;
+		/* (MADV_DONTFORK: not the child's, its window's range free) */
+		if (vma->vm_flags & VM_DONTCOPY) {
+			arch_nommu_release(old->vm_start + delta, old->vm_top + delta);
+			mm->total_vm -= vma_pages(vma);
+			continue;
+		}
+		ret = -ENOMEM;
+		region = kmem_cache_alloc(vm_region_jar, GFP_KERNEL);
+		if (!region)
+			break;
+		new = vm_area_dup(vma);
+		if (!new) {
+			kmem_cache_free(vm_region_jar, region);
+			break;
+		}
+		*region = *old;
+		region->vm_usage = 1;
+		region->vm_start += delta;
+		region->vm_end += delta;
+		region->vm_top += delta;
+		if (region->vm_file)
+			get_file(region->vm_file);
+		if (new->vm_file)
+			get_file(new->vm_file);
+		new->vm_region = region;
+		new->vm_start += delta;
+		new->vm_end += delta;
+		/*
+		 * (a shared copy's snapshot, the child's own: its parent's
+		 * copy as it is, so what the parent wrote and didn't write
+		 * back is the parent's to, the child's what it writes after)
+		 */
+		if (vma_snapshot(vma)) {
+			new->vm_private_data = NULL;
+			new->vm_private_data = snapshot_new(vma);
+			if (!new->vm_private_data) {
+				region->vm_top = region->vm_start;
+				delete_vma(mm, new);
+				break;
+			}
+		}
+		/*
+		 * (the forking thread's stack: below its stack pointer, dead
+		 * frames, left out; memory never written, which still costs the
+		 * host a fault to read)
+		 */
+		from = old->vm_start;
+		to = old->vm_end;
+		if (sp > old->vm_start && sp < old->vm_end)
+			from = sp & PAGE_MASK;
+		/*
+		 * (the break's mapping: past the break, not the program's,
+		 * zeroed as brk grows over it again; mostly never written,
+		 * which a fault would back just to read)
+		 */
+		if (oldmm->start_brk >= old->vm_start && oldmm->start_brk < old->vm_end)
+			to = min(to, PAGE_ALIGN(oldmm->brk));
+		/*
+		 * (MADV_WIPEONFORK: zeros in the child, as a new mapping's;
+		 * its window maybe not zeros there)
+		 */
+		if (vma->vm_flags & VM_WIPEONFORK)
+			clear_nonzero((void *)new->vm_start, new->vm_end - new->vm_start);
+		else if (to > from)
+			copy(mm, (void *)region->vm_start + (from - old->vm_start),
+			     (void *)from, to - from);
+
+		vma_iter_config(&nvmi, new->vm_start, new->vm_end);
+		if (vma_iter_prealloc(&nvmi, new)) {
+			/* (not in the tree: the window goes whole with the mm) */
+			region->vm_top = region->vm_start;
+			delete_vma(mm, new);
+			break;
+		}
+		down_write(&nommu_region_sem);
+		add_nommu_region(region);
+		up_write(&nommu_region_sem);
+		setup_vma_to_mm(new, mm);
+		vma_iter_store(&nvmi, new);
+		mm->map_count++;
+		ret = 0;
+	}
+	return ret;
+}
+
+/*
+ * grow a mapping in place, over what its region holds past its end (a
+ * power-of-2 allocation's rest: one mremap moved keeps it), zeroed or the
+ * file's bytes read in
+ */
+static int mremap_grow_in_place(struct mm_struct *mm, struct vm_area_struct *vma,
+				unsigned long new_end)
+{
+	struct vm_region *region = vma->vm_region;
+	unsigned long old_end = vma->vm_end;
+	struct nommu_snapshot *snap = NULL;
+	VMA_ITERATOR(vmi, mm, vma->vm_start);
+	int ret;
+
+	if (!vma_is_own_copy(vma) || region->vm_end != old_end ||
+	    new_end > region->vm_top)
+		return -ENOMEM;
+	/*
+	 * (a shared copy's snapshot, written back, then one as large: the
+	 * file's bytes read in past the old end)
+	 */
+	if (vma_snapshot(vma)) {
+		nommu_write_back(vma, vma->vm_start, vma->vm_end);
+		snap = kvmalloc(struct_size(snap, data, new_end - vma->vm_start), GFP_KERNEL);
+		if (!snap)
+			return -ENOMEM;
+	}
+	if (vma->vm_file)
+		ret = read_file_into(vma->vm_file, old_end, new_end - old_end,
+				     ((loff_t)vma->vm_pgoff << PAGE_SHIFT) +
+				     (old_end - vma->vm_start));
+	else
+		ret = (clear_new_pages((void *)old_end, new_end - old_end), 0);
+	if (!ret) {
+		vma_iter_config(&vmi, vma->vm_start, new_end);
+		if (vma_iter_prealloc(&vmi, vma))
+			ret = -ENOMEM;
+	}
+	if (ret) {
+		kvfree(snap);
+		return ret;
+	}
+	if (snap) {
+		refcount_set(&snap->ref, 1);
+		snap->pos = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
+		snap->len = new_end - vma->vm_start;
+		memcpy(snap->data, (void *)vma->vm_start, snap->len);
+		drop_snapshot(vma);
+		vma->vm_private_data = snap;
+	}
+	vma_unlink_file(vma);
+	down_write(&nommu_region_sem);
+	region->vm_end = new_end;
+	up_write(&nommu_region_sem);
+	vma->vm_end = new_end;
+	vma_iter_store(&vmi, vma);
+	setup_vma_to_mm(vma, mm);
+	mm->total_vm += (new_end - old_end) >> PAGE_SHIFT;
+	return 0;
+}
+
+/*
+ * resize a mapping, as Linux's mremap: shrunk, what's past its new end
+ * unmapped; grown in place (mremap_grow_in_place), or else moved
+ * (MREMAP_MAYMOVE): a new mapping (anonymous memory, the file's copy, or a
+ * shared mapping of the file again), the old one's contents copied into it
+ * (a shared mapping's are the file's: a copy's written back first), the old
+ * one unmapped. MREMAP_FIXED is not supported under NOMMU conditions.
+ */
+static unsigned long do_mremap(unsigned long addr,
+			unsigned long old_len, unsigned long new_len,
+			unsigned long flags, unsigned long new_addr)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	unsigned long populate, prot, map_flags, ret;
+	struct file *file;
+	int err;
+
+	/* insanity checks first */
+	old_len = PAGE_ALIGN(old_len);
+	new_len = PAGE_ALIGN(new_len);
+	if (flags & ~(MREMAP_FIXED | MREMAP_MAYMOVE))
+		return -EINVAL;
+	if (old_len == 0 || new_len == 0)
+		return (unsigned long) -EINVAL;
+
+	if (offset_in_page(addr))
+		return -EINVAL;
+
+	if (flags & MREMAP_FIXED && new_addr != addr)
+		return (unsigned long) -EINVAL;
+
+	vma = vma_lookup(mm, addr);
+	if (!vma || old_len > vma->vm_end - addr)
+		return (unsigned long) -EFAULT;
+
+	if (new_len == old_len)
+		return addr;
+	if (new_len < old_len) {
+		ret = do_munmap(mm, addr + new_len, old_len - new_len, NULL);
+		return ret ? ret : addr;
+	}
+
+	if (addr + old_len == vma->vm_end &&
+	    !mremap_grow_in_place(mm, vma, addr + new_len))
+		return addr;
+	if (!(flags & MREMAP_MAYMOVE))
+		return (unsigned long) -ENOMEM;
+	/* (a file's own memory can't be cut: the old range unmapped whole) */
+	if ((addr != vma->vm_start || addr + old_len != vma->vm_end) &&
+	    !vma_is_own_copy(vma))
+		return (unsigned long) -EINVAL;
+
+	file = vma->vm_file;
+	prot = (vma->vm_flags & VM_READ ? PROT_READ : 0) |
+	       (vma->vm_flags & VM_WRITE ? PROT_WRITE : 0) |
+	       (vma->vm_flags & VM_EXEC ? PROT_EXEC : 0);
+	map_flags = vma->vm_flags & VM_SHARED ? MAP_SHARED : MAP_PRIVATE;
+	if (!file)
+		map_flags |= MAP_ANONYMOUS;
+	nommu_write_back(vma, addr, addr + old_len);
+	/* (VM_MAPPED_COPY: a power-of-2 allocation kept whole, to grow into) */
+	ret = do_mmap(file, 0, new_len, prot, map_flags,
+		      vma->vm_flags & VM_SHARED ? 0 : VM_MAPPED_COPY,
+		      vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT),
+		      &populate, NULL);
+	if (IS_ERR_VALUE(ret))
+		return ret;
+	if (!(vma->vm_flags & VM_SHARED) || !file) {
+		memcpy((void *)ret, (void *)addr, old_len);
+	} else {
+		/* (a shared copy written since this one was written back: none) */
+		struct vm_area_struct *new = vma_lookup(mm, ret);
+
+		if (vma->vm_flags & VM_WRITE)
+			vm_flags_set(new, VM_WRITE);
+	}
+	/* (the old range kept, if it can't go: then not the new one) */
+	err = do_munmap(mm, addr, old_len, NULL);
+	if (err) {
+		do_munmap(mm, ret, new_len, NULL);
+		return err;
+	}
+	return ret;
+}
+
+#else
+/*
+ * look up the first VMA exactly that exactly matches addr
+ * - should be called with mm->mmap_lock at least held readlocked
+ */
+static struct vm_area_struct *find_vma_exact(struct mm_struct *mm,
+					     unsigned long addr,
+					     unsigned long len)
+{
+	struct vm_area_struct *vma;
+	unsigned long end = addr + len;
+	VMA_ITERATOR(vmi, mm, addr);
+
+	vma = vma_iter_load(&vmi);
+	if (!vma)
+		return NULL;
+	if (vma->vm_start != addr)
+		return NULL;
+	if (vma->vm_end != end)
+		return NULL;
+
+	return vma;
 }
 
 /*
@@ -1565,6 +2395,8 @@ static unsigned long do_mremap(unsigned long addr,
 	return vma->vm_start;
 }
 
+#endif
+
 SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		unsigned long, new_len, unsigned long, flags,
 		unsigned long, new_addr)
@@ -1576,6 +2408,349 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	mmap_write_unlock(current->mm);
 	return ret;
 }
+
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
+/*
+ * The other calls on a process's mappings, as Linux's (their checks and
+ * errors), on what NOMMU conditions have: protections recorded, not
+ * enforced; every page resident and locked already.
+ */
+
+/*
+ * each mapping's part of [start, end) visited: then -ENOMEM if some of the
+ * range isn't mapped (the rest visited still), or the first visit's error
+ */
+static int walk_vmas(struct mm_struct *mm, unsigned long start, unsigned long end,
+		     unsigned long arg,
+		     int (*visit)(struct vm_area_struct *vma, unsigned long start,
+				  unsigned long end, unsigned long arg))
+{
+	struct vm_area_struct *vma;
+	int unmapped = 0, ret;
+
+	while (start < end) {
+		vma = find_vma_intersection(mm, start, end);
+		if (!vma)
+			return -ENOMEM;
+		if (vma->vm_start > start)
+			unmapped = -ENOMEM;
+		start = max(start, vma->vm_start);
+		ret = visit(vma, start, min(end, vma->vm_end), arg);
+		if (ret)
+			return ret;
+		start = vma->vm_end;
+	}
+	return unmapped;
+}
+
+/*
+ * the range takes the protection (recorded: no MMU enforces it), its own
+ * mapping split off (vma_cut); a shared copy written back as long as it
+ * was ever writable
+ */
+static int mprotect_vma(struct vm_area_struct *vma, unsigned long start,
+			unsigned long end, unsigned long prot)
+{
+	vm_flags_t keep;
+
+	if ((prot & PROT_WRITE) && vma->vm_file && (vma->vm_flags & VM_SHARED) &&
+	    !(vma->vm_file->f_mode & FMODE_WRITE))
+		return -EACCES;
+	vma = vma_cut(vma, start, end);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+	keep = vma_is_shared_copy(vma) ? VM_WRITE : 0;
+	vm_flags_reset(vma, (vma->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC)) |
+			    (vma->vm_flags & keep) | calc_vm_prot_bits(prot, 0));
+	return 0;
+}
+
+SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
+		unsigned long, prot)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end;
+	int ret;
+
+	if (offset_in_page(start))
+		return -EINVAL;
+	if (!len)
+		return 0;
+	len = PAGE_ALIGN(len);
+	end = start + len;
+	if (end <= start)
+		return -ENOMEM;
+	if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM |
+		     PROT_GROWSDOWN | PROT_GROWSUP))
+		return -EINVAL;
+	if (mmap_write_lock_killable(mm))
+		return -EINTR;
+	ret = walk_vmas(mm, start, end, prot, mprotect_vma);
+	mmap_write_unlock(mm);
+	return ret;
+}
+
+/* a shared copy written back; MS_SYNC: a shared mapping's file synced */
+static int msync_vma(struct vm_area_struct *vma, unsigned long start,
+		     unsigned long end, unsigned long flags)
+{
+	struct file *file = vma->vm_file;
+	loff_t pos;
+	int ret = nommu_write_back(vma, start, end);
+
+	if (ret || !(flags & MS_SYNC) || !file || !(vma->vm_flags & VM_SHARED))
+		return ret;
+	pos = ((loff_t)vma->vm_pgoff << PAGE_SHIFT) + (start - vma->vm_start);
+	return vfs_fsync_range(file, pos, pos + (end - start) - 1, 1);
+}
+
+SYSCALL_DEFINE3(msync, unsigned long, start, size_t, len, int, flags)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end;
+	int ret;
+
+	if (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC))
+		return -EINVAL;
+	if (offset_in_page(start))
+		return -EINVAL;
+	if ((flags & MS_ASYNC) && (flags & MS_SYNC))
+		return -EINVAL;
+	len = PAGE_ALIGN(len);
+	end = start + len;
+	if (end < start)
+		return -ENOMEM;
+	if (end == start)
+		return 0;
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+	ret = walk_vmas(mm, start, end, flags, msync_vma);
+	mmap_read_unlock(mm);
+	return ret;
+}
+
+static bool madvise_behavior_valid(int behavior)
+{
+	switch (behavior) {
+	case MADV_DOFORK:
+	case MADV_DONTFORK:
+	case MADV_NORMAL:
+	case MADV_SEQUENTIAL:
+	case MADV_RANDOM:
+	case MADV_REMOVE:
+	case MADV_WILLNEED:
+	case MADV_DONTNEED:
+	case MADV_DONTNEED_LOCKED:
+	case MADV_FREE:
+	case MADV_COLD:
+	case MADV_PAGEOUT:
+	case MADV_POPULATE_READ:
+	case MADV_POPULATE_WRITE:
+	case MADV_DONTDUMP:
+	case MADV_DODUMP:
+	case MADV_WIPEONFORK:
+	case MADV_KEEPONFORK:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * MADV_DONTNEED: private memory as a fresh mapping's again (zeroed, or the
+ * file's bytes); a shared mapping's kept, as Linux's
+ */
+/* the fork flags: what a fork's child gets of a mapping (nommu_dup_mmap) */
+static int madvise_fork(struct vm_area_struct *vma, unsigned long start,
+			unsigned long end, unsigned long behavior)
+{
+	vm_flags_t set = 0, clear = 0;
+
+	switch (behavior) {
+	case MADV_DONTFORK:
+		set = VM_DONTCOPY;
+		break;
+	case MADV_DOFORK:
+		if (vma->vm_flags & VM_IO)
+			return -EINVAL;
+		clear = VM_DONTCOPY;
+		break;
+	case MADV_WIPEONFORK:
+		/* (private anonymous memory only, as Linux's) */
+		if (vma->vm_file || (vma->vm_flags & VM_SHARED))
+			return -EINVAL;
+		set = VM_WIPEONFORK;
+		break;
+	case MADV_KEEPONFORK:
+		clear = VM_WIPEONFORK;
+		break;
+	}
+	vma = vma_cut(vma, start, end);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+	vm_flags_reset(vma, (vma->vm_flags & ~clear) | set);
+	return 0;
+}
+
+static bool madvise_fork_flags(int behavior)
+{
+	return behavior == MADV_DONTFORK || behavior == MADV_DOFORK ||
+	       behavior == MADV_WIPEONFORK || behavior == MADV_KEEPONFORK;
+}
+
+static int madvise_vma(struct vm_area_struct *vma, unsigned long start,
+		       unsigned long end, unsigned long behavior)
+{
+	if (madvise_fork_flags(behavior))
+		return madvise_fork(vma, start, end, behavior);
+	if (behavior != MADV_DONTNEED && behavior != MADV_DONTNEED_LOCKED)
+		return 0;
+	if (vma->vm_flags & VM_SHARED)
+		return 0;
+	if (vma->vm_file)
+		return read_file_into(vma->vm_file, start, end - start,
+				      ((loff_t)vma->vm_pgoff << PAGE_SHIFT) +
+				      (start - vma->vm_start));
+	clear_nonzero((void *)start, end - start);
+	return 0;
+}
+
+SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end, len;
+	int ret;
+
+	if (!madvise_behavior_valid(behavior))
+		return -EINVAL;
+	if (!PAGE_ALIGNED(start))
+		return -EINVAL;
+	len = PAGE_ALIGN(len_in);
+	/* Check to see whether len was rounded up from small -ve to zero */
+	if (len_in && !len)
+		return -EINVAL;
+	end = start + len;
+	if (end < start)
+		return -EINVAL;
+	if (end == start)
+		return 0;
+	/* (the fork flags change the mappings: split, their flags set) */
+	if (madvise_fork_flags(behavior)) {
+		if (mmap_write_lock_killable(mm))
+			return -EINTR;
+		ret = walk_vmas(mm, start, end, behavior, madvise_vma);
+		mmap_write_unlock(mm);
+		return ret;
+	}
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+	ret = walk_vmas(mm, start, end, behavior, madvise_vma);
+	mmap_read_unlock(mm);
+	return ret;
+}
+
+/* every page mapped is resident: a 1 for each */
+SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
+		unsigned char __user *, vec)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long pages, end, i;
+	static const unsigned char ones[64] = {
+		[0 ... 63] = 1
+	};
+	int ret = 0;
+
+	if (offset_in_page(start))
+		return -EINVAL;
+	pages = (len >> PAGE_SHIFT) + (offset_in_page(len) != 0);
+	end = start + (pages << PAGE_SHIFT);
+	if (end < start)
+		return -ENOMEM;
+	if (!access_ok(vec, pages))
+		return -EFAULT;
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+	for (i = 0; i < pages && !ret; ) {
+		unsigned long addr = start + (i << PAGE_SHIFT);
+		struct vm_area_struct *vma = vma_lookup(mm, addr);
+		unsigned long n;
+
+		if (!vma) {
+			ret = -ENOMEM;
+			break;
+		}
+		n = min(pages - i, (vma->vm_end - addr) >> PAGE_SHIFT);
+		while (n && !ret) {
+			unsigned long k = min(n, sizeof(ones));
+
+			if (copy_to_user(vec + i, ones, k))
+				ret = -EFAULT;
+			i += k;
+			n -= k;
+		}
+	}
+	mmap_read_unlock(mm);
+	return ret;
+}
+
+static int lock_vma(struct vm_area_struct *vma, unsigned long start,
+		    unsigned long end, unsigned long unused)
+{
+	return 0;
+}
+
+/* [start, start + len) all mapped (it's locked already) */
+static int lock_range(unsigned long start, size_t len)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end;
+	int ret;
+
+	len = PAGE_ALIGN(len + offset_in_page(start));
+	start &= PAGE_MASK;
+	end = start + len;
+	if (end < start)
+		return -EINVAL;
+	if (end == start)
+		return 0;
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+	ret = walk_vmas(mm, start, end, 0, lock_vma);
+	mmap_read_unlock(mm);
+	return ret;
+}
+
+SYSCALL_DEFINE2(mlock, unsigned long, start, size_t, len)
+{
+	return lock_range(start, len);
+}
+
+SYSCALL_DEFINE3(mlock2, unsigned long, start, size_t, len, int, flags)
+{
+	if (flags & ~MLOCK_ONFAULT)
+		return -EINVAL;
+	return lock_range(start, len);
+}
+
+SYSCALL_DEFINE2(munlock, unsigned long, start, size_t, len)
+{
+	return lock_range(start, len);
+}
+
+SYSCALL_DEFINE1(mlockall, int, flags)
+{
+	if (!flags || (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)) ||
+	    flags == MCL_ONFAULT)
+		return -EINVAL;
+	return 0;
+}
+
+SYSCALL_DEFINE0(munlockall)
+{
+	return 0;
+}
+
+#endif
 
 int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 		unsigned long pfn, unsigned long size, pgprot_t prot)
@@ -1638,7 +2813,8 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
 		return 0;
 
 	/* the access must start within one of the target process's mappings */
-	vma = find_vma(mm, addr);
+	addr = arch_mm_user_addr(mm, addr);
+	vma = vma_lookup(mm, addr);
 	if (vma) {
 		/* don't overrun this mapping */
 		if (addr + len >= vma->vm_end)
@@ -1729,8 +2905,9 @@ int nommu_shrink_inode_mappings(struct inode *inode, size_t size,
 	/* search for VMAs that fall within the dead zone */
 	vma_interval_tree_foreach(vma, &inode->i_mapping->i_mmap, low, high) {
 		/* found one - only interested if it's shared out of the page
-		 * cache */
-		if (vma->vm_flags & VM_SHARED) {
+		 * cache (not a copy) */
+		if ((vma->vm_flags & VM_SHARED) &&
+		    !(vma->vm_flags & VM_MAPPED_COPY)) {
 			i_mmap_unlock_read(inode->i_mapping);
 			up_write(&nommu_region_sem);
 			return -ETXTBSY; /* not quite true, but near enough */
@@ -1744,7 +2921,8 @@ int nommu_shrink_inode_mappings(struct inode *inode, size_t size,
 	 * shouldn't be any
 	 */
 	vma_interval_tree_foreach(vma, &inode->i_mapping->i_mmap, 0, ULONG_MAX) {
-		if (!(vma->vm_flags & VM_SHARED))
+		if (!(vma->vm_flags & VM_SHARED) ||
+		    (vma->vm_flags & VM_MAPPED_COPY))
 			continue;
 
 		region = vma->vm_region;

@@ -2071,7 +2071,9 @@ static long __get_user_pages_locked(struct mm_struct *mm, unsigned long start,
 			(VM_MAYREAD | VM_MAYWRITE) : (VM_READ | VM_WRITE);
 
 	for (i = 0; i < nr_pages; i++) {
-		vma = find_vma(mm, start);
+		unsigned long addr = arch_mm_user_addr(mm, start);
+
+		vma = vma_lookup(mm, addr);
 		if (!vma)
 			break;
 
@@ -2081,7 +2083,10 @@ static long __get_user_pages_locked(struct mm_struct *mm, unsigned long start,
 			break;
 
 		if (pages) {
-			pages[i] = virt_to_page((void *)start);
+			/* (memory the page allocator has no page for) */
+			if (!virt_addr_valid((void *)addr))
+				break;
+			pages[i] = virt_to_page((void *)addr);
 			if (pages[i])
 				get_page(pages[i]);
 		}

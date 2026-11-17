@@ -46,7 +46,7 @@
 
 #define AA(__x)		((unsigned long)(__x))
 
-#if __BITS_PER_LONG == 32
+#if __BITS_PER_LONG == 32 && !defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER)
 
 asmlinkage long sys32_truncate64(const char __user *filename,
 				 unsigned long offset_low,

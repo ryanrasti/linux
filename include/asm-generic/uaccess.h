@@ -10,6 +10,11 @@
 #include <linux/string.h>
 #include <asm-generic/access_ok.h>
 
+#ifndef __uaccess_addr
+/* a user address as the kernel reaches it (an arch may offset it) */
+#define __uaccess_addr(p) (p)
+#endif
+
 #ifdef CONFIG_UACCESS_MEMCPY
 #include <linux/unaligned.h>
 
@@ -18,6 +23,7 @@ __get_user_fn(size_t size, const void __user *from, void *to)
 {
 	BUILD_BUG_ON(!__builtin_constant_p(size));
 
+	from = __uaccess_addr(from);
 	switch (size) {
 	case 1:
 		*(u8 *)to = *((u8 __force *)from);
@@ -44,6 +50,7 @@ __put_user_fn(size_t size, void __user *to, void *from)
 {
 	BUILD_BUG_ON(!__builtin_constant_p(size));
 
+	to = __uaccess_addr(to);
 	switch (size) {
 	case 1:
 		*(u8 __force *)to = *(u8 *)from;
@@ -81,14 +88,14 @@ do {									\
 static inline __must_check unsigned long
 raw_copy_from_user(void *to, const void __user * from, unsigned long n)
 {
-	memcpy(to, (const void __force *)from, n);
+	memcpy(to, (const void __force *)__uaccess_addr(from), n);
 	return 0;
 }
 
 static inline __must_check unsigned long
 raw_copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-	memcpy((void __force *)to, from, n);
+	memcpy((void __force *)__uaccess_addr(to), from, n);
 	return 0;
 }
 #define INLINE_COPY_FROM_USER
@@ -211,7 +218,7 @@ extern int __get_user_bad(void) __attribute__((noreturn));
 static inline __must_check unsigned long
 __clear_user(void __user *to, unsigned long n)
 {
-	memset((void __force *)to, 0, n);
+	memset((void __force *)__uaccess_addr(to), 0, n);
 	return 0;
 }
 #endif

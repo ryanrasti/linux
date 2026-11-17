@@ -3258,6 +3258,21 @@ extern void setup_per_cpu_pageset(void);
 /* nommu.c */
 extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);
+bool arch_page_fresh(struct page *page);
+bool arch_nommu_mm_memory(struct mm_struct *mm);
+void *arch_nommu_alloc(struct mm_struct *mm, unsigned long len);
+bool arch_nommu_release(unsigned long from, unsigned long to);
+int nommu_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm, long delta,
+		   unsigned long sp,
+		   void (*copy)(struct mm_struct *mm, void *to, const void *from,
+				unsigned long len));
+#ifndef arch_mm_user_addr
+/*
+ * a user address of mm's as the kernel reaches it, without an MMU: the
+ * same, unless an arch offsets a process's memory (as uaccess does then)
+ */
+#define arch_mm_user_addr(mm, addr) (addr)
+#endif
 
 /* interval_tree.c */
 void vma_interval_tree_insert(struct vm_area_struct *node,

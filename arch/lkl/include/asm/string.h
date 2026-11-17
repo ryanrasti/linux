@@ -5,14 +5,24 @@
 #include <asm/types.h>
 #include <asm/host_ops.h>
 
-/* use __mem* names to avoid conflict with KASAN's mem* functions. */
+/*
+ * use __mem* names to avoid conflict with KASAN's mem* functions.
+ *
+ * On wasm with bulk memory they're the compiler's: memory.copy and
+ * memory.fill, or a few stores where the size is a small constant (a struct's
+ * zeroing), not a call through the host's operations at each.
+ */
 
 #ifdef CONFIG_LKL_HOST_MEMCPY
 #define __HAVE_ARCH_MEMCPY
 extern void *memcpy(void *dest, const void *src, size_t count);
 static inline void *__memcpy(void *dest, const void *src, size_t count)
 {
+#ifdef __wasm_bulk_memory__
+	return __builtin_memcpy(dest, src, count);
+#else
 	return lkl_ops->memcpy(dest, src, count);
+#endif
 }
 #define memcpy(dst, src, len) __memcpy(dst, src, len)
 #endif
@@ -22,7 +32,11 @@ static inline void *__memcpy(void *dest, const void *src, size_t count)
 extern void *memset(void *s, int c, size_t count);
 static inline void *__memset(void *s, int c, size_t count)
 {
+#ifdef __wasm_bulk_memory__
+	return __builtin_memset(s, c, count);
+#else
 	return lkl_ops->memset(s, c, count);
+#endif
 }
 #define memset(s, c, n) __memset(s, c, n)
 #endif
@@ -32,7 +46,11 @@ static inline void *__memset(void *s, int c, size_t count)
 extern void *memmove(void *dest, const void *src, size_t count);
 static inline void *__memmove(void *dest, const void *src, size_t count)
 {
+#ifdef __wasm_bulk_memory__
+	return __builtin_memmove(dest, src, count);
+#else
 	return lkl_ops->memmove(dest, src, count);
+#endif
 }
 #define memmove(dst, src, len) __memmove(dst, src, len)
 #endif

@@ -1,5 +1,7 @@
 #include <uapi/asm/unistd.h>
 
+#define __ARCH_WANT_SYS_CLONE
+
 __SYSCALL(__NR_virtio_mmio_device_add, sys_virtio_mmio_device_add)
 __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
 
@@ -20,6 +22,10 @@ __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
 #define SECTION_ATTRS "a"
 #endif
 
+#ifdef __wasm__
+/* .syscall_defs feeds tools/lkl's headers through ELF objcopy only */
+#define __SYSCALL_DEFINE_ARCH(x, name, ...)
+#else
 #define __SYSCALL_DEFINE_ARCH(x, name, ...)				\
 	asm(".section .syscall_defs,\"" SECTION_ATTRS "\"\n"		\
 	    ".ascii \"#ifdef __NR" #name "\\n\"\n"			\
@@ -27,3 +33,4 @@ __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
 	    __ASCII_MAP(x, __SC_ASCII, __VA_ARGS__) ")\\n\"\n"		\
 	    ".ascii \"#endif\\n\"\n"					\
 	    ".section .text\n");
+#endif

@@ -1,0 +1,83 @@
+# LKL linked into a WASI 0.2 component (a library OS): the console, sockets
+# on wasi:sockets, wasifs, and its root the image embedded in the program
+CONFIG_EXPERT=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_DEBUG_INFO_NONE=y
+CONFIG_DEVTMPFS=y
+CONFIG_LKL_WASI=y
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_LKL_WASI_SOCK=y
+CONFIG_LKL_WASI_FS=y
+# CONFIG_IPV6 is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_ETHTOOL_NETLINK is not set
+# What a blob never uses, its code and its boot's initcalls: socket
+# diagnostics (ss), busy polling, partition tables (the image is a whole
+# disk), /dev/mem, EROFS on a file (it's on its block device), the
+# debugging checks
+# CONFIG_INET_DIAG is not set
+# CONFIG_NET_RX_BUSY_POLL is not set
+CONFIG_PARTITION_ADVANCED=y
+# CONFIG_MSDOS_PARTITION is not set
+# CONFIG_EFI_PARTITION is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_EROFS_FS_BACKED_BY_FILE is not set
+# CONFIG_BLOCK_LEGACY_AUTOLOAD is not set
+# CONFIG_DEBUG_MISC is not set
+# CONFIG_PCI is not set
+# CONFIG_VT is not set
+# CONFIG_LEGACY_PTYS is not set
+# CONFIG_UNIX98_PTYS is not set
+# CONFIG_INPUT is not set
+# CONFIG_SERIO is not set
+# CONFIG_HID_SUPPORT is not set
+# CONFIG_HWMON is not set
+# CONFIG_HW_RANDOM is not set
+# CONFIG_FW_LOADER is not set
+# CONFIG_FTRACE is not set
+# CONFIG_IO_URING is not set
+# CONFIG_AIO is not set
+# CONFIG_SYSVIPC is not set
+# CONFIG_TMPFS is not set
+CONFIG_PROC_FS=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_EPOLL=y
+CONFIG_EVENTFD=y
+CONFIG_MEMFD_CREATE=y
+CONFIG_FILE_LOCKING=y
+# CONFIG_DNOTIFY is not set
+# CONFIG_FANOTIFY is not set
+# CONFIG_KALLSYMS is not set
+# CONFIG_BUG is not set
+# CONFIG_CRYPTO is not set
+# CONFIG_MQ_IOSCHED_DEADLINE is not set
+# CONFIG_MQ_IOSCHED_KYBER is not set
+# The system image: an EROFS root embedded in the program (LKL_WASI_BLK)
+CONFIG_BLOCK=y
+CONFIG_LKL_WASI_BLK=y
+CONFIG_EROFS_FS=y
+# (uncompressed images: decompression needs vmap, which nommu has not)
+# CONFIG_EROFS_FS_ZIP is not set
+# The root an overlay: the image under a ramfs, writable as any root
+CONFIG_OVERLAY_FS=y
+# memcpy, memset and memmove the host's: wasm's memory.copy and memory.fill
+# (the generic ones are loops a byte at a time: a page cache copy, a
+# mapping's zeroing, a fork's copy)
+CONFIG_LKL_HOST_MEMCPY=y
+CONFIG_LKL_HOST_MEMSET=y
+CONFIG_LKL_HOST_MEMMOVE=y
+# What systemd needs as PID 1: sysfs, cgroups (v2), signalfd, timerfd,
+# inotify, users and capabilities, file handles (mount ids); its tmpfs
+# mounts are ramfs without an MMU (no shmem); no namespaces, keyrings, BPF
+# or seccomp
+CONFIG_SYSFS=y
+CONFIG_CGROUPS=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_INOTIFY_USER=y
+CONFIG_MULTIUSER=y
+CONFIG_FHANDLE=y

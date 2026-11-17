@@ -85,11 +85,23 @@ static int clockevent_set_state_shutdown(struct clock_event_device *evt)
 
 static int clockevent_set_state_oneshot(struct clock_event_device *evt)
 {
-	timer = lkl_ops->timer_alloc(timer_fn);
+	/* (again after oneshot_stopped, which keeps it) */
+	if (!timer)
+		timer = lkl_ops->timer_alloc(timer_fn);
 	if (!timer)
 		return -ENOMEM;
 
 	return 0;
+}
+
+/*
+ * No event (the tick stopped while idle, and no timer): the host's timer as
+ * far off as it goes, and again when it fires, for a host may wait for no
+ * less than a timer (a cooperative host's idle is its wait for the first)
+ */
+static int clockevent_set_state_oneshot_stopped(struct clock_event_device *evt)
+{
+	return lkl_ops->timer_set_oneshot(timer, evt->max_delta_ticks);
 }
 
 static irqreturn_t timer_irq_handler(int irq, void *dev_id)
@@ -97,6 +109,8 @@ static irqreturn_t timer_irq_handler(int irq, void *dev_id)
 	struct clock_event_device *dev = (struct clock_event_device *)dev_id;
 
 	dev->event_handler(dev);
+	if (clockevent_state_oneshot_stopped(dev))
+		clockevent_set_state_oneshot_stopped(dev);
 
 	return IRQ_HANDLED;
 }
@@ -111,6 +125,7 @@ static struct clock_event_device clockevent = {
 	.name			= "lkl",
 	.features		= CLOCK_EVT_FEAT_ONESHOT,
 	.set_state_oneshot	= clockevent_set_state_oneshot,
+	.set_state_oneshot_stopped = clockevent_set_state_oneshot_stopped,
 	.set_next_event		= clockevent_next_event,
 	.set_state_shutdown	= clockevent_set_state_shutdown,
 };

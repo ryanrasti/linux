@@ -2,6 +2,7 @@
 #include <linux/slab.h>
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <asm/host_ops.h>
 #include <asm/cpu.h>
 #include <asm/sched.h>
@@ -70,6 +71,29 @@ void arch_free_thread_stack(struct task_struct *tsk)
 	kfree(ti);
 }
 
+/* A task's exit (do_exit's, after its mm's): PID 1's, the system's end */
+void exit_thread(struct task_struct *tsk)
+{
+	/*
+	 * PID 1's end, its last thread's (exit_group, exit, or a fatal
+	 * signal: a failed exec's SIGSEGV), is the host's, with its wait
+	 * status, once its memory is torn down (exit_mm: a shared mapping's
+	 * copy written back) and its files closed: as a container runtime
+	 * ends a container whose init died, rather than Linux's panic
+	 */
+	if (IS_ENABLED(CONFIG_ARCH_INIT_EXIT_ENDS_SYSTEM) && tsk == current &&
+	    is_global_init(tsk) && (tsk->flags & PF_EXITING) &&
+	    !atomic_read(&tsk->signal->live)) {
+		struct signal_struct *sig = tsk->signal;
+		int status = sig->flags & SIGNAL_GROUP_EXIT ?
+			     sig->group_exit_code : tsk->exit_code;
+
+		if (lkl_ops->task_exit)
+			lkl_ops->task_exit(1, status);
+		panic("Attempted to kill init! exitcode=0x%08x\n", status);
+	}
+}
+
 struct thread_info *_current_thread_info = &init_thread_union.thread_info;
 
 /*
@@ -91,6 +115,8 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	struct thread_info *_next = task_thread_info(next);
 	unsigned long _prev_flags = _prev->flags;
 	struct lkl_jmp_buf _prev_jb;
+	bool exited = false;
+	int pid = 0, status = 0;
 
 	_current_thread_info = task_thread_info(next);
 	_next->prev_sched = prev;
@@ -103,11 +129,28 @@ struct task_struct *__switch_to(struct task_struct *prev,
 		/* Atomic. Must be done before wakeup next */
 		clear_ti_thread_flag(_prev, TIF_SCHED_JB);
 		_prev_jb = _prev->sched_jb;
+	} else if (test_bit(TIF_HOST_THREAD, &_prev_flags) &&
+		   READ_ONCE(prev->__state) == TASK_DEAD && lkl_ops->task_exit) {
+		/*
+		 * a host task exited in a syscall: its host thread ends too,
+		 * and if it was its process's last thread, the process (its
+		 * wait status: the group's exit code if one ended it all)
+		 */
+		struct signal_struct *sig = prev->signal;
+
+		exited = true;
+		if (!atomic_read(&sig->live)) {
+			pid = task_tgid_nr(prev);
+			status = sig->flags & SIGNAL_GROUP_EXIT ?
+				 sig->group_exit_code : prev->exit_code;
+		}
 	}
 
 	lkl_ops->sem_up(_next->sched_sem);
 	if (test_bit(TIF_SCHED_JB, &_prev_flags)) {
 		lkl_ops->jmp_buf_longjmp(&_prev_jb, 1);
+	} else if (exited) {
+		lkl_ops->task_exit(pid, status);
 	} else {
 		lkl_ops->sem_down(_prev->sched_sem);
 	}
@@ -173,6 +216,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		set_ti_thread_flag(ti, TIF_HOST_THREAD);
 		return 0;
 	}
+
+	/* clone from userspace */
+	if (!args->fn)
+		return copy_user_thread(p, args);
 
 	tba = kmalloc(sizeof(*tba), GFP_KERNEL);
 	if (!tba)
