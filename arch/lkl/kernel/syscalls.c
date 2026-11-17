@@ -1,4 +1,3 @@
-#include "../../../kernel/sched/sched.h"
 #include <linux/stat.h>
 #include <linux/irq.h>
 #include <linux/sched.h>
@@ -13,6 +12,7 @@
 #include <linux/completion.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
+#include <linux/sched/stat.h>
 #include <linux/mman.h>
 #include <linux/sizes.h>
 #include <linux/signal.h>
@@ -350,16 +350,15 @@ static struct task_struct *idle_host_task;
  * stands for host tasks being in user mode) is runnable: then a host task
  * leaving the kernel lets it run (lkl_cpu_put). Counting a queued idle host
  * task made a host task that kept making syscalls switch to it and back at
- * every one.
+ * every one. The fair server, a deadline entity counted in nr_running while
+ * it's queued, isn't a task either: counting it made the idle host task
+ * switch to the idle task and back until its runtime ran out, a busy loop
+ * where the tick no longer charges an idle kernel's time.
  */
 bool others_runnable(void)
 {
-	unsigned int n = this_rq()->nr_running;
-
-	if (idle_host_task && current != idle_host_task &&
-	    task_on_rq_queued(idle_host_task))
-		n--;
-	return n > 1;
+	return nr_running_tasks(current != idle_host_task ?
+				idle_host_task : NULL) > 1;
 }
 
 /*

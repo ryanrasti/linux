@@ -5379,6 +5379,24 @@ bool single_task_running(void)
 }
 EXPORT_SYMBOL(single_task_running);
 
+/*
+ * The tasks runnable on this CPU, the current one among them, less @except
+ * if it's queued: nr_running less the fair server, a deadline entity
+ * counted there while it's queued but not a task. (LKL's host tasks let
+ * another task run when one is runnable.)
+ */
+unsigned int nr_running_tasks(struct task_struct *except)
+{
+	struct rq *rq = raw_rq();
+	unsigned int n = rq->nr_running;
+
+	if (!RB_EMPTY_NODE(&rq->fair_server.rb_node))
+		n--;
+	if (except && task_on_rq_queued(except))
+		n--;
+	return n;
+}
+
 unsigned long long nr_context_switches_cpu(int cpu)
 {
 	return cpu_rq(cpu)->nr_switches;
