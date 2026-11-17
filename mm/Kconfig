@@ -779,6 +779,22 @@ config HWPOISON_INJECT
 	depends on MEMORY_FAILURE && DEBUG_KERNEL && PROC_FS
 	select PROC_PAGE_MONITOR
 
+config NOMMU_LINUX_MAPPINGS
+	bool
+	depends on !MMU
+	help
+	  A process's mappings as Linux's with an MMU are, as far as memory
+	  without one allows, for an arch whose programs expect them (LKL on
+	  WASI): a private file mapping always a copy of its own, never the
+	  backing device's memory (no XIP or FDPIC text sharing), so it can be
+	  split, cut, moved and dropped as anonymous memory is; a MAP_SHARED
+	  mapping of a file that can't be mapped directly a copy written back
+	  to it (not -ENODEV); anonymous MAP_SHARED memory VM_SHARED;
+	  MAP_FIXED over the process's own memory; munmap and mremap of any
+	  range; mprotect, msync, madvise (the fork flags too), mincore and
+	  mlock; and new memory zeroed only where it isn't zero already (a
+	  lazily backed host's). Without it, nommu's own rules.
+
 config NOMMU_INITIAL_TRIM_EXCESS
 	int "Turn on mmap() excess space trimming before booting"
 	depends on !MMU

@@ -415,6 +415,10 @@ bool __weak arch_nommu_release(unsigned long from, unsigned long to)
  */
 static void clear_new_pages(void *addr, unsigned long len)
 {
+	if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+		memset(addr, 0, len);
+		return;
+	}
 	/* (the arch's memory: zeroed as it was allocated) */
 	if (arch_nommu_mm_memory(current->mm))
 		return;
@@ -447,6 +451,14 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	if (brk <= mm->brk) {
 		mm->brk = brk;
 		return brk;
+	}
+
+	if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+		/*
+		 * Ok, looks good - let it rip.
+		 */
+		flush_icache_user_range(mm->brk, brk);
+		return mm->brk = brk;
 	}
 
 	/*
@@ -824,12 +836,21 @@ static int validate_mmap_request(struct file *file,
 			    (file->f_mode & FMODE_WRITE))
 				return -EACCES;
 
-			/*
-			 * a file that can't be mapped directly is mapped as a
-			 * copy, written back to it (nommu_write_back)
-			 */
-			if (!(capabilities & (NOMMU_MAP_DIRECT | NOMMU_MAP_COPY)))
-				return -ENODEV;
+			if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+				/*
+				 * a file that can't be mapped directly is
+				 * mapped as a copy, written back to it
+				 * (nommu_write_back)
+				 */
+				if (!(capabilities & (NOMMU_MAP_DIRECT | NOMMU_MAP_COPY)))
+					return -ENODEV;
+			} else {
+				if (!(capabilities & NOMMU_MAP_DIRECT))
+					return -ENODEV;
+
+				/* we mustn't privatise shared mappings */
+				capabilities &= ~NOMMU_MAP_COPY;
+			}
 		} else {
 			/* we're going to read the file into private memory we
 			 * allocate */
@@ -841,7 +862,12 @@ static int validate_mmap_request(struct file *file,
 			 * the backing device's memory: so it can be split,
 			 * moved and dropped as anonymous memory is
 			 */
-			capabilities &= ~NOMMU_MAP_DIRECT;
+			if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS))
+				capabilities &= ~NOMMU_MAP_DIRECT;
+			/* we don't permit a private writable mapping to be
+			 * shared with the backing device */
+			else if (prot & PROT_WRITE)
+				capabilities &= ~NOMMU_MAP_DIRECT;
 		}
 
 		if (capabilities & NOMMU_MAP_DIRECT) {
@@ -914,14 +940,33 @@ static unsigned long determine_vm_flags(struct file *file,
 	if (!file) {
 		/*
 		 * MAP_ANONYMOUS. MAP_SHARED is mapped to MAP_PRIVATE, because
-		 * there is no fork(); but VM_SHARED, so MADV_DONTNEED keeps it.
+		 * there is no fork(); but VM_SHARED with Linux's mappings, so
+		 * MADV_DONTNEED keeps it.
 		 */
 		vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
-		if (flags & MAP_SHARED)
+		if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) && (flags & MAP_SHARED))
 			vm_flags |= VM_SHARED;
 	} else if (flags & MAP_PRIVATE) {
-		/* MAP_PRIVATE file mapping: a copy (validate_mmap_request) */
-		vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+		/*
+		 * MAP_PRIVATE file mapping (with Linux's mappings, a copy:
+		 * validate_mmap_request)
+		 */
+		if (capabilities & NOMMU_MAP_DIRECT)
+			vm_flags |= (capabilities & NOMMU_VMFLAGS);
+		else
+			vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+
+		if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) &&
+		    !(prot & PROT_WRITE) && !current->ptrace)
+			/*
+			 * R/O private file mapping which cannot be used to
+			 * modify memory, especially also not via active ptrace
+			 * (e.g., set breakpoints) or later by upgrading
+			 * permissions (no mprotect()). We can try overlaying
+			 * the file mapping, which will work e.g., on chardevs,
+			 * ramfs/tmpfs/shmfs and romfs/cramf.
+			 */
+			vm_flags |= VM_MAYOVERLAY;
 	} else if (capabilities & NOMMU_MAP_DIRECT) {
 		/* MAP_SHARED file mapping, of the file's own memory */
 		vm_flags |= VM_SHARED | VM_MAYSHARE |
@@ -1078,10 +1123,12 @@ static bool vma_is_own_copy(struct vm_area_struct *vma)
 /* a shared file mapping that's a copy: written back to the file */
 static bool vma_is_shared_copy(struct vm_area_struct *vma)
 {
-	return vma->vm_file && (vma->vm_flags & VM_SHARED) &&
+	return IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) && vma->vm_file &&
+	       (vma->vm_flags & VM_SHARED) &&
 	       (vma->vm_flags & VM_MAPPED_COPY);
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 /*
  * [addr, addr + len) of a file mapping: the file's bytes at pos, zeros past
  * its end
@@ -1097,6 +1144,8 @@ static int read_file_into(struct file *file, unsigned long addr,
 		memset((void *)addr + ret, 0, len - ret);
 	return 0;
 }
+
+#endif
 
 /*
  * A shared file mapping that's a copy (its file has no memory to map
@@ -1269,6 +1318,7 @@ static int nommu_write_back(struct vm_area_struct *vma, unsigned long start,
 	return ret;
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 static struct vm_area_struct *vma_cut(struct vm_area_struct *vma,
 				      unsigned long start, unsigned long end);
 
@@ -1321,6 +1371,8 @@ static unsigned long do_mmap_fixed(struct file *file, unsigned long addr,
 	return addr;
 }
 
+#endif
+
 /*
  * handle mapping creation for uClinux
  */
@@ -1343,6 +1395,7 @@ unsigned long do_mmap(struct file *file,
 
 	*populate = 0;
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 	/* MAP_SHARED_VALIDATE: no flag past the legacy ones (MAP_SYNC: no DAX) */
 	if ((flags & MAP_TYPE) == MAP_SHARED_VALIDATE) {
 		if (flags & ~LEGACY_MAP_MASK)
@@ -1352,6 +1405,7 @@ unsigned long do_mmap(struct file *file,
 
 	if (flags & MAP_FIXED)
 		return do_mmap_fixed(file, addr, len, prot, flags, pgoff);
+#endif
 
 	/* decide whether we should attempt the mapping, and if so what sort of
 	 * mapping */
@@ -1497,10 +1551,12 @@ unsigned long do_mmap(struct file *file,
 				if (!(capabilities & NOMMU_MAP_COPY))
 					goto error_just_free;
 
-				/* (a shared mapping: a copy, written back) */
 				capabilities &= ~NOMMU_MAP_DIRECT;
-				vm_flags_clear(vma, VM_MAYSHARE);
-				region->vm_flags = vma->vm_flags;
+				/* (a shared mapping: a copy, written back) */
+				if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS)) {
+					vm_flags_clear(vma, VM_MAYSHARE);
+					region->vm_flags = vma->vm_flags;
+				}
 			} else {
 				vma->vm_start = region->vm_start = addr;
 				vma->vm_end = region->vm_end = addr + len;
@@ -1662,8 +1718,10 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	struct mm_struct *mm;
 
 	/* we're only permitted to split memory of the mapping's own (the
-	 * only usage of its region: anonymous memory, a file's copy) */
-	if (!vma_is_own_copy(vma))
+	 * only usage of its region: anonymous memory, with Linux's mappings
+	 * a file's copy too) */
+	if (IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) ? !vma_is_own_copy(vma) :
+	    !!vma->vm_file)
 		return -ENOMEM;
 
 	mm = vma->vm_mm;
@@ -1785,6 +1843,7 @@ enomem:
 	return -ENOMEM;
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 /*
  * release [start, end) of a mapping: all of it, or a part of memory of its
  * own (vma_is_own_copy); a shared copy's part written back first
@@ -1881,6 +1940,76 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list
 	return 0;
 }
 
+#else
+/*
+ * release a mapping
+ * - under NOMMU conditions the chunk to be unmapped must be backed by a single
+ *   VMA, though it need not cover the whole VMA
+ */
+int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list_head *uf)
+{
+	VMA_ITERATOR(vmi, mm, start);
+	struct vm_area_struct *vma;
+	unsigned long end;
+	int ret = 0;
+
+	len = PAGE_ALIGN(len);
+	if (len == 0)
+		return -EINVAL;
+
+	end = start + len;
+
+	/* find the first potentially overlapping VMA */
+	vma = vma_find(&vmi, end);
+	if (!vma) {
+		static int limit;
+		if (limit < 5) {
+			pr_warn("munmap of memory not mmapped by process %d (%s): 0x%lx-0x%lx\n",
+					current->pid, current->comm,
+					start, start + len - 1);
+			limit++;
+		}
+		return -EINVAL;
+	}
+
+	/* we're allowed to split an anonymous VMA but not a file-backed one */
+	if (vma->vm_file) {
+		do {
+			if (start > vma->vm_start)
+				return -EINVAL;
+			if (end == vma->vm_end)
+				goto erase_whole_vma;
+			vma = vma_find(&vmi, end);
+		} while (vma);
+		return -EINVAL;
+	} else {
+		/* the chunk must be a subset of the VMA found */
+		if (start == vma->vm_start && end == vma->vm_end)
+			goto erase_whole_vma;
+		if (start < vma->vm_start || end > vma->vm_end)
+			return -EINVAL;
+		if (offset_in_page(start))
+			return -EINVAL;
+		if (end != vma->vm_end && offset_in_page(end))
+			return -EINVAL;
+		if (start != vma->vm_start && end != vma->vm_end) {
+			ret = split_vma(&vmi, vma, start, 1);
+			if (ret < 0)
+				return ret;
+		}
+		return vmi_shrink_vma(&vmi, vma, start, end);
+	}
+
+erase_whole_vma:
+	if (delete_vma_from_mm(vma))
+		ret = -ENOMEM;
+	else
+		delete_vma(mm, vma);
+	return ret;
+}
+
+#endif
+
 int vm_munmap(unsigned long addr, size_t len)
 {
 	struct mm_struct *mm = current->mm;
@@ -1928,6 +2057,7 @@ void exit_mmap(struct mm_struct *mm)
 	arch_exit_mmap(mm);
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 /*
  * A fork's child's mappings (mm, a copy of oldmm's struct, its own maple
  * tree empty), for an arch whose processes' memory is its own and that
@@ -2193,6 +2323,78 @@ static unsigned long do_mremap(unsigned long addr,
 	return ret;
 }
 
+#else
+/*
+ * look up the first VMA exactly that exactly matches addr
+ * - should be called with mm->mmap_lock at least held readlocked
+ */
+static struct vm_area_struct *find_vma_exact(struct mm_struct *mm,
+					     unsigned long addr,
+					     unsigned long len)
+{
+	struct vm_area_struct *vma;
+	unsigned long end = addr + len;
+	VMA_ITERATOR(vmi, mm, addr);
+
+	vma = vma_iter_load(&vmi);
+	if (!vma)
+		return NULL;
+	if (vma->vm_start != addr)
+		return NULL;
+	if (vma->vm_end != end)
+		return NULL;
+
+	return vma;
+}
+
+/*
+ * expand (or shrink) an existing mapping, potentially moving it at the same
+ * time (controlled by the MREMAP_MAYMOVE flag and available VM space)
+ *
+ * under NOMMU conditions, we only permit changing a mapping's size, and only
+ * as long as it stays within the region allocated by do_mmap_private() and the
+ * block is not shareable
+ *
+ * MREMAP_FIXED is not supported under NOMMU conditions
+ */
+static unsigned long do_mremap(unsigned long addr,
+			unsigned long old_len, unsigned long new_len,
+			unsigned long flags, unsigned long new_addr)
+{
+	struct vm_area_struct *vma;
+
+	/* insanity checks first */
+	old_len = PAGE_ALIGN(old_len);
+	new_len = PAGE_ALIGN(new_len);
+	if (old_len == 0 || new_len == 0)
+		return (unsigned long) -EINVAL;
+
+	if (offset_in_page(addr))
+		return -EINVAL;
+
+	if (flags & MREMAP_FIXED && new_addr != addr)
+		return (unsigned long) -EINVAL;
+
+	vma = find_vma_exact(current->mm, addr, old_len);
+	if (!vma)
+		return (unsigned long) -EINVAL;
+
+	if (vma->vm_end != vma->vm_start + old_len)
+		return (unsigned long) -EFAULT;
+
+	if (is_nommu_shared_mapping(vma->vm_flags))
+		return (unsigned long) -EPERM;
+
+	if (new_len > vma->vm_region->vm_end - vma->vm_region->vm_start)
+		return (unsigned long) -ENOMEM;
+
+	/* all checks complete - do it */
+	vma->vm_end = vma->vm_start + new_len;
+	return vma->vm_start;
+}
+
+#endif
+
 SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		unsigned long, new_len, unsigned long, flags,
 		unsigned long, new_addr)
@@ -2205,6 +2407,7 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	return ret;
 }
 
+#ifdef CONFIG_NOMMU_LINUX_MAPPINGS
 /*
  * The other calls on a process's mappings, as Linux's (their checks and
  * errors), on what NOMMU conditions have: protections recorded, not
@@ -2544,6 +2747,8 @@ SYSCALL_DEFINE0(munlockall)
 {
 	return 0;
 }
+
+#endif
 
 int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 		unsigned long pfn, unsigned long size, pgprot_t prot)

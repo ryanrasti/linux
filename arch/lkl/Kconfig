@@ -46,6 +46,7 @@ config LKL_WASI
 	depends on LKL_WASM && TTY
 	select HVC_DRIVER
 	select ARCH_INIT_EXIT_ENDS_SYSTEM
+	select NOMMU_LINUX_MAPPINGS if !MMU
 	select FUTEX_PRIVATE_MM if FUTEX
 	default n
 	help
