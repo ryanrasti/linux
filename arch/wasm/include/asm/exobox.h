@@ -55,7 +55,7 @@ void exobox_exec_cancel(void);
 /*
  * exec of an ELF program whose code is wasm (exobox/elf.c): before the point of no return, its state into *state;
  * after it (the new memory the current one), its segments placed and its
- * interpreter instantiated, auxv's extra entries into aux (at most 14
+ * interpreter instantiated, auxv's extra entries into aux (at most 16
  * words); or before it, cancelled
  */
 struct linux_binprm;
