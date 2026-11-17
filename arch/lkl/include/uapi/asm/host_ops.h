@@ -157,6 +157,10 @@ enum lkl_prot {
  * far into it a process before wrote (*dirty: past it, zeros); or -errno
  * (none free)
  *
+ * @window_exec_room - whether window_exec would find a window, counting the
+ * one whose base is own (the exec's old memory's, to be released first;
+ * -1: none)
+ *
  * @window_fork - a window for a fork's child of the process whose window's
  * base is base, reaching need at least (a user address: what the parent's
  * mappings reach), the program's data copied into it (its mappings the
@@ -282,6 +286,7 @@ struct lkl_host_operations {
 
 	long (*window_exec)(unsigned int index, unsigned long *lo,
 			    unsigned long *hi, unsigned long *dirty);
+	int (*window_exec_room)(long own);
 	long (*window_fork)(unsigned long base, unsigned long need,
 			    unsigned long *dirty, unsigned long *hi);
 	void (*window_free)(unsigned long base, unsigned long used);

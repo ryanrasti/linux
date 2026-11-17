@@ -43,7 +43,6 @@ static char *wasi_exec_args(struct linux_binprm *bprm, unsigned long *len)
 
 static int load_wasi_prog(struct linux_binprm *bprm)
 {
-	struct mm_struct *old_mm;
 	unsigned int index;
 	unsigned long len, stack;
 	char *args;
@@ -55,21 +54,21 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 		return -ENOEXEC;
 	memcpy(&index, bprm->buf + 8, 4);
 
+	ret = lkl_window_exec_room();
+	if (ret)
+		return ret;
 	args = wasi_exec_args(bprm, &len);
 	if (!args)
 		return -ENOMEM;
 	/*
-	 * The old memory stays until the task's next syscall (or its exit,
-	 * exit_thread, if it dies first): the task runs on its stack until
-	 * this one returns.
+	 * The old memory goes here (begin_new_exec's exec_mmap), its window
+	 * back to the host before the new one is taken, so an exec needs one
+	 * window, not two (its old one may be the new: a fork's child's). The
+	 * task doesn't run on its old stack again: the host unwinds its old
+	 * frames on the kernel stack, then starts the program on the new.
 	 */
-	old_mm = current->mm;
-	if (old_mm)
-		mmget(old_mm);
 	ret = begin_new_exec(bprm);
 	if (!ret) {
-		task_thread_info(current)->exec_old_mm = old_mm;
-		old_mm = NULL;
 		set_personality(PER_LINUX);
 		setup_new_exec(bprm);
 		/*
@@ -83,8 +82,6 @@ static int load_wasi_prog(struct linux_binprm *bprm)
 			lkl_ops->exec_prog(index, args, len, bprm->argc,
 					   bprm->envc, stack);
 	}
-	if (old_mm)
-		mmput(old_mm);
 	kvfree(args);
 	if (ret)
 		return ret;

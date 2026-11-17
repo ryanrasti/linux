@@ -264,12 +264,6 @@ long lkl_syscall(long no, long *params)
 
 	switch_to_host_task(task);
 
-	/* (an exec's old memory, which the task ran on until it returned) */
-	if (task_thread_info(task)->exec_old_mm) {
-		mmput(task_thread_info(task)->exec_old_mm);
-		task_thread_info(task)->exec_old_mm = NULL;
-	}
-
 	ret = run_syscall(no, params);
 
 	if (no == __NR_reboot) {

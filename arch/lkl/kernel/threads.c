@@ -17,7 +17,6 @@ static int init_ti(struct thread_info *ti)
 	ti->dead = false;
 	ti->prev_sched = NULL;
 	ti->tid = 0;
-	ti->exec_old_mm = NULL;
 
 	return 0;
 }
@@ -72,21 +71,9 @@ void arch_free_thread_stack(struct task_struct *tsk)
 	kfree(ti);
 }
 
-/*
- * A task's exit (do_exit's, after its mm's): an exec's old memory it had
- * left, which its next syscall would have released (wasi_exec.c): a task
- * killed at the exec's return, or by its failure past the point of no
- * return, has none. And PID 1's, the system's end.
- */
+/* A task's exit (do_exit's, after its mm's): PID 1's, the system's end */
 void exit_thread(struct task_struct *tsk)
 {
-	struct thread_info *ti = task_thread_info(tsk);
-
-	if (ti->exec_old_mm) {
-		mmput(ti->exec_old_mm);
-		ti->exec_old_mm = NULL;
-	}
-
 	/*
 	 * PID 1's end, its last thread's (exit_group, exit, or a fatal
 	 * signal: a failed exec's SIGSEGV), is the host's, with its wait

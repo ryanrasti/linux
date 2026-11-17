@@ -13,8 +13,10 @@ static inline void lkl_user_addrs(long no, const long *params, long *args)
 }
 #define lkl_user_result(no, ret) (ret)
 #define lkl_window_exec(mm, index) 0
+#define lkl_window_exec_room() 0
 #else
 
+int lkl_window_exec_room(void);
 int lkl_window_exec(struct mm_struct *mm, unsigned int index);
 int lkl_window_fork(struct mm_struct *mm, struct mm_struct *oldmm);
 void lkl_window_exit(struct mm_struct *mm);

@@ -94,6 +94,26 @@ static void window_del(struct lkl_window *w)
  * new one: begin_new_exec's). 0, or -errno; no window op (a module without
  * programs), 0 and the mm as nommu's.
  */
+/*
+ * Whether the calling task's exec will have a window: checked before its
+ * point of no return, so that none is execve's -ENOMEM, not a SIGSEGV
+ * after it (the window itself is taken after: the old memory released
+ * first, its window maybe the new one's). The old window counts unless
+ * another process shares it (a vfork's child's is its parent's). 0 or
+ * -ENOMEM.
+ */
+int lkl_window_exec_room(void)
+{
+	struct mm_struct *mm = current->mm;
+	long own = -1;
+
+	if (!lkl_ops->window_exec_room)
+		return 0;
+	if (mm && mm->context.win && !current->vfork_done)
+		own = mm->context.base;
+	return lkl_ops->window_exec_room(own) ? 0 : -ENOMEM;
+}
+
 int lkl_window_exec(struct mm_struct *mm, unsigned int index)
 {
 	unsigned long lo, hi, dirty;

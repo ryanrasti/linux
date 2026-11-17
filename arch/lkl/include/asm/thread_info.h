@@ -35,8 +35,6 @@ struct thread_info {
 	lkl_thread_t tid;
 	struct task_struct *prev_sched;
 	unsigned long stackend;
-	/* an exec's old memory, released at the task's next syscall or its exit (wasi_exec.c) */
-	struct mm_struct *exec_old_mm;
 };
 
 #define INIT_THREAD_INFO(tsk)				\
