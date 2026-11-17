@@ -209,7 +209,11 @@ static int do_fsync(unsigned int fd, int datasync)
 	int ret = -EBADF;
 
 	if (fd_file(f)) {
-		ret = vfs_fsync(fd_file(f), datasync);
+		/* (without an MMU, the process's shared copies of it first) */
+		ret = IS_ENABLED(CONFIG_MMU) ? 0 :
+		      nommu_sync_file_copies(fd_file(f));
+		if (!ret)
+			ret = vfs_fsync(fd_file(f), datasync);
 		fdput(f);
 	}
 	return ret;

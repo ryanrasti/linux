@@ -2491,6 +2491,38 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 }
 
 /* a shared copy written back; MS_SYNC: a shared mapping's file synced */
+/*
+ * fsync and fdatasync of a file the process has shared copies of: their
+ * changes written back first, as msync's (a process that syncs the file it
+ * writes through a mapping, journald's, has its writes in the file then)
+ */
+int nommu_sync_file_copies(struct file *file)
+{
+	struct mm_struct *mm = current->mm;
+	struct inode *inode = file_inode(file);
+	struct vm_area_struct *vma;
+	int ret = 0;
+
+	if (!IS_ENABLED(CONFIG_NOMMU_LINUX_MAPPINGS) || !mm)
+		return 0;
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+	{
+		VMA_ITERATOR(vmi, mm, 0);
+
+		for_each_vma(vmi, vma) {
+			if (!vma_is_shared_copy(vma) ||
+			    file_inode(vma->vm_file) != inode)
+				continue;
+			ret = nommu_write_back(vma, vma->vm_start, vma->vm_end);
+			if (ret)
+				break;
+		}
+	}
+	mmap_read_unlock(mm);
+	return ret;
+}
+
 static int msync_vma(struct vm_area_struct *vma, unsigned long start,
 		     unsigned long end, unsigned long flags)
 {
