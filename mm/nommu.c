@@ -1872,6 +1872,8 @@ static int munmap_vma_range(struct mm_struct *mm, struct vm_area_struct *vma,
 		ret = split_vma(&vmi, vma, start, 1);
 		if (ret < 0)
 			return ret;
+		/* (the iterator at the part split off: walked again) */
+		vma_iter_set(&vmi, vma->vm_start);
 	}
 	return vmi_shrink_vma(&vmi, vma, start, end);
 }
