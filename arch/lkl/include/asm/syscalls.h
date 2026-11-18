@@ -6,6 +6,7 @@ void syscalls_init_thread(void);
 void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
 bool wakeup_idle_host_task(void);
+bool others_runnable(void);
 void idle_host_task_idle(void);
 void idle_host_task_irq_enter(void);
 void idle_host_task_irq_exit(void);

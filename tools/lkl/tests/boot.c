@@ -710,6 +710,62 @@ static int lkl_test_attach_thread(void)
 
 	return TEST_SUCCESS;
 }
+
+/* the kernel's context switches so far (/proc/stat's ctxt) */
+static long context_switches(void)
+{
+	char buf[4096], *p;
+	long fd, n;
+
+	fd = lkl_sys_open("/proc/stat", LKL_O_RDONLY, 0);
+	if (fd < 0)
+		return fd;
+	n = lkl_sys_read(fd, buf, sizeof(buf) - 1);
+	lkl_sys_close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = 0;
+	p = strstr(buf, "\nctxt ");
+	return p ? atol(p + 6) : -1;
+}
+
+static void thread_getpids(void *arg)
+{
+	long *switches = arg;
+	long c0 = context_switches();
+	int i;
+
+	for (i = 0; i < 1000; i++)
+		lkl_sys_getpid();
+	*switches = context_switches() - c0;
+}
+
+/*
+ * A host task leaving the kernel switches to another task only if one is
+ * runnable: not to the idle host task, nor for the fair server (a deadline
+ * entity counted in nr_running). A thread's 1000 getpids switched 3000
+ * times.
+ */
+static int lkl_test_syscall_switches(void)
+{
+	lkl_thread_t tid;
+	long switches = -1, ret;
+
+	ret = lkl_sys_mkdir("/proc", 0555);
+	if (ret == 0 || ret == -LKL_EEXIST)
+		ret = lkl_sys_mount("proc", "/proc", "proc", 0, NULL);
+	if (ret) {
+		lkl_test_logf("mount proc: %s\n", lkl_strerror(ret));
+		return TEST_FAILURE;
+	}
+	tid = lkl_host_ops.thread_create(thread_getpids, &switches);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	lkl_sys_umount("/proc", 0);
+
+	lkl_test_logf("1000 getpid: %ld context switches\n", switches);
+	return switches >= 0 && switches < 10 ? TEST_SUCCESS : TEST_FAILURE;
+}
 #endif
 
 static void thread_quit_immediately(void *unused)
@@ -1050,6 +1106,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(many_syscall_threads),
 	LKL_TEST(new_tgid_threads),
 	LKL_TEST(attach_thread),
+	LKL_TEST(syscall_switches),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),

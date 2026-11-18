@@ -11,6 +11,7 @@
 #include <linux/kthread.h>
 #include <linux/completion.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/stat.h>
 #include <linux/platform_device.h>
 #include <linux/tick.h>
 #include <asm/host_ops.h>
@@ -221,6 +222,20 @@ out:
 }
 
 static struct task_struct *idle_host_task;
+
+/*
+ * Whether a task other than current is runnable, for a host task leaving
+ * the kernel to let it run (lkl_cpu_put). Not counted: the idle host task,
+ * which only stands for host tasks being outside the kernel, and the fair
+ * server, a deadline entity counted in nr_running while it's queued. With
+ * either counted, a host task making syscalls switched away and back at
+ * every one (boot.c: 3 switches per getpid; 2.5x slower on Valkey).
+ */
+bool others_runnable(void)
+{
+	return nr_running_tasks(current != idle_host_task ?
+				idle_host_task : NULL) > 1;
+}
 
 /*
  * called from idle, don't failed, don't block; false until the idle host
