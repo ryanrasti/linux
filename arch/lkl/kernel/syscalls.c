@@ -23,6 +23,10 @@ static asmlinkage long sys_virtio_mmio_device_add(long base, long size,
 
 static asmlinkage long sys_new_thread_group_leader(void);
 
+static asmlinkage long sys_new_thread(void);
+
+static asmlinkage long sys_attach_thread(pid_t tid);
+
 typedef long (*syscall_handler_t)(long arg1, ...);
 
 #undef __SYSCALL
@@ -74,9 +78,30 @@ static struct task_struct *init_host_task;
  */
 static struct task_struct *host0;
 
+/*
+ * A host task cloned from current (a user mode thread: a kernel thread,
+ * PF_KTHREAD, isn't a program's), not yet woken: the scheduler can't run
+ * it until a host thread takes it, so it stays TASK_NEW until then
+ * (switch_to_host_task wakes it).
+ */
+static struct task_struct *clone_host_task(unsigned long flags)
+{
+	struct kernel_clone_args args = {
+		.flags = (flags | CLONE_VM | CLONE_UNTRACED) & ~CSIGNAL,
+		.exit_signal = flags & CSIGNAL,
+		.fn = host_task_stub,
+	};
+
+	return copy_process(NULL, 0, NUMA_NO_NODE, &args);
+}
+
+/*
+ * A host thread's task when its first call isn't attach_thread: a thread
+ * of init's process (cloned from host0), or for new_thread_group_leader a
+ * process of its own, init's child.
+ */
 static int new_host_task(struct task_struct **task, int new_tg_leader)
 {
-	pid_t pid;
 	unsigned long flags = CLONE_FLAGS;
 
 	switch_to_host_task(host0);
@@ -84,13 +109,9 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 	if (new_tg_leader)
 		flags &= ~CLONE_THREAD;
 
-	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
-	if (pid < 0)
-		return pid;
-
-	rcu_read_lock();
-	*task = find_task_by_pid_ns(pid, &init_pid_ns);
-	rcu_read_unlock();
+	*task = clone_host_task(flags);
+	if (IS_ERR(*task))
+		return PTR_ERR(*task);
 
 	host_task_id++;
 
@@ -98,6 +119,30 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 
 	return 0;
 }
+
+/*
+ * attach_thread(tid) as a host thread's first call: its task is tid, a
+ * thread new_thread made and no host thread has taken yet.
+ */
+static int attach_host_task(struct task_struct **task, pid_t tid)
+{
+	struct task_struct *p;
+
+	rcu_read_lock();
+	p = find_task_by_pid_ns(tid, &init_pid_ns);
+	rcu_read_unlock();
+	if (!p)
+		return -ESRCH;
+	/* the CPU is held: nothing can take or start it before we do */
+	if (READ_ONCE(p->__state) != TASK_NEW ||
+	    !test_tsk_thread_flag(p, TIF_HOST_THREAD) ||
+	    task_thread_info(p)->tid)
+		return -EINVAL;
+
+	*task = p;
+	return 0;
+}
+
 static void exit_task(void)
 {
 	do_exit(0);
@@ -135,7 +180,11 @@ long lkl_syscall(long no, long *params)
 	if (lkl_ops->tls_get) {
 		task = lkl_ops->tls_get(task_key);
 		if (!task) {
-			ret = new_host_task(&task, no == __NR_new_thread_group_leader);
+			if (no == __NR_attach_thread)
+				ret = attach_host_task(&task, params[0]);
+			else
+				ret = new_host_task(&task,
+						    no == __NR_new_thread_group_leader);
 			if (ret)
 				goto out;
 			lkl_ops->tls_set(task_key, task);
@@ -324,4 +373,33 @@ SYSCALL_DEFINE0(new_thread_group_leader)
 		return 0;
 	else
 		return -1;
+}
+
+/*
+ * A thread of the caller's process, as pthread_create's clone makes one
+ * (sharing its memory, files, fs, signal actions and semaphore undos), for
+ * another host thread to run: that thread's first call is attach_thread
+ * with the tid this returns. Until then the thread doesn't run, but it is
+ * one of the process's (signals to it wait). Made here, as the caller, it
+ * can join any process, init's or not; a host thread can't clone a
+ * process's thread itself, having no task of that process to clone from.
+ */
+SYSCALL_DEFINE0(new_thread)
+{
+	struct task_struct *p;
+
+	p = clone_host_task(CLONE_FLAGS | CLONE_SYSVSEM);
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+
+	return task_pid_nr(p);
+}
+
+/*
+ * Attaching is done in lkl_syscall, as a host thread's first call; here the
+ * thread has a task already, which is tid or not.
+ */
+SYSCALL_DEFINE1(attach_thread, pid_t, tid)
+{
+	return task_pid_nr(current) == tid ? 0 : -EBUSY;
 }

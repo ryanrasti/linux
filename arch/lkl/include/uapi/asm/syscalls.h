@@ -276,6 +276,11 @@ typedef __kernel_rwf_t		rwf_t;
  * process (or, if the call is new_thread_group_leader, a process of its
  * own). If the host has no thread local storage every call is init's.
  *
+ * A thread of any process (a program's pthread_create) takes two calls:
+ * new_thread(), made by a thread of that process, returns the tid of a new
+ * thread of it, which doesn't run yet; attach_thread(tid), as the new host
+ * thread's first call, makes that thread its task.
+ *
  * init's end, its exit_group or its last thread's exit, isn't run: the call
  * returns init's wait status ((code & 0xff) << 8) and the host ends then,
  * with lkl_sys_halt() or its own exit.

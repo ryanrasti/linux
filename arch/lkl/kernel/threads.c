@@ -135,7 +135,11 @@ void switch_to_host_task(struct task_struct *task)
 	if (current == task)
 		return;
 
-	wake_up_process(task);
+	/* a host task's first run: it was cloned but not woken */
+	if (READ_ONCE(task->__state) == TASK_NEW)
+		wake_up_new_task(task);
+	else
+		wake_up_process(task);
 	thread_sched_jb();
 	lkl_ops->sem_down(task_thread_info(task)->sched_sem);
 	schedule_tail(abs_prev);

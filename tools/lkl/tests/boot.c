@@ -560,6 +560,100 @@ static int lkl_test_new_tgid_threads(void)
 
 	return TEST_SUCCESS;
 }
+
+struct attach_arg {
+	long tid;
+	int fd;
+	long attach, gettid, getpid, write, bogus, init;
+	long pid;
+};
+
+static void thread_attach(void *arg)
+{
+	struct attach_arg *a = arg;
+
+	a->attach = lkl_sys_attach_thread(a->tid);
+	a->gettid = lkl_sys_gettid();
+	a->getpid = lkl_sys_getpid();
+	/* an fd of init's: the thread shares its process's files */
+	a->write = lkl_sys_write(a->fd, "x", 1);
+}
+
+static void thread_attach_bad(void *arg)
+{
+	struct attach_arg *a = arg;
+
+	a->bogus = lkl_sys_attach_thread(1 << 30);
+	/* only a thread new_thread made, and no host thread took */
+	a->init = lkl_sys_attach_thread(1);
+}
+
+/* the same in a process other than init's */
+static void thread_new_process(void *arg)
+{
+	struct attach_arg *a = arg;
+	lkl_thread_t tid;
+
+	if (lkl_sys_new_thread_group_leader())
+		return;
+	a->pid = lkl_sys_getpid();
+	a->tid = lkl_sys_new_thread();
+	tid = lkl_host_ops.thread_create(thread_attach, a);
+	if (tid)
+		lkl_host_ops.thread_join(tid);
+}
+
+/*
+ * A host thread joins a process as a thread: one of the process's threads
+ * (here init's, then another process's) makes it with new_thread, the host
+ * thread takes it with attach_thread as its first call.
+ */
+static int lkl_test_attach_thread(void)
+{
+	struct attach_arg a = { 0 }, b = { 0 };
+	int pipe_fds[2];
+	lkl_thread_t tid;
+	long ret;
+	char c;
+
+	ret = lkl_sys_pipe2(pipe_fds, 0);
+	if (ret) {
+		lkl_test_logf("pipe2: %s\n", lkl_strerror(ret));
+		return TEST_FAILURE;
+	}
+	a.fd = b.fd = pipe_fds[1];
+
+	a.tid = lkl_sys_new_thread();
+	tid = lkl_host_ops.thread_create(thread_attach, &a);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	tid = lkl_host_ops.thread_create(thread_attach_bad, &a);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	tid = lkl_host_ops.thread_create(thread_new_process, &b);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	ret = lkl_sys_read(pipe_fds[0], &c, 1);
+
+	lkl_test_logf("new_thread %ld attach %ld gettid %ld getpid %ld write %ld read %ld\n",
+		      a.tid, a.attach, a.gettid, a.getpid, a.write, ret);
+	lkl_test_logf("attach bogus %ld init %ld\n", a.bogus, a.init);
+	lkl_test_logf("process %ld: new_thread %ld attach %ld gettid %ld getpid %ld\n",
+		      b.pid, b.tid, b.attach, b.gettid, b.getpid);
+
+	lkl_sys_close(pipe_fds[0]);
+	lkl_sys_close(pipe_fds[1]);
+
+	if (a.tid <= 1 || a.attach || a.gettid != a.tid || a.getpid != 1 ||
+	    a.write != 1 || ret != 1 || a.bogus != -LKL_ESRCH ||
+	    a.init != -LKL_EINVAL)
+		return TEST_FAILURE;
+	if (b.pid <= 1 || b.tid <= b.pid || b.attach || b.gettid != b.tid ||
+	    b.getpid != b.pid)
+		return TEST_FAILURE;
+
+	return TEST_SUCCESS;
+}
 #endif
 
 static void thread_quit_immediately(void *unused)
@@ -831,6 +925,7 @@ struct lkl_test tests[] = {
 #ifndef __MINGW32__
 	LKL_TEST(many_syscall_threads),
 	LKL_TEST(new_tgid_threads),
+	LKL_TEST(attach_thread),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),

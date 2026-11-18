@@ -2,6 +2,8 @@
 
 __SYSCALL(__NR_virtio_mmio_device_add, sys_virtio_mmio_device_add)
 __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
+__SYSCALL(__NR_new_thread, sys_new_thread)
+__SYSCALL(__NR_attach_thread, sys_attach_thread)
 
 #define __SC_ASCII(t, a) #t "," #a
 

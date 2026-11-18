@@ -16,3 +16,5 @@
 
 #define __NR_virtio_mmio_device_add		(__NR_arch_specific_syscall + 0)
 #define __NR_new_thread_group_leader	(__NR_arch_specific_syscall + 1)
+#define __NR_new_thread			(__NR_arch_specific_syscall + 2)
+#define __NR_attach_thread		(__NR_arch_specific_syscall + 3)
