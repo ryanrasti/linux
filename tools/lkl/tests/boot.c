@@ -874,7 +874,74 @@ static int lkl_test_start_kernel(void)
  */
 LKL_TEST_CALL(init_exit, lkl_sys_exit_group, 3 << 8, 3);
 
+#ifndef __MINGW32__
+/*
+ * Halt with another thread waiting for the CPU: a thread making syscalls in
+ * a loop is parked in lkl_cpu_get() when the halt takes the CPU, and still
+ * counts in the CPU's shutdown gate until it runs again. Once the halt has
+ * started, its sem_downs return 20 ms late, as on a host that runs one
+ * thread at a time and has yet to run it. The halt must wait for it without
+ * spinning: a spin costs that time in CPU (and on such a host never
+ * ends, since the thread it waits for can't run).
+ */
+#define HALT_LATE_NS 20000000
+static void (*halt_sem_down)(struct lkl_sem *sem);
+static volatile int halting;
+static __thread int halt_late;
+
+static void late_sem_down(struct lkl_sem *sem)
+{
+	struct timespec ts = { 0, HALT_LATE_NS };
+
+	halt_sem_down(sem);
+	if (halt_late && halting)
+		nanosleep(&ts, NULL);
+}
+
+static void thread_until_halt(void *arg)
+{
+	volatile long *ret = arg;
+
+	halt_late = 1;
+	while ((*ret = lkl_sys_getpid()) >= 0)
+		;
+}
+
+static int lkl_test_stop_kernel(void)
+{
+	struct timespec c0, c1;
+	lkl_thread_t tid;
+	volatile long thread_ret = 0;
+	long ret, cpu_ns;
+
+	halt_sem_down = lkl_host_ops.sem_down;
+	lkl_host_ops.sem_down = late_sem_down;
+	tid = lkl_host_ops.thread_create(thread_until_halt, (void *)&thread_ret);
+	if (!tid)
+		return TEST_FAILURE;
+	/* until it's making syscalls */
+	while (!thread_ret)
+		;
+
+	halting = 1;
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
+	ret = lkl_sys_halt();
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
+	lkl_host_ops.thread_join(tid);
+	lkl_host_ops.sem_down = halt_sem_down;
+
+	cpu_ns = (c1.tv_sec - c0.tv_sec) * 1000000000L +
+		 (c1.tv_nsec - c0.tv_nsec);
+	lkl_test_logf("lkl_sys_halt() = %ld, CPU %ld us; the thread's last syscall: %ld\n",
+		      ret, cpu_ns / 1000, thread_ret);
+
+	if (ret || thread_ret >= 0 || cpu_ns > HALT_LATE_NS / 2)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+#else
 LKL_TEST_CALL(stop_kernel, lkl_sys_halt, 0);
+#endif
 
 struct lkl_test tests[] = {
 	LKL_TEST(mutex),

@@ -54,6 +54,12 @@ struct lkl_cpu {
 	/* idle waits here for an interrupt until the idle host task exists */
 	struct lkl_sem *idle_sem;
 	bool idle_waiting;
+	/*
+	 * halt waits here for the threads still in the gate (lkl_cpu_wait_gate);
+	 * gate_waiting says it does, and the thread that clears it posts
+	 */
+	struct lkl_sem *gate_sem;
+	bool gate_waiting;
 } cpu;
 
 static int __cpu_try_get_lock(int n)
@@ -83,7 +89,10 @@ static void __cpu_try_get_unlock(int lock_ret, int n)
 {
 	if (lock_ret >= -1)
 		lkl_ops->mutex_unlock(cpu.lock);
-	__sync_fetch_and_sub(&cpu.shutdown_gate, n);
+	/* the last thread out of a shut down gate wakes the shutdown's wait */
+	if (__sync_sub_and_fetch(&cpu.shutdown_gate, n) == MAX_THREADS && n &&
+	    __atomic_exchange_n(&cpu.gate_waiting, false, __ATOMIC_SEQ_CST))
+		lkl_ops->sem_up(cpu.gate_sem);
 }
 
 void lkl_cpu_change_owner(lkl_thread_t owner)
@@ -181,10 +190,33 @@ void lkl_cpu_wait_shutdown(void)
 	lkl_ops->sem_free(cpu.shutdown_sem);
 }
 
+/*
+ * Wait for the threads still in the gate to leave it. A thread woken from
+ * lkl_cpu_get()'s sem_down(cpu.sem) at shutdown still counts until it runs
+ * again; spinning here kept it from running on a host that runs its
+ * threads cooperatively (one at a time), and the halt hung whenever another
+ * thread was waiting for the CPU (a program thread entering a syscall).
+ * So this sleeps on gate_sem, posted by the thread whose exit from the gate
+ * empties it (__cpu_try_get_unlock) if it finds gate_waiting set. Clearing
+ * gate_waiting before the semaphore is freed means a late thread (a TLS
+ * destructor after the halt) never posts it.
+ */
+static void lkl_cpu_wait_gate(void)
+{
+	for (;;) {
+		__atomic_store_n(&cpu.gate_waiting, true, __ATOMIC_SEQ_CST);
+		if (__sync_fetch_and_add(&cpu.shutdown_gate, 0) <= MAX_THREADS)
+			break;
+		lkl_ops->sem_down(cpu.gate_sem);
+	}
+	/* a thread that cleared it is posting: take that before the free */
+	if (!__atomic_exchange_n(&cpu.gate_waiting, false, __ATOMIC_SEQ_CST))
+		lkl_ops->sem_down(cpu.gate_sem);
+}
+
 static void lkl_cpu_cleanup(bool shutdown)
 {
-	while (__sync_fetch_and_add(&cpu.shutdown_gate, 0) > MAX_THREADS)
-		;
+	lkl_cpu_wait_gate();
 
 	if (shutdown)
 		lkl_ops->sem_up(cpu.shutdown_sem);
@@ -194,6 +226,8 @@ static void lkl_cpu_cleanup(bool shutdown)
 		lkl_ops->sem_free(cpu.sem);
 	if (cpu.idle_sem)
 		lkl_ops->sem_free(cpu.idle_sem);
+	if (cpu.gate_sem)
+		lkl_ops->sem_free(cpu.gate_sem);
 	if (cpu.lock)
 		lkl_ops->mutex_free(cpu.lock);
 }
@@ -253,8 +287,10 @@ int lkl_cpu_init(void)
 	cpu.sem = lkl_ops->sem_alloc(0);
 	cpu.shutdown_sem = lkl_ops->sem_alloc(0);
 	cpu.idle_sem = lkl_ops->sem_alloc(0);
+	cpu.gate_sem = lkl_ops->sem_alloc(0);
 
-	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem || !cpu.idle_sem) {
+	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem || !cpu.idle_sem ||
+	    !cpu.gate_sem) {
 		lkl_cpu_cleanup(false);
 		return -ENOMEM;
 	}
