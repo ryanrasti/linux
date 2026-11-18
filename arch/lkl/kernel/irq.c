@@ -8,6 +8,7 @@
 #include <linux/tick.h>
 #include <linux/interrupt.h>
 #include <asm/irqflags.h>
+#include <asm/syscalls.h>
 #include <asm/host_ops.h>
 #include <asm/cpu.h>
 #include <linux/cpu.h>
@@ -65,8 +66,10 @@ static void run_irq(int irq)
 	/* interrupt handlers need to run with interrupts disabled */
 	local_irq_save(flags);
 	irq_enter();
+	idle_host_task_irq_enter();
 	generic_handle_irq(irq);
 	irq_exit();
+	idle_host_task_irq_exit();
 	set_irq_regs(old_regs);
 	local_irq_restore(flags);
 }

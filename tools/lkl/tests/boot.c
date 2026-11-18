@@ -52,6 +52,62 @@ int lkl_test_nanosleep(void)
 }
 #endif
 
+#ifndef __MINGW32__
+/*
+ * An idle kernel is tickless: while it sleeps, the host's timer fires for
+ * the next timer, not at every tick (HZ times a second: the idle host task
+ * kept the tick running), and is never armed further than a host's
+ * now + delta can add without wrapping. main() counts the timer's fires.
+ */
+static void (*timer_fn)(void);
+static int timer_fires;
+static int (*tickless_timer_set)(void *timer, unsigned long ns);
+static unsigned long tickless_max;
+
+static void counting_timer_fn(void)
+{
+	__sync_fetch_and_add(&timer_fires, 1);
+	timer_fn();
+}
+
+static void *(*host_timer_alloc)(void (*fn)(void));
+
+/* the kernel has one timer, its clockevent's */
+static void *counting_timer_alloc(void (*fn)(void))
+{
+	timer_fn = fn;
+	return host_timer_alloc(counting_timer_fn);
+}
+
+static int tickless_timer_set_oneshot(void *timer, unsigned long ns)
+{
+	if (ns > tickless_max)
+		tickless_max = ns;
+	return tickless_timer_set(timer, ns);
+}
+
+static int lkl_test_tickless_idle(void)
+{
+	struct __lkl__kernel_timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+	long ret;
+	int fires;
+
+	tickless_timer_set = lkl_host_ops.timer_set_oneshot;
+	lkl_host_ops.timer_set_oneshot = tickless_timer_set_oneshot;
+	fires = timer_fires;
+	ret = lkl_sys_nanosleep(&ts, NULL);
+	fires = timer_fires - fires;
+	lkl_host_ops.timer_set_oneshot = tickless_timer_set;
+
+	lkl_test_logf("nanosleep 100 ms = %ld: the timer fired %d times, armed at most %lu ns ahead\n",
+		      ret, fires, tickless_max);
+	/* ticking, it fires 10 times at HZ 100, 100 at 1000 */
+	if (ret || fires > 5 || tickless_max > (~0UL >> 2))
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+#endif
+
 LKL_TEST_CALL(getpid, lkl_sys_getpid, 1)
 /*
  * The thread that started the kernel is init itself, not another thread of
@@ -972,6 +1028,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(stat),
 #ifndef __MINGW32__
 	LKL_TEST(nanosleep),
+	LKL_TEST(tickless_idle),
 #endif
 	LKL_TEST(pipe2),
 	LKL_TEST(epoll),
@@ -1016,6 +1073,10 @@ int main(int argc, const char **argv)
 	int ret;
 
 	lkl_host_ops.print = lkl_test_log;
+#ifndef __MINGW32__
+	host_timer_alloc = lkl_host_ops.timer_alloc;
+	lkl_host_ops.timer_alloc = counting_timer_alloc;
+#endif
 
 	if (lkl_init(&lkl_host_ops) < 0) {
 		printf("%s\n", lkl_test_get_log());

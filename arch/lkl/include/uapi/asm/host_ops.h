@@ -114,7 +114,10 @@ enum lkl_prot {
  * @timer_create - allocate a host timer that runs fn() when the timer
  * fires.
  * @timer_free - disarms and free the timer
- * @timer_set_oneshot - arm the timer to fire once, after delta ns.
+ * @timer_set_oneshot - arm the timer to fire once, after delta ns. An idle
+ * kernel is tickless: the timer is armed for its next timer only, and with
+ * none, as far off as it goes (146 years on 64-bit: at most KTIME_MAX / 2,
+ * so the host's now + delta doesn't wrap a signed 64-bit clock).
  *
  * @ioremap - searches for an I/O memory region identified by addr and size and
  * returns a pointer to the start of the address range that can be used by

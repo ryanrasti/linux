@@ -119,11 +119,18 @@ int lkl_cpu_get(void)
 
 	__cpu_try_get_unlock(ret, 1);
 
+	if (ret > 0)
+		idle_host_task_busy();
+
 	return ret;
 }
 
 void lkl_cpu_put(void)
 {
+	/* the owner's last put, the idle host task current: the kernel idles */
+	if (cpu.count == 1)
+		idle_host_task_idle();
+
 	lkl_ops->mutex_lock(cpu.lock);
 
 	if (!cpu.count || !cpu.owner ||
@@ -142,6 +149,7 @@ void lkl_cpu_put(void)
 		if (in_interrupt())
 			lkl_bug("%s: in interrupt\n", __func__);
 		lkl_ops->mutex_unlock(cpu.lock);
+		idle_host_task_busy();
 		thread_sched_jb();
 		return;
 	}

@@ -12,6 +12,7 @@
 #include <linux/completion.h>
 #include <linux/sched/signal.h>
 #include <linux/platform_device.h>
+#include <linux/tick.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
 #include <asm/syscalls_32.h>
@@ -232,6 +233,60 @@ bool wakeup_idle_host_task(void)
 	if (!need_resched())
 		wake_up_process(idle_host_task);
 	return true;
+}
+
+/*
+ * The kernel is idle while the CPU is free with the idle host task current:
+ * the idle task's loop switched to it and ended, and its tick's idle
+ * (NO_HZ_IDLE) with it, so the tick ran at HZ while nothing ran, waking the
+ * host HZ times a second. The idle host task's idle is now the kernel's:
+ * the tick stops until the next timer, as the idle loop's would, is
+ * re-evaluated at each interrupt's end, and restarts when the CPU is taken.
+ */
+static bool host_idle;
+
+/* the CPU released with the idle host task current: the kernel is idle */
+void idle_host_task_idle(void)
+{
+	unsigned long flags;
+
+	if (!idle_host_task || current != idle_host_task || irqs_disabled())
+		return;
+	if (!host_idle) {
+		host_idle = true;
+		tick_nohz_idle_enter();
+	}
+	local_irq_save(flags);
+	tick_nohz_idle_stop_tick();
+	local_irq_restore(flags);
+}
+
+/*
+ * An interrupt while idle: jiffies brought up to date (irq_enter does it
+ * only for the idle task)
+ */
+void idle_host_task_irq_enter(void)
+{
+	if (host_idle)
+		tick_irq_enter();
+}
+
+/* an interrupt's end, idle: the tick stopped again, to the next timer */
+void idle_host_task_irq_exit(void)
+{
+	if (host_idle && !need_resched()) {
+		tick_nohz_irq_exit();
+		tick_nohz_idle_stop_tick();
+	}
+}
+
+/* the CPU taken from the idle kernel: by a host thread, or to schedule */
+void idle_host_task_busy(void)
+{
+	if (!host_idle)
+		return;
+	host_idle = false;
+	tick_nohz_idle_exit();
 }
 
 static int idle_host_task_loop(void *unused)

@@ -83,13 +83,33 @@ static int clockevent_set_state_shutdown(struct clock_event_device *evt)
 	return 0;
 }
 
+/*
+ * The farthest the host's timer is armed: "no event" (the tick stopped
+ * while idle, with no timer), and the clockevent's limit. Far enough to
+ * never fire (146 years on 64-bit), near enough that the host's now + delta
+ * fits a signed 64-bit clock: "no event" armed as ULONG_MAX made tier A's
+ * host wrap its deadline into the past and fire ~700k times a second.
+ */
+#define TIMER_FAR ((unsigned long)min_t(u64, ULONG_MAX, KTIME_MAX / 2))
+
 static int clockevent_set_state_oneshot(struct clock_event_device *evt)
 {
-	timer = lkl_ops->timer_alloc(timer_fn);
+	/* again after oneshot_stopped, which keeps the timer */
+	if (!timer)
+		timer = lkl_ops->timer_alloc(timer_fn);
 	if (!timer)
 		return -ENOMEM;
 
 	return 0;
+}
+
+/*
+ * No event: the host's timer as far off as it goes, instead of left armed
+ * for the tick that no longer comes (a spurious wakeup of an idle host)
+ */
+static int clockevent_set_state_oneshot_stopped(struct clock_event_device *evt)
+{
+	return lkl_ops->timer_set_oneshot(timer, TIMER_FAR);
 }
 
 static irqreturn_t timer_irq_handler(int irq, void *dev_id)
@@ -104,13 +124,14 @@ static irqreturn_t timer_irq_handler(int irq, void *dev_id)
 static int clockevent_next_event(unsigned long ns,
 				 struct clock_event_device *evt)
 {
-	return lkl_ops->timer_set_oneshot(timer, ns);
+	return lkl_ops->timer_set_oneshot(timer, min(ns, TIMER_FAR));
 }
 
 static struct clock_event_device clockevent = {
 	.name			= "lkl",
 	.features		= CLOCK_EVT_FEAT_ONESHOT,
 	.set_state_oneshot	= clockevent_set_state_oneshot,
+	.set_state_oneshot_stopped = clockevent_set_state_oneshot_stopped,
 	.set_next_event		= clockevent_next_event,
 	.set_state_shutdown	= clockevent_set_state_shutdown,
 };
@@ -136,7 +157,7 @@ void __init time_init(void)
 	if (ret)
 		pr_err("lkl: unable to register clocksource\n");
 
-	clockevents_config_and_register(&clockevent, NSEC_PER_SEC, 1, ULONG_MAX);
+	clockevents_config_and_register(&clockevent, NSEC_PER_SEC, 1, TIMER_FAR);
 
 	boot_time = lkl_ops->time();
 	pr_info("lkl: time and timers initialized (irq%d)\n", timer_irq);
