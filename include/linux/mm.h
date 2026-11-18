@@ -3248,6 +3248,7 @@ static inline void show_mem(void)
 }
 extern long si_mem_available(void);
 extern void si_meminfo(struct sysinfo * val);
+extern unsigned long reported_ram_pages;
 extern void si_meminfo_node(struct sysinfo *val, int nid);
 
 extern __printf(3, 4)

@@ -37,6 +37,18 @@ static int __init setup_mem_size(char *str)
 }
 early_param("mem", setup_mem_size);
 
+/*
+ * program_mem=<size>: the memory sysinfo and /proc/meminfo report, the
+ * program's (the host's arena), not the kernel's pool (mem=). Runtimes size
+ * their heaps by it: V8 took its smallest heap for a 16 MB pool.
+ */
+static int __init setup_program_mem(char *str)
+{
+	reported_ram_pages = memparse(str, NULL) >> PAGE_SHIFT;
+	return 0;
+}
+early_param("program_mem", setup_program_mem);
+
 void __init setup_arch(char **cl)
 {
 	*cl = cmd_line;

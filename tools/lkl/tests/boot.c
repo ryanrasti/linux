@@ -872,6 +872,56 @@ static int lkl_test_memblk(void)
 	return TEST_SUCCESS;
 }
 
+#define PROGRAM_MEM (1UL << 30)
+/*
+ * The memory reported is the program's (program_mem=1G on the command
+ * line), not the kernel's pool (mem=32M): sysinfo's total, and
+ * /proc/meminfo's MemTotal, MemFree and MemAvailable, the pool's use
+ * counted as used.
+ */
+static int lkl_test_meminfo(void)
+{
+	struct lkl_sysinfo si;
+	char buf[1024], *p;
+	unsigned long total = 0, free = 0, avail = 0;
+	long ret, fd, n;
+
+	ret = lkl_sys_sysinfo(&si);
+	if (ret)
+		return TEST_FAILURE;
+	lkl_sys_mkdir("/proc", 0555);
+	ret = lkl_sys_mount("proc", "/proc", "proc", 0, NULL);
+	fd = lkl_sys_open("/proc/meminfo", LKL_O_RDONLY, 0);
+	n = fd < 0 ? fd : lkl_sys_read(fd, buf, sizeof(buf) - 1);
+	if (fd >= 0)
+		lkl_sys_close(fd);
+	lkl_sys_umount("/proc", 0);
+	if (ret || n <= 0)
+		return TEST_FAILURE;
+	buf[n] = 0;
+	p = strstr(buf, "MemTotal:");
+	if (p)
+		total = strtoul(p + 9, NULL, 10);
+	p = strstr(buf, "MemFree:");
+	if (p)
+		free = strtoul(p + 8, NULL, 10);
+	p = strstr(buf, "MemAvailable:");
+	if (p)
+		avail = strtoul(p + 13, NULL, 10);
+
+	lkl_test_logf("sysinfo totalram %lu freeram %lu (unit %u); MemTotal %lu kB, MemFree %lu kB, MemAvailable %lu kB\n",
+		      (unsigned long)si.totalram, (unsigned long)si.freeram,
+		      si.mem_unit, total, free, avail);
+	/* free: all but what the kernel uses of its 32 MB */
+	if ((unsigned long)si.totalram * si.mem_unit != PROGRAM_MEM ||
+	    (unsigned long)si.freeram * si.mem_unit < PROGRAM_MEM - (32 << 20) ||
+	    total != PROGRAM_MEM >> 10 || free > total ||
+	    free < total - (32 << 10) || avail < free - (32 << 10) ||
+	    avail > total)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 /* the kernel's context switches so far (/proc/stat's ctxt) */
 static long context_switches(void)
 {
@@ -1126,7 +1176,7 @@ static int lkl_test_kunit_pci_msi(void)
 }
 #endif // LKL_HOST_CONFIG_LKL_PCI_MSI_KUNIT_TEST
 
-#define CMD_LINE "mem=32M loglevel=8 "
+#define CMD_LINE "mem=32M program_mem=1G loglevel=8 "
 
 static int lkl_test_start_kernel(void)
 {
@@ -1440,6 +1490,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(syscall_switches),
 	LKL_TEST(host_fd),
 	LKL_TEST(memblk),
+	LKL_TEST(meminfo),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),
