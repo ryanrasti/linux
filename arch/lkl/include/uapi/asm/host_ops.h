@@ -11,6 +11,33 @@ struct lkl_jmp_buf {
 };
 struct lkl_pci_dev;
 
+/**
+ * lkl_signal - a caught signal's delivery (signal_handler)
+ *
+ * @sig - the signal's number
+ * @restart - whether the syscall it interrupted runs again after the
+ * handler (its -ERESTART* result, the handler's SA_RESTART)
+ * @handler - the handler, sa_handler (or sa_sigaction) as the program set it
+ * @flags - its sa_flags as the program set them (SA_SIGINFO: the handler
+ * takes (sig, info, ucontext); SA_ONSTACK; the kernel has done SA_NODEFER,
+ * SA_RESETHAND and sa_mask)
+ * @info - the signal's siginfo_t (Linux's layout, 128 bytes)
+ * @mask - the sigset_t the handler's sigreturn restores (uc_sigmask): the
+ * mask before the delivery; the host writes back the ucontext's
+ * @stack - the thread's alternate signal stack (stack_t, as sigaltstack
+ * sets it: SS_DISABLE if none), uc_stack; the host writes back the
+ * ucontext's
+ */
+struct lkl_signal {
+	int sig;
+	int restart;
+	unsigned long handler;
+	unsigned long flags;
+	void *info;
+	void *mask;
+	void *stack;
+};
+
 enum lkl_pci_irq_type {
 	LKL_PCI_IRQ_MSI = 1,
 	LKL_PCI_IRQ_MSIX = 2,
@@ -156,6 +183,24 @@ enum lkl_prot {
  * 0. init's end is pid 1, after its exit has run (its files closed).
  * Optional: without it, the thread ends with thread_exit.
  *
+ * @signal_handler - run a caught signal's handler, a function of the
+ * program's, at the return of the task's syscall to the program (the
+ * kernel's signal delivery: get_signal and the default actions are its
+ * own). Called on the task's host thread with the CPU released; the host
+ * calls sig->handler as the program would be interrupted at that point (on
+ * its stack or, for SA_ONSTACK, sig->stack's, with a ucontext whose
+ * uc_sigmask is *sig->mask and uc_stack *sig->stack, and as the restorer
+ * the program gave, which the kernel doesn't keep: LKL's sigaction has no
+ * sa_restorer). The handler's own syscalls are made as any of the task's.
+ * When it returns, *sig->mask and *sig->stack are what sigreturn restores
+ * (the ucontext's, which the handler may have changed). Return: whether
+ * the interrupted syscall runs again, if sig->restart says it would (its
+ * -ERESTART* result, SA_RESTART); 0 ends it with -EINTR (a handler that
+ * moved the program on: changed its ucontext's program counter). A handler
+ * that doesn't return (siglongjmp) leaves the kernel's frames behind,
+ * which is safe: nothing is held. Optional: without it, a caught signal's
+ * handler is skipped, as if it had returned at once.
+ *
  * @hostfd_rw - read (write 0) or write (write 1) len bytes at buf on host fd
  * fd, for a guest file made by host_fd(fd, flags) (asm/syscalls.h): returns
  * the bytes done or a negative Linux errno. Called on the calling task's
@@ -225,6 +270,7 @@ struct lkl_host_operations {
 
 	void (*task_exit)(int pid, int status);
 	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int write);
+	int (*signal_handler)(struct lkl_signal *sig);
 };
 
 /**

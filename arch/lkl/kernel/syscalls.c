@@ -114,8 +114,9 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
 
 	switch_to_host_task(host0);
 
+	/* a process: its signal actions its own, a copy of init's */
 	if (new_tg_leader)
-		flags &= ~CLONE_THREAD;
+		flags &= ~(CLONE_THREAD | CLONE_SIGHAND);
 
 	*task = clone_host_task(flags);
 	if (IS_ERR(*task))
@@ -240,15 +241,129 @@ static void init_ending(struct task_struct *task, long no)
 }
 
 /*
- * A fatal signal (another thread's exit_group, a SIGKILL) ends the task in
- * its syscall, at its start or its end: LKL runs no other signal delivery,
- * and the task's thread would otherwise never die. Not host0, which the
- * halt borrows once init's process has ended.
+ * A fatal signal (another thread's exit_group, a SIGKILL) pending at a
+ * syscall's start ends the task there, before the call runs: the signal
+ * came while the task was outside the kernel. (At its end, signal
+ * delivery does it.) Not host0, which the halt borrows once init's process
+ * has ended.
  */
 static void exit_if_killed(struct task_struct *task)
 {
 	if (task != host0 && fatal_signal_pending(task))
 		do_group_exit(SIGKILL);
+}
+
+/*
+ * Whether a syscall a signal interrupted runs again (its -ERESTART*
+ * result; any other is its result), as an arch's signal delivery decides:
+ * if not, it ends with -EINTR. ka: the handler about to run, or NULL.
+ */
+static bool syscall_restarts(long *ret, struct k_sigaction *ka)
+{
+	switch (*ret) {
+	case -ERESTARTNOHAND:
+	case -ERESTART_RESTARTBLOCK:
+		if (!ka)
+			return true;
+		break;
+	case -ERESTARTSYS:
+		if (!ka || ka->sa.sa_flags & SA_RESTART)
+			return true;
+		break;
+	case -ERESTARTNOINTR:
+		return true;
+	default:
+		return false;
+	}
+	*ret = -EINTR;
+	return false;
+}
+
+/*
+ * A caught signal's handler, a function of the program's, run by the host
+ * (signal_handler) on the task's host thread with the CPU released; then
+ * sigreturn's work: the mask the host hands back (the ucontext's
+ * uc_sigmask) and the alternate stack (uc_stack) restored. Without the op
+ * the handler is skipped, as if it had returned at once. Returns whether
+ * the interrupted call still restarts (the host's say), or -1 if the
+ * kernel halted meanwhile (the CPU not taken back).
+ */
+static int run_signal_handler(struct task_struct *task, struct ksignal *ksig,
+			      bool restart)
+{
+	struct lkl_signal s;
+	siginfo_t info;
+	sigset_t mask = *sigmask_to_save();
+	stack_t stack;
+
+	copy_siginfo_to_external(&info, &ksig->info);
+	__save_altstack((stack_t __user *)&stack, 0);
+	/* the handler's mask, SS_AUTODISARM's disarm */
+	signal_setup_done(0, ksig, 0);
+
+	s = (struct lkl_signal){
+		.sig = ksig->sig,
+		.restart = restart,
+		.handler = (unsigned long)ksig->ka.sa.sa_handler,
+		.flags = ksig->ka.sa.sa_flags,
+		.info = &info,
+		.mask = &mask,
+		.stack = &stack,
+	};
+	if (lkl_ops->signal_handler) {
+		lkl_cpu_put();
+		if (!lkl_ops->signal_handler(&s))
+			restart = false;
+		if (lkl_cpu_get() < 0)
+			return -1;
+		switch_to_host_task(task);
+	}
+
+	/* sigreturn */
+	sigdelsetmask(&mask, sigmask(SIGKILL) | sigmask(SIGSTOP));
+	set_current_blocked(&mask);
+	restore_altstack((const stack_t __user *)&stack);
+	return restart;
+}
+
+/*
+ * A syscall's return to the program, as an arch's (arch_do_signal_or_restart)
+ * but without a signal frame: the task's pending signals are taken one at a
+ * time (get_signal: the default actions, a fatal one ending the task there,
+ * reported by task_exit; a stop stops it), a caught one's handler run by
+ * the host (run_signal_handler), and the call restarted or ended with
+ * -EINTR as SA_RESTART and its result say. Returns the call's result; false
+ * in *cpu if the kernel halted while a handler ran.
+ */
+static long syscall_return(struct task_struct *task, long no, long *params,
+			   long ret, bool *cpu)
+{
+	struct ksignal ksig;
+	int restart;
+
+	for (;;) {
+		if (!signal_pending(task) || !get_signal(&ksig)) {
+			restart = syscall_restarts(&ret, NULL);
+			restore_saved_sigmask();
+			if (!restart)
+				return ret;
+		} else {
+			restart = syscall_restarts(&ret, &ksig.ka);
+			restart = run_signal_handler(task, &ksig, restart);
+			if (restart < 0) {
+				*cpu = false;
+				return -EINTR;
+			}
+			if (!restart) {
+				if (ret <= -ERESTARTSYS && ret >= -ERESTART_RESTARTBLOCK)
+					ret = -EINTR;
+				continue;
+			}
+		}
+		if (ret == -ERESTART_RESTARTBLOCK)
+			no = __NR_restart_syscall;
+		ret = run_syscall(no, params);
+	}
 }
 
 long lkl_syscall(long no, long *params)
@@ -292,7 +407,13 @@ long lkl_syscall(long no, long *params)
 		return ret;
 	}
 
-	exit_if_killed(task);
+	if (task != host0) {
+		bool cpu = true;
+
+		ret = syscall_return(task, no, params, ret, &cpu);
+		if (!cpu)
+			return ret;
+	}
 
 out:
 	lkl_cpu_put();
@@ -428,6 +549,12 @@ int syscalls_init(void)
 
 	set_thread_flag(TIF_HOST_THREAD);
 	init_host_task = current;
+	/*
+	 * The program is init, but a program as any other: a signal whose
+	 * default action is fatal ends it (abort, a SIGTERM), as it would
+	 * outside the sandbox. (init's end is the host's: task_exit(1, ...).)
+	 */
+	current->signal->flags &= ~SIGNAL_UNKILLABLE;
 
 	if (lkl_ops->tls_alloc) {
 		task_key = lkl_ops->tls_alloc(del_host_task);

@@ -1308,6 +1308,282 @@ static int lkl_test_task_exit(void)
 }
 
 /*
+ * Signals, the kernel's, delivered at a syscall's return: the host's
+ * signal_handler (here this, as a native host would: the handler called on
+ * the thread's own stack) runs a caught signal's handler, with a ucontext
+ * of the mask and alternate stack sigreturn restores. Its return says
+ * whether the interrupted call restarts: sig_no_restart overrides it.
+ */
+struct test_ucontext {
+	lkl_sigset_t mask;
+	lkl_stack_t stack;
+};
+static __thread int sig_no_restart;
+static __thread struct lkl_signal sig_last;
+
+static int test_signal_handler(struct lkl_signal *s)
+{
+	struct test_ucontext uc;
+
+	sig_last = *s;
+	memcpy(&uc.mask, s->mask, sizeof(uc.mask));
+	memcpy(&uc.stack, s->stack, sizeof(uc.stack));
+	if (s->flags & LKL_SA_SIGINFO)
+		((void (*)(int, void *, void *))s->handler)(s->sig, s->info, &uc);
+	else
+		((void (*)(int))s->handler)(s->sig);
+	memcpy(s->mask, &uc.mask, sizeof(uc.mask));
+	return !sig_no_restart;
+}
+
+struct sig_record {
+	int calls, signo, code;
+	long pid, inmask, blocked;
+};
+static __thread struct sig_record sig_rec;
+static __thread int sig_pipe_w = -1;
+
+static void sig_info_handler(int sig, void *info, void *ucp)
+{
+	lkl_siginfo_t *si = info;
+	lkl_sigset_t cur;
+
+	sig_rec.calls++;
+	sig_rec.signo = si->si_signo;
+	sig_rec.code = si->si_code;
+	sig_rec.pid = si->lkl_si_pid;
+	/* uc_sigmask: the mask before the signal; the handler's: it blocked */
+	sig_rec.inmask = ((struct test_ucontext *)ucp)->mask.sig[0];
+	if (!lkl_sys_rt_sigprocmask(LKL_SIG_BLOCK, NULL, &cur, sizeof(cur)))
+		sig_rec.blocked = cur.sig[0];
+}
+
+static void sig_plain_handler(int sig)
+{
+	sig_rec.calls++;
+	sig_rec.signo = sig;
+	/* a byte for a read the signal interrupted, if it restarts */
+	if (sig_pipe_w >= 0)
+		lkl_sys_write(sig_pipe_w, "s", 1);
+}
+
+#define SIGBIT(s) (1UL << ((s) - 1))
+
+static long sig_action(int sig, void *handler, unsigned long flags)
+{
+	struct lkl_sigaction sa = { 0 };
+
+	sa.lkl_sa_handler = handler;
+	sa.sa_flags = flags;
+	return lkl_sys_rt_sigaction(sig, &sa, NULL, sizeof(sa.sa_mask));
+}
+
+static long sig_mask(int how, unsigned long set)
+{
+	lkl_sigset_t s = { { set } };
+
+	return lkl_sys_rt_sigprocmask(how, &s, NULL, sizeof(s));
+}
+
+static long sig_alarm_us(long us)
+{
+	struct __lkl__kernel_old_itimerval it = { { 0, 0 }, { 0, us } };
+
+	return lkl_sys_setitimer(LKL_ITIMER_REAL, &it, NULL);
+}
+
+static long elapsed_ms(struct timespec *t0)
+{
+	struct timespec t1;
+
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	return (t1.tv_sec - t0->tv_sec) * 1000 +
+	       (t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+struct sig_results {
+	long pid, kill;
+	struct sig_record info;
+	struct lkl_signal op;
+	long blocked_calls, pending, unblock_calls;
+	long sleep, sleep_ms, sleep_calls, rem_ns;
+	long read, read_calls, read_noretart;
+	long suspend, suspend_calls, suspend_mask;
+	long timedwait, timedwait_calls;
+	int done;
+};
+
+static void signals_process(void *arg)
+{
+	struct sig_results *r = arg;
+	struct __lkl__kernel_timespec ts = { 1, 0 }, rem = { 0, 0 };
+	lkl_sigset_t set;
+	struct timespec t0;
+	int fds[2];
+	char c;
+
+	if (lkl_sys_new_thread_group_leader())
+		return;
+	r->pid = lkl_sys_getpid();
+
+	/* a handler, SA_SIGINFO: at kill's return, with kill's siginfo */
+	sig_action(LKL_SIGUSR1, sig_info_handler, LKL_SA_SIGINFO);
+	r->kill = lkl_sys_kill(r->pid, LKL_SIGUSR1);
+	r->info = sig_rec;
+	r->op = sig_last;
+
+	/* blocked: pending, then delivered at the unblocking call's return */
+	sig_rec.calls = 0;
+	sig_action(LKL_SIGUSR2, sig_plain_handler, 0);
+	sig_mask(LKL_SIG_BLOCK, SIGBIT(LKL_SIGUSR2));
+	lkl_sys_kill(r->pid, LKL_SIGUSR2);
+	r->blocked_calls = sig_rec.calls;
+	if (!lkl_sys_rt_sigpending(&set, sizeof(set)))
+		r->pending = set.sig[0];
+	sig_mask(LKL_SIG_UNBLOCK, SIGBIT(LKL_SIGUSR2));
+	r->unblock_calls = sig_rec.calls;
+
+	/* nanosleep interrupted by a handled SIGALRM (setitimer): -EINTR */
+	sig_rec.calls = 0;
+	sig_action(LKL_SIGALRM, sig_plain_handler, LKL_SA_RESTART);
+	sig_alarm_us(20000);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	r->sleep = lkl_sys_nanosleep(&ts, &rem);
+	r->sleep_ms = elapsed_ms(&t0);
+	r->sleep_calls = sig_rec.calls;
+	r->rem_ns = rem.tv_sec * 1000000000L + rem.tv_nsec;
+
+	/*
+	 * read restarted after an SA_RESTART handler (which writes the byte
+	 * it then reads); not if the host says the handler moved on
+	 */
+	sig_rec.calls = 0;
+	if (lkl_sys_pipe2(fds, 0))
+		return;
+	sig_pipe_w = fds[1];
+	sig_alarm_us(20000);
+	r->read = lkl_sys_read(fds[0], &c, 1);
+	r->read_calls = sig_rec.calls;
+	sig_no_restart = 1;
+	sig_alarm_us(20000);
+	r->read_noretart = lkl_sys_read(fds[0], &c, 1);
+	sig_no_restart = 0;
+	sig_pipe_w = -1;
+	lkl_sys_close(fds[0]);
+	lkl_sys_close(fds[1]);
+
+	/* rt_sigsuspend: the handler runs, -EINTR, the old mask is back */
+	sig_rec.calls = 0;
+	sig_mask(LKL_SIG_BLOCK, SIGBIT(LKL_SIGALRM));
+	sig_alarm_us(20000);
+	set.sig[0] = 0;
+	r->suspend = lkl_sys_rt_sigsuspend(&set, sizeof(set));
+	r->suspend_calls = sig_rec.calls;
+	if (!lkl_sys_rt_sigprocmask(LKL_SIG_BLOCK, NULL, &set, sizeof(set)))
+		r->suspend_mask = set.sig[0];
+	sig_mask(LKL_SIG_UNBLOCK, SIGBIT(LKL_SIGALRM));
+
+	/* rt_sigtimedwait for another signal, interrupted by a handled one */
+	sig_rec.calls = 0;
+	set.sig[0] = SIGBIT(LKL_SIGUSR2);
+	sig_mask(LKL_SIG_BLOCK, SIGBIT(LKL_SIGUSR2));
+	sig_alarm_us(20000);
+	r->timedwait = lkl_sys_rt_sigtimedwait(&set, NULL, &ts, sizeof(set));
+	r->timedwait_calls = sig_rec.calls;
+
+	r->done = 1;
+}
+
+/*
+ * A process killed by a signal's default action (SIGTERM), when it takes
+ * it: sent while blocked (pending), at the unblocking call's return
+ */
+static void signal_fatal_process(void *arg)
+{
+	struct exit_process *p = arg;
+
+	exit_report = &p->leader;
+	if (lkl_sys_new_thread_group_leader())
+		return;
+	p->pid = lkl_sys_getpid();
+	sig_mask(LKL_SIG_BLOCK, SIGBIT(LKL_SIGTERM));
+	lkl_sys_kill(p->pid, LKL_SIGTERM);
+	p->tid = 1;
+	sig_mask(LKL_SIG_UNBLOCK, SIGBIT(LKL_SIGTERM));
+	/* not reached */
+	p->leader.calls = -1;
+}
+
+static int lkl_test_signals(void)
+{
+	struct sig_results r = { 0 };
+	struct exit_process p = { 0 };
+	struct lkl_sigaction init_usr1;
+	lkl_thread_t tid;
+	int status = 0;
+	long ret;
+
+	tid = lkl_host_ops.thread_create(signals_process, &r);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	lkl_sys_wait4(r.pid, NULL, 0, NULL);
+	/* the process's actions were its own, not init's */
+	if (lkl_sys_rt_sigaction(LKL_SIGUSR1, NULL, &init_usr1,
+				 sizeof(init_usr1.sa_mask)))
+		return TEST_FAILURE;
+	lkl_test_logf("init's SIGUSR1 handler after: %#lx\n",
+		      (unsigned long)init_usr1.lkl_sa_handler);
+	lkl_test_logf("process %ld: kill(SIGUSR1) %ld: handler %d time(s), signo %d code %d pid %ld, uc_sigmask %#lx, mask in handler %#lx; op: sig %d flags %#lx restart %d\n",
+		      r.pid, r.kill, r.info.calls, r.info.signo, r.info.code,
+		      r.info.pid, r.info.inmask, r.info.blocked, r.op.sig,
+		      r.op.flags, r.op.restart);
+	lkl_test_logf("SIGUSR2 blocked: %ld handler calls, pending %#lx; unblocked: %ld\n",
+		      r.blocked_calls, r.pending, r.unblock_calls);
+	lkl_test_logf("nanosleep(1 s) with SIGALRM in 20 ms: %ld after %ld ms, handler %ld, rem %ld ns\n",
+		      r.sleep, r.sleep_ms, r.sleep_calls, r.rem_ns);
+	lkl_test_logf("read, SA_RESTART: %ld (handler %ld); the host saying no restart: %ld\n",
+		      r.read, r.read_calls, r.read_noretart);
+	lkl_test_logf("rt_sigsuspend: %ld, handler %ld, mask after %#lx; rt_sigtimedwait: %ld, handler %ld\n",
+		      r.suspend, r.suspend_calls, r.suspend_mask, r.timedwait,
+		      r.timedwait_calls);
+
+	tid = lkl_host_ops.thread_create(signal_fatal_process, &p);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	ret = lkl_sys_wait4(p.pid, &status, 0, NULL);
+	lkl_test_logf("process %ld, kill(SIGTERM) itself, blocked, then unblocked: task_exit %d pid %d status %#x; wait4 %ld status %#x\n",
+		      p.pid, p.leader.calls, p.leader.pid, p.leader.status, ret,
+		      status);
+
+	if (init_usr1.lkl_sa_handler)
+		return TEST_FAILURE;
+	if (!r.done || r.kill || r.info.calls != 1 ||
+	    r.info.signo != LKL_SIGUSR1 || r.info.code != LKL_SI_USER ||
+	    r.info.pid != r.pid || r.info.inmask & SIGBIT(LKL_SIGUSR1) ||
+	    !(r.info.blocked & SIGBIT(LKL_SIGUSR1)) ||
+	    r.op.sig != LKL_SIGUSR1 || r.op.flags != LKL_SA_SIGINFO ||
+	    r.op.handler != (unsigned long)sig_info_handler || r.op.restart)
+		return TEST_FAILURE;
+	if (r.blocked_calls || !(r.pending & SIGBIT(LKL_SIGUSR2)) ||
+	    r.unblock_calls != 1)
+		return TEST_FAILURE;
+	if (r.sleep != -LKL_EINTR || r.sleep_ms > 500 || r.sleep_calls != 1 ||
+	    r.rem_ns < 500000000L)
+		return TEST_FAILURE;
+	if (r.read != 1 || r.read_calls != 1 || r.read_noretart != -LKL_EINTR)
+		return TEST_FAILURE;
+	if (r.suspend != -LKL_EINTR || r.suspend_calls != 1 ||
+	    r.suspend_mask != SIGBIT(LKL_SIGALRM) ||
+	    r.timedwait != -LKL_EINTR || r.timedwait_calls != 1)
+		return TEST_FAILURE;
+	if (p.tid != 1 || p.leader.calls != 1 || p.leader.pid != p.pid ||
+	    p.leader.status != LKL_SIGTERM || ret != p.pid ||
+	    status != LKL_SIGTERM)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
  * The halt's other thread (stop_kernel): a process of its own, made before
  * init's end, since after it no new task can be made. It first checks that
  * init's end closed init's files: it reads a pipe whose write end only init
@@ -1507,6 +1783,7 @@ struct lkl_test tests[] = {
 #endif
 #ifndef __MINGW32__
 	LKL_TEST(task_exit),
+	LKL_TEST(signals),
 	LKL_TEST(init_exit),
 #endif
 	LKL_TEST(stop_kernel),
@@ -1521,6 +1798,7 @@ int main(int argc, const char **argv)
 	host_timer_alloc = lkl_host_ops.timer_alloc;
 	lkl_host_ops.timer_alloc = counting_timer_alloc;
 	lkl_host_ops.task_exit = test_task_exit;
+	lkl_host_ops.signal_handler = test_signal_handler;
 #endif
 
 	if (lkl_init(&lkl_host_ops) < 0) {

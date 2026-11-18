@@ -294,6 +294,13 @@ typedef __kernel_rwf_t		rwf_t;
  * It returns the disk's device number (as mknod takes it); the disk is
  * memblkN, N counting from 0. Reads are memcpys from the mapping.
  *
+ * Signals are the kernel's (actions, masks, kill, default actions, wait
+ * statuses), delivered as a call returns to the program: a caught one's
+ * handler is run by the host's signal_handler op, inside the call, and the
+ * call then restarts or returns -EINTR as Linux's would (SA_RESTART). A
+ * signal sent while a thread runs outside the kernel waits for its next
+ * call. sigaction has no sa_restorer here: the host keeps restorers.
+ *
  * A call that ends its task (exit, exit_group, or a fatal signal: another
  * thread's exit_group kills a thread at its next call, or at once if it's
  * blocked in one) doesn't return: the host's task_exit op is called on the
