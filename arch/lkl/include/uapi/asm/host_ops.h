@@ -155,6 +155,13 @@ enum lkl_prot {
  * reports it: exit code << 8, or the fatal signal's number); else both are
  * 0. init's end is pid 1, after its exit has run (its files closed).
  * Optional: without it, the thread ends with thread_exit.
+ *
+ * @hostfd_rw - read (write 0) or write (write 1) len bytes at buf on host fd
+ * fd, for a guest file made by host_fd(fd, flags) (asm/syscalls.h): returns
+ * the bytes done or a negative Linux errno. Called on the calling task's
+ * host thread with the CPU released, the task asleep in the kernel, so it
+ * may block for as long as the I/O takes. Without it, the files' reads and
+ * writes fail with -EINVAL.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -217,6 +224,7 @@ struct lkl_host_operations {
 	struct lkl_dev_pci_ops *pci_ops;
 
 	void (*task_exit)(int pid, int status);
+	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int write);
 };
 
 /**

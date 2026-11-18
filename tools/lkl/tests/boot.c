@@ -712,6 +712,84 @@ static int lkl_test_attach_thread(void)
 	return TEST_SUCCESS;
 }
 
+struct hostfd_reader {
+	int fd;
+	long ret;
+	char buf[8];
+};
+
+static void thread_hostfd_read(void *arg)
+{
+	struct hostfd_reader *r = arg;
+
+	r->ret = lkl_sys_read(r->fd, r->buf, sizeof(r->buf));
+}
+
+/*
+ * Host fds as guest files (host_fd): writes, writev and a dup'ed copy's
+ * reach the host's fd; fstat says character device; a read blocked on the
+ * host leaves the CPU free (another thread's calls go on meanwhile).
+ */
+static int lkl_test_host_fd(void)
+{
+	struct hostfd_reader r = { 0 };
+	struct lkl_iovec iov[2] = { { "b", 1 }, { "cd", 2 } };
+	struct lkl_stat st;
+	struct timespec ts = { 0, 10000000 };
+	int to_host[2], from_host[2];
+	long w, rd, dup, wv, lseek, bad, pid;
+	char buf[16] = { 0 };
+	lkl_thread_t tid;
+	ssize_t n;
+
+	if (pipe(to_host) || pipe(from_host))
+		return TEST_FAILURE;
+	w = lkl_sys_host_fd(to_host[1], LKL_O_WRONLY);
+	rd = lkl_sys_host_fd(from_host[0], LKL_O_RDONLY | LKL_O_CLOEXEC);
+	bad = lkl_sys_host_fd(0, 0x10000000);
+	if (w < 0 || rd < 0) {
+		lkl_test_logf("host_fd: %ld %ld\n", w, rd);
+		return TEST_FAILURE;
+	}
+	if (lkl_sys_fstat(w, &st))
+		return TEST_FAILURE;
+
+	lkl_sys_write(w, "a", 1);
+	wv = lkl_sys_writev(w, iov, 2);
+	dup = lkl_sys_dup3(w, 100, 0);
+	lkl_sys_write(dup, "e", 1);
+	lseek = lkl_sys_lseek(w, 0, LKL_SEEK_SET);
+	n = read(to_host[0], buf, sizeof(buf) - 1);
+
+	/* the read waits on the host, the CPU free for this thread's getpid */
+	r.fd = rd;
+	tid = lkl_host_ops.thread_create(thread_hostfd_read, &r);
+	if (!tid)
+		return TEST_FAILURE;
+	nanosleep(&ts, NULL);
+	pid = lkl_sys_getpid();
+	if (write(from_host[1], "xyz", 3) != 3 || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+
+	lkl_test_logf("host_fd %ld %ld (bad flags %ld), mode %o; host read \"%s\" (writev %ld, dup %ld, lseek %ld); getpid while reading %ld, then read %ld \"%.3s\"\n",
+		      w, rd, bad, st.st_mode, buf, wv, dup, lseek, pid, r.ret,
+		      r.buf);
+	lkl_sys_close(w);
+	lkl_sys_close(rd);
+	lkl_sys_close(dup);
+	close(to_host[0]);
+	close(to_host[1]);
+	close(from_host[0]);
+	close(from_host[1]);
+
+	if (!LKL_S_ISCHR(st.st_mode) || bad != -LKL_EINVAL || wv != 3 ||
+	    dup != 100 || lseek != -LKL_ESPIPE || n != 5 ||
+	    strcmp(buf, "abcde") || pid != 1 || r.ret != 3 ||
+	    memcmp(r.buf, "xyz", 3))
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 /* the kernel's context switches so far (/proc/stat's ctxt) */
 static long context_switches(void)
 {
@@ -1278,6 +1356,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(new_tgid_threads),
 	LKL_TEST(attach_thread),
 	LKL_TEST(syscall_switches),
+	LKL_TEST(host_fd),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),

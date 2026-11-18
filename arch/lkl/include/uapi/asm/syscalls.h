@@ -281,6 +281,13 @@ typedef __kernel_rwf_t		rwf_t;
  * thread of it, which doesn't run yet; attach_thread(tid), as the new host
  * thread's first call, makes that thread its task.
  *
+ * host_fd(fd, flags) makes a file of the calling process's (the lowest free
+ * descriptor) whose reads and writes the host does on its own fd fd
+ * (host_ops.h's hostfd_rw), such as the program's stdio: before the
+ * program starts, host_fd(0, O_RDWR) and so on make init's 0, 1 and 2.
+ * fstat says it's a character device (with no rdev); it can't be polled,
+ * seeked or ioctl'ed. flags: O_RDONLY, O_WRONLY or O_RDWR, and O_CLOEXEC.
+ *
  * A call that ends its task (exit, exit_group, or a fatal signal: another
  * thread's exit_group kills a thread at its next call, or at once if it's
  * blocked in one) doesn't return: the host's task_exit op is called on the

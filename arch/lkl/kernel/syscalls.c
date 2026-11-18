@@ -30,6 +30,9 @@ static asmlinkage long sys_new_thread(void);
 
 static asmlinkage long sys_attach_thread(pid_t tid);
 
+/* hostfd.c */
+asmlinkage long sys_host_fd(int fd, unsigned int flags);
+
 typedef long (*syscall_handler_t)(long arg1, ...);
 
 #undef __SYSCALL
