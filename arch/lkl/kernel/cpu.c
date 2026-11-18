@@ -51,6 +51,9 @@ struct lkl_cpu {
 	struct lkl_sem *sem;
 	/* semaphore used for shutdown */
 	struct lkl_sem *shutdown_sem;
+	/* idle waits here for an interrupt until the idle host task exists */
+	struct lkl_sem *idle_sem;
+	bool idle_waiting;
 } cpu;
 
 static int __cpu_try_get_lock(int n)
@@ -158,6 +161,10 @@ int lkl_cpu_try_run_irq(int irq)
 		set_irq_pending(irq);
 		cpu.irqs_pending = true;
 	}
+	if (ret >= -1 && cpu.idle_waiting) {
+		cpu.idle_waiting = false;
+		lkl_ops->sem_up(cpu.idle_sem);
+	}
 	__cpu_try_get_unlock(ret, 1);
 
 	return ret;
@@ -185,8 +192,38 @@ static void lkl_cpu_cleanup(bool shutdown)
 		lkl_ops->sem_free(cpu.shutdown_sem);
 	if (cpu.sem)
 		lkl_ops->sem_free(cpu.sem);
+	if (cpu.idle_sem)
+		lkl_ops->sem_free(cpu.idle_sem);
 	if (cpu.lock)
 		lkl_ops->mutex_free(cpu.lock);
+}
+
+/*
+ * Idle before the idle host task exists: release the CPU and sleep until an
+ * interrupt is triggered. Returning at once would have the idle loop spin
+ * holding the CPU, and the host threads that deliver interrupts (timers,
+ * devices) could only queue them; a host that runs its threads
+ * cooperatively, one at a time, never runs them at all and hangs at boot.
+ * Only an interrupt can make work before boot is done: no host thread
+ * makes syscalls until lkl_start_kernel() returns.
+ */
+static void lkl_cpu_wait_irq(void)
+{
+	lkl_ops->mutex_lock(cpu.lock);
+	if (cpu.irqs_pending) {
+		/* run them instead, as lkl_cpu_put() would, then idle again */
+		cpu.irqs_pending = false;
+		lkl_ops->mutex_unlock(cpu.lock);
+		run_irqs();
+		return;
+	}
+	/* an interrupt from here on posts idle_sem (lkl_cpu_try_run_irq) */
+	cpu.idle_waiting = true;
+	lkl_ops->mutex_unlock(cpu.lock);
+
+	lkl_cpu_put();
+	lkl_ops->sem_down(cpu.idle_sem);
+	lkl_cpu_get();
 }
 
 void arch_cpu_idle(void)
@@ -205,8 +242,9 @@ void arch_cpu_idle(void)
 	/* enable irqs now to allow direct irqs to run */
 	local_irq_enable();
 
-	/* switch to idle_host_task */
-	wakeup_idle_host_task();
+	/* switch to idle_host_task, or wait for an interrupt until it exists */
+	if (!wakeup_idle_host_task())
+		lkl_cpu_wait_irq();
 }
 
 int lkl_cpu_init(void)
@@ -214,8 +252,9 @@ int lkl_cpu_init(void)
 	cpu.lock = lkl_ops->mutex_alloc(0);
 	cpu.sem = lkl_ops->sem_alloc(0);
 	cpu.shutdown_sem = lkl_ops->sem_alloc(0);
+	cpu.idle_sem = lkl_ops->sem_alloc(0);
 
-	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem) {
+	if (!cpu.lock || !cpu.sem || !cpu.shutdown_sem || !cpu.idle_sem) {
 		lkl_cpu_cleanup(false);
 		return -ENOMEM;
 	}
