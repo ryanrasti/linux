@@ -107,6 +107,27 @@ int lkl_test_syscall_latency(void)
 
 #define access_rights 0721
 
+/*
+ * lkl_syscall() takes any number: out of range, it fails rather than read
+ * a handler from outside the syscall table (stock read it before checking).
+ */
+static int lkl_test_syscall_bounds(void)
+{
+	long bad[] = { -1, __lkl__NR_syscalls, (long)(~0UL >> 2) };
+	long params[6] = { 0 };
+	unsigned int i;
+
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		long ret = lkl_syscall(bad[i], params);
+
+		lkl_test_logf("lkl_syscall(%ld) = %ld\n", bad[i], ret);
+		if (ret != -LKL_ENOSYS)
+			return TEST_FAILURE;
+	}
+
+	return TEST_SUCCESS;
+}
+
 LKL_TEST_CALL(creat, lkl_sys_creat, 0, "/file", access_rights)
 LKL_TEST_CALL(close, lkl_sys_close, 0, 0);
 LKL_TEST_CALL(failopen, lkl_sys_open, -LKL_ENOENT, "/file2", 0, 0);
@@ -758,6 +779,7 @@ struct lkl_test tests[] = {
 #endif
 	LKL_TEST(getpid),
 	LKL_TEST(syscall_latency),
+	LKL_TEST(syscall_bounds),
 	LKL_TEST(umask),
 	LKL_TEST(umask2),
 	LKL_TEST(creat),

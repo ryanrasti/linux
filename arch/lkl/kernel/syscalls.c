@@ -38,10 +38,12 @@ void *syscall_table[__NR_syscalls] = {
 static long run_syscall(long no, long *params)
 {
 	long ret;
-	syscall_handler_t handler = (syscall_handler_t)syscall_table[no];
+	syscall_handler_t handler;
 
+	/* the number is the caller's: check it before it indexes the table */
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
+	handler = (syscall_handler_t)syscall_table[no];
 
 	ret = handler(params[0], params[1], params[2], params[3], params[4],
 		      params[5]);
