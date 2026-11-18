@@ -288,6 +288,12 @@ typedef __kernel_rwf_t		rwf_t;
  * fstat says it's a character device (with no rdev); it can't be polled,
  * seeked or ioctl'ed. flags: O_RDONLY, O_WRONLY or O_RDWR, and O_CLOEXEC.
  *
+ * memblk_add(addr, len) (with CONFIG_BLOCK) adds a read-only disk whose len
+ * bytes (whole 512-byte sectors) are host memory at addr, a mapping the
+ * host keeps unchanged while the kernel runs: an erofs image to mount, say.
+ * It returns the disk's device number (as mknod takes it); the disk is
+ * memblkN, N counting from 0. Reads are memcpys from the mapping.
+ *
  * A call that ends its task (exit, exit_group, or a fatal signal: another
  * thread's exit_group kills a thread at its next call, or at once if it's
  * blocked in one) doesn't return: the host's task_exit op is called on the

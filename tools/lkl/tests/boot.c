@@ -10,6 +10,9 @@
 
 #include <sys/stat.h>
 #include <fcntl.h>
+#ifndef __MINGW32__
+#include <sys/mman.h>
+#endif
 #if defined(__FreeBSD__)
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -790,6 +793,85 @@ static int lkl_test_host_fd(void)
 	return TEST_SUCCESS;
 }
 
+/*
+ * memblk: an erofs image (mkfs.erofs's, if there is one) mapped from the
+ * host, added as a disk, mounted at /nix/store, and a file of it read.
+ */
+static int lkl_test_memblk(void)
+{
+	char dir[] = "/tmp/lkl-memblk-XXXXXX", path[128], cmd[512];
+	char buf[32] = { 0 };
+	static const char hello[] = "from host memory\n";
+	long dev, bad, ret, mnt, rd, creat = 0;
+	struct stat st;
+	void *img;
+	int fd, ok;
+
+	if (!mkdtemp(dir))
+		return TEST_FAILURE;
+	snprintf(path, sizeof(path), "%s/tree", dir);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/tree/hello", dir);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0 || write(fd, hello, sizeof(hello) - 1) < 0)
+		return TEST_FAILURE;
+	close(fd);
+	snprintf(cmd, sizeof(cmd),
+		 "mkfs.erofs %s/img %s/tree >/dev/null 2>&1", dir, dir);
+	ok = system(cmd) == 0;
+	snprintf(cmd, sizeof(cmd), "rm -rf %s/tree", dir);
+	if (system(cmd))
+		return TEST_FAILURE;
+	snprintf(path, sizeof(path), "%s/img", dir);
+	if (!ok) {
+		lkl_test_logf("no mkfs.erofs\n");
+		rmdir(dir);
+		return TEST_SKIP;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0 || fstat(fd, &st))
+		return TEST_FAILURE;
+	img = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	unlink(path);
+	rmdir(dir);
+	if (img == MAP_FAILED)
+		return TEST_FAILURE;
+
+	bad = lkl_sys_memblk_add((long)img, 1000);
+	dev = lkl_sys_memblk_add((long)img, st.st_size);
+	if (dev == -LKL_ENOSYS) {
+		lkl_test_logf("no CONFIG_BLOCK\n");
+		munmap(img, st.st_size);
+		return TEST_SKIP;
+	}
+	ret = lkl_sys_mknodat(LKL_AT_FDCWD, "/memblk0", LKL_S_IFBLK | 0600, dev);
+	lkl_sys_mkdir("/nix", 0755);
+	lkl_sys_mkdir("/nix/store", 0755);
+	mnt = lkl_sys_mount("/memblk0", "/nix/store", "erofs", LKL_MS_RDONLY,
+			    NULL);
+	if (mnt == -LKL_ENODEV) {
+		lkl_test_logf("no CONFIG_EROFS_FS\n");
+		munmap(img, st.st_size);
+		return TEST_SKIP;
+	}
+	fd = lkl_sys_open("/nix/store/hello", LKL_O_RDONLY, 0);
+	rd = fd < 0 ? fd : lkl_sys_read(fd, buf, sizeof(buf) - 1);
+	if (fd >= 0)
+		lkl_sys_close(fd);
+	creat = lkl_sys_open("/nix/store/new", LKL_O_CREAT | LKL_O_WRONLY, 0644);
+	lkl_sys_umount("/nix/store", 0);
+	munmap(img, st.st_size);
+
+	lkl_test_logf("image %ld bytes: memblk_add %#lx (1000 bytes: %ld), mknod %ld, mount %ld, read %ld \"%s\", creat %ld\n",
+		      (long)st.st_size, dev, bad, ret, mnt, rd, buf, creat);
+	if (bad != -LKL_EINVAL || dev <= 0 || ret || mnt ||
+	    rd != sizeof(hello) - 1 || strcmp(buf, hello) ||
+	    creat != -LKL_EROFS)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 /* the kernel's context switches so far (/proc/stat's ctxt) */
 static long context_switches(void)
 {
@@ -1357,6 +1439,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(attach_thread),
 	LKL_TEST(syscall_switches),
 	LKL_TEST(host_fd),
+	LKL_TEST(memblk),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),

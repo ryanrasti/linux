@@ -32,6 +32,8 @@ static asmlinkage long sys_attach_thread(pid_t tid);
 
 /* hostfd.c */
 asmlinkage long sys_host_fd(int fd, unsigned int flags);
+/* memblk.c */
+asmlinkage long sys_memblk_add(unsigned long addr, unsigned long len);
 
 typedef long (*syscall_handler_t)(long arg1, ...);
 

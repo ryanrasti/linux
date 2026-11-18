@@ -5,6 +5,9 @@ __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
 __SYSCALL(__NR_new_thread, sys_new_thread)
 __SYSCALL(__NR_attach_thread, sys_attach_thread)
 __SYSCALL(__NR_host_fd, sys_host_fd)
+#ifdef CONFIG_BLOCK
+__SYSCALL(__NR_memblk_add, sys_memblk_add)
+#endif
 
 #define __SC_ASCII(t, a) #t "," #a
 
