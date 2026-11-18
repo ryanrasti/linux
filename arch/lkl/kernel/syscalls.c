@@ -13,6 +13,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/stat.h>
 #include <linux/platform_device.h>
+#include <linux/fdtable.h>
 #include <linux/tick.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
@@ -155,7 +156,7 @@ static void del_host_task(void *arg)
 	struct task_struct *task = (struct task_struct *)arg;
 	struct thread_info *ti = task_thread_info(task);
 
-	/* init's exit would panic; its end is the host's (lkl_syscall) */
+	/* init ends by its program's exit, not its first thread's */
 	if (task == init_host_task)
 		return;
 
@@ -170,9 +171,84 @@ static void del_host_task(void *arg)
 
 static struct lkl_tls_key *task_key;
 
+/*
+ * init's process has ended (its last thread but host0 exited): host0 is
+ * left, only for the halt
+ */
+static bool init_ended;
+
+/*
+ * What a host task's exit (prev, TASK_DEAD, in __switch_to) tells the host:
+ * if it was its process's last thread, the process's pid and wait status
+ * (the group's exit code if an exit_group or a fatal signal ended it).
+ * host0 isn't counted: it's a thread of init's process that no host thread
+ * runs, so init's process ends with its other threads.
+ */
+void host_task_exit_status(struct task_struct *task, int *pid, int *status)
+{
+	struct signal_struct *sig = task->signal;
+
+	*pid = 0;
+	*status = 0;
+	if (atomic_read(&sig->live) != (sig == host0->signal ? 1 : 0))
+		return;
+	*pid = task_tgid_nr(task);
+	*status = sig->flags & SIGNAL_GROUP_EXIT ? sig->group_exit_code :
+						   task->exit_code;
+	if (sig == host0->signal)
+		init_ended = true;
+}
+
+/*
+ * The exited task's host thread, the CPU released: its task is gone (freed
+ * once reaped), so its TLS forgets it, and the host ends the thread.
+ */
+void __noreturn host_task_exited(int pid, int status)
+{
+	if (lkl_ops->tls_set)
+		lkl_ops->tls_set(task_key, NULL);
+	if (lkl_ops->task_exit)
+		lkl_ops->task_exit(pid, status);
+	lkl_ops->thread_exit();
+	for (;;)
+		;
+}
+
+/*
+ * init's process ends with this call, its exit_group or its last thread's
+ * exit (host0 is the other live thread it always has): host0 drops its
+ * files first, so that the exit closes them. host0 holds a reference, as
+ * every host task cloned from it shares init's files.
+ */
+static void init_ending(struct task_struct *task, long no)
+{
+	struct files_struct *files = host0->files;
+
+	if (task->signal != host0->signal || !files ||
+	    !(no == __NR_exit_group ||
+	      (no == __NR_exit && atomic_read(&task->signal->live) == 2)))
+		return;
+	task_lock(host0);
+	host0->files = NULL;
+	task_unlock(host0);
+	put_files_struct(files);
+}
+
+/*
+ * A fatal signal (another thread's exit_group, a SIGKILL) ends the task in
+ * its syscall, at its start or its end: LKL runs no other signal delivery,
+ * and the task's thread would otherwise never die. Not host0, which the
+ * halt borrows once init's process has ended.
+ */
+static void exit_if_killed(struct task_struct *task)
+{
+	if (task != host0 && fatal_signal_pending(task))
+		do_group_exit(SIGKILL);
+}
+
 long lkl_syscall(long no, long *params)
 {
-	struct task_struct *task = init_host_task;
+	struct task_struct *task = init_ended ? host0 : init_host_task;
 	long ret;
 
 	ret = lkl_cpu_get();
@@ -181,7 +257,13 @@ long lkl_syscall(long no, long *params)
 
 	if (lkl_ops->tls_get) {
 		task = lkl_ops->tls_get(task_key);
-		if (!task) {
+		if (!task && init_ended) {
+			/* no process to join: only the halt, as host0 */
+			ret = -ESRCH;
+			if (no != __NR_reboot)
+				goto out;
+			task = host0;
+		} else if (!task) {
 			if (no == __NR_attach_thread)
 				ret = attach_host_task(&task, params[0]);
 			else
@@ -195,18 +277,8 @@ long lkl_syscall(long no, long *params)
 
 	switch_to_host_task(task);
 
-	/*
-	 * init's end, its exit_group or its last thread's exit, is the host's,
-	 * with its wait status: do_exit() would panic. (host0 is the other
-	 * live thread init always has.) The call returns the status instead;
-	 * the host ends then.
-	 */
-	if (is_global_init(task) &&
-	    (no == __NR_exit_group ||
-	     (no == __NR_exit && atomic_read(&task->signal->live) == 2))) {
-		ret = (params[0] & 0xff) << 8;
-		goto out;
-	}
+	exit_if_killed(task);
+	init_ending(task, no);
 
 	ret = run_syscall(no, params);
 
@@ -214,6 +286,8 @@ long lkl_syscall(long no, long *params)
 		thread_sched_jb();
 		return ret;
 	}
+
+	exit_if_killed(task);
 
 out:
 	lkl_cpu_put();

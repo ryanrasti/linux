@@ -144,6 +144,17 @@ enum lkl_prot {
  * @munmap - unmap previously mapped memory
  *
  * @pci_ops - pointer to PCI host operations
+ *
+ * @task_exit - the calling host thread's task exited in its syscall (exit,
+ * exit_group, or killed: a fatal signal, such as another thread's
+ * exit_group, ends a task at its syscall's start or end). Called with the
+ * CPU released and the thread's task forgotten (its TLS cleared); it must
+ * not return: the host ends the thread, or jumps out of lkl_syscall() to a
+ * frame of its own. If the task was its process's last thread, pid is the
+ * process's (its thread group id) and status its wait status (as wait4
+ * reports it: exit code << 8, or the fatal signal's number); else both are
+ * 0. init's end is pid 1, after its exit has run (its files closed).
+ * Optional: without it, the thread ends with thread_exit.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -204,6 +215,8 @@ struct lkl_host_operations {
 				enum lkl_prot prot);
 
 	struct lkl_dev_pci_ops *pci_ops;
+
+	void (*task_exit)(int pid, int status);
 };
 
 /**

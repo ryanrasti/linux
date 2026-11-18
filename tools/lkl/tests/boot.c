@@ -4,6 +4,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <setjmp.h>
 #include <lkl.h>
 #include <lkl_host.h>
 
@@ -979,14 +980,193 @@ static int lkl_test_start_kernel(void)
 }
 
 
-/*
- * init's exit_group is the host's: instead of running it (do_exit() would
- * panic) lkl_syscall() returns init's wait status, here exit code 3; the
- * kernel is left as it was, so the test can still halt it.
- */
-LKL_TEST_CALL(init_exit, lkl_sys_exit_group, 3 << 8, 3);
-
 #ifndef __MINGW32__
+/*
+ * A host task that exits in its syscall: the host's task_exit (here this)
+ * is called on its thread instead of the call returning, with its process's
+ * pid and wait status if it was the last thread. The thread ends, or, for
+ * one that set exit_jmp (init's, which runs the tests), jumps back.
+ */
+struct exit_report {
+	int calls, pid, status;
+};
+static __thread struct exit_report *exit_report;
+static __thread jmp_buf *exit_jmp;
+
+static void test_task_exit(int pid, int status)
+{
+	if (exit_report) {
+		exit_report->calls++;
+		exit_report->pid = pid;
+		exit_report->status = status;
+	}
+	if (exit_jmp)
+		longjmp(*exit_jmp, 1);
+	lkl_host_ops.thread_exit();
+}
+
+static void thread_exits(void *arg)
+{
+	exit_report = arg;
+	lkl_sys_exit(5);
+	/* not reached */
+	exit_report->calls = -1;
+}
+
+struct exit_process {
+	struct exit_report leader, thread;
+	long pid, tid;
+	int fds[2];
+};
+
+/* the second thread of the process: blocked in a read when it's killed */
+static void thread_blocked(void *arg)
+{
+	struct exit_process *p = arg;
+	char c;
+
+	exit_report = &p->thread;
+	if (lkl_sys_attach_thread(p->tid))
+		return;
+	lkl_sys_read(p->fds[0], &c, 1);
+	/* not reached: the read ends with the thread */
+	p->thread.calls = -1;
+}
+
+static void process_exits(void *arg)
+{
+	struct exit_process *p = arg;
+	struct timespec ts = { 0, 20000000 };
+	lkl_thread_t tid;
+
+	exit_report = &p->leader;
+	if (lkl_sys_new_thread_group_leader())
+		return;
+	p->pid = lkl_sys_getpid();
+	p->tid = lkl_sys_new_thread();
+	tid = lkl_host_ops.thread_create(thread_blocked, p);
+	if (!tid)
+		return;
+	/* (if the thread isn't reading yet, it dies at its next call) */
+	nanosleep(&ts, NULL);
+	lkl_sys_exit_group(7);
+	p->leader.calls = -1;
+}
+
+/*
+ * Exits in a syscall: a thread of init's process (exit, not its last); a
+ * process of two threads (exit_group from one, which kills the other in
+ * its read): the last to go reports the process's end, which init reaps.
+ */
+static int lkl_test_task_exit(void)
+{
+	struct exit_report t = { 0 };
+	struct exit_process p = { 0 };
+	lkl_thread_t tid;
+	int status = 0;
+	long ret;
+
+	tid = lkl_host_ops.thread_create(thread_exits, &t);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	lkl_test_logf("exit(5), a thread of init's: task_exit %d time(s), pid %d status %d\n",
+		      t.calls, t.pid, t.status);
+
+	ret = lkl_sys_pipe2(p.fds, 0);
+	if (ret)
+		return TEST_FAILURE;
+	tid = lkl_host_ops.thread_create(process_exits, &p);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	/* the blocked thread's: it's last, so its host thread may still be ending */
+	while (!__atomic_load_n(&p.thread.calls, __ATOMIC_SEQ_CST))
+		;
+	ret = lkl_sys_wait4(p.pid, &status, 0, NULL);
+	lkl_sys_close(p.fds[0]);
+	lkl_sys_close(p.fds[1]);
+	lkl_test_logf("process %ld, exit_group(7): leader task_exit %d pid %d status %#x; thread %d pid %d status %#x; wait4 %ld status %#x\n",
+		      p.pid, p.leader.calls, p.leader.pid, p.leader.status,
+		      p.thread.calls, p.thread.pid, p.thread.status, ret, status);
+
+	if (t.calls != 1 || t.pid || t.status)
+		return TEST_FAILURE;
+	if (p.leader.calls != 1 || p.leader.pid || p.thread.calls != 1 ||
+	    p.thread.pid != p.pid || p.thread.status != 7 << 8 ||
+	    ret != p.pid || status != 7 << 8)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
+ * The halt's other thread (stop_kernel): a process of its own, made before
+ * init's end, since after it no new task can be made. It first checks that
+ * init's end closed init's files: it reads a pipe whose write end only init
+ * holds, which ends (EOF) when init's exit has closed it.
+ */
+static struct lkl_sem *halt_go;
+static volatile long survivor_read = 1, halt_thread_ret;
+static __thread int halt_late;
+
+static void thread_until_halt(void *arg)
+{
+	int *fds = arg;
+	char c;
+
+	if (lkl_sys_new_thread_group_leader() ||
+	    lkl_sys_unshare(LKL_CLONE_FILES) || lkl_sys_close(fds[1]))
+		return;
+	survivor_read = lkl_sys_read(fds[0], &c, 1);
+
+	lkl_host_ops.sem_down(halt_go);
+	halt_late = 1;
+	while ((halt_thread_ret = lkl_sys_getpid()) >= 0)
+		;
+}
+
+static lkl_thread_t halt_thread;
+
+/*
+ * init's end runs as any process's: exit_group(3) closes its files, and the
+ * host learns its wait status by task_exit(1, 3 << 8). Then only the halt
+ * can be called.
+ */
+static int lkl_test_init_exit(void)
+{
+	struct exit_report r = { 0 };
+	struct timespec ts = { 0, 1000000 };
+	jmp_buf jb;
+	int fds[2], i;
+	long ret;
+
+	if (lkl_sys_pipe2(fds, 0))
+		return TEST_FAILURE;
+	halt_go = lkl_host_ops.sem_alloc(0);
+	halt_thread = lkl_host_ops.thread_create(thread_until_halt, fds);
+	if (!halt_go || !halt_thread)
+		return TEST_FAILURE;
+	/* until it's reading */
+	nanosleep(&ts, NULL);
+	nanosleep(&ts, NULL);
+
+	exit_report = &r;
+	exit_jmp = &jb;
+	if (!setjmp(jb))
+		lkl_sys_exit_group(3);
+	exit_jmp = NULL;
+	exit_report = NULL;
+
+	for (i = 0; i < 1000 && survivor_read == 1; i++)
+		nanosleep(&ts, NULL);
+	ret = lkl_sys_getpid();
+	lkl_test_logf("exit_group(3): task_exit %d time(s), pid %d status %#x; the pipe's reader read %ld; getpid then: %ld\n",
+		      r.calls, r.pid, r.status, survivor_read, ret);
+
+	if (r.calls != 1 || r.pid != 1 || r.status != 3 << 8 ||
+	    survivor_read != 0 || ret != -LKL_ESRCH)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 /*
  * Halt with another thread waiting for the CPU: a thread making syscalls in
  * a loop is parked in lkl_cpu_get() when the halt takes the CPU, and still
@@ -994,12 +1174,13 @@ LKL_TEST_CALL(init_exit, lkl_sys_exit_group, 3 << 8, 3);
  * started, its sem_downs return 20 ms late, as on a host that runs one
  * thread at a time and has yet to run it. The halt must wait for it without
  * spinning: a spin costs that time in CPU (and on such a host never
- * ends, since the thread it waits for can't run).
+ * ends, since the thread it waits for can't run). init has ended: the
+ * thread is a process of its own (init_exit's), and the halt is made by a
+ * thread without a task.
  */
 #define HALT_LATE_NS 20000000
 static void (*halt_sem_down)(struct lkl_sem *sem);
 static volatile int halting;
-static __thread int halt_late;
 
 static void late_sem_down(struct lkl_sem *sem)
 {
@@ -1010,44 +1191,34 @@ static void late_sem_down(struct lkl_sem *sem)
 		nanosleep(&ts, NULL);
 }
 
-static void thread_until_halt(void *arg)
-{
-	volatile long *ret = arg;
-
-	halt_late = 1;
-	while ((*ret = lkl_sys_getpid()) >= 0)
-		;
-}
-
 static int lkl_test_stop_kernel(void)
 {
 	struct timespec c0, c1;
-	lkl_thread_t tid;
-	volatile long thread_ret = 0;
 	long ret, cpu_ns;
 
+	/* (if init_exit failed its thread isn't there to halt with) */
+	if (!halt_thread || survivor_read)
+		return TEST_FAILURE;
 	halt_sem_down = lkl_host_ops.sem_down;
 	lkl_host_ops.sem_down = late_sem_down;
-	tid = lkl_host_ops.thread_create(thread_until_halt, (void *)&thread_ret);
-	if (!tid)
-		return TEST_FAILURE;
+	lkl_host_ops.sem_up(halt_go);
 	/* until it's making syscalls */
-	while (!thread_ret)
+	while (!halt_thread_ret)
 		;
 
 	halting = 1;
 	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
 	ret = lkl_sys_halt();
 	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
-	lkl_host_ops.thread_join(tid);
+	lkl_host_ops.thread_join(halt_thread);
 	lkl_host_ops.sem_down = halt_sem_down;
 
 	cpu_ns = (c1.tv_sec - c0.tv_sec) * 1000000000L +
 		 (c1.tv_nsec - c0.tv_nsec);
 	lkl_test_logf("lkl_sys_halt() = %ld, CPU %ld us; the thread's last syscall: %ld\n",
-		      ret, cpu_ns / 1000, thread_ret);
+		      ret, cpu_ns / 1000, halt_thread_ret);
 
-	if (ret || thread_ret >= 0 || cpu_ns > HALT_LATE_NS / 2)
+	if (ret || halt_thread_ret >= 0 || cpu_ns > HALT_LATE_NS / 2)
 		return TEST_FAILURE;
 	return TEST_SUCCESS;
 }
@@ -1121,7 +1292,10 @@ struct lkl_test tests[] = {
 #ifdef LKL_HOST_CONFIG_LKL_PCI_MSI_KUNIT_TEST
 	LKL_TEST(kunit_pci_msi),
 #endif
+#ifndef __MINGW32__
+	LKL_TEST(task_exit),
 	LKL_TEST(init_exit),
+#endif
 	LKL_TEST(stop_kernel),
 };
 
@@ -1133,6 +1307,7 @@ int main(int argc, const char **argv)
 #ifndef __MINGW32__
 	host_timer_alloc = lkl_host_ops.timer_alloc;
 	lkl_host_ops.timer_alloc = counting_timer_alloc;
+	lkl_host_ops.task_exit = test_task_exit;
 #endif
 
 	if (lkl_init(&lkl_host_ops) < 0) {

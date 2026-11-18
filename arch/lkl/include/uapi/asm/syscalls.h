@@ -281,9 +281,17 @@ typedef __kernel_rwf_t		rwf_t;
  * thread of it, which doesn't run yet; attach_thread(tid), as the new host
  * thread's first call, makes that thread its task.
  *
- * init's end, its exit_group or its last thread's exit, isn't run: the call
- * returns init's wait status ((code & 0xff) << 8) and the host ends then,
- * with lkl_sys_halt() or its own exit.
+ * A call that ends its task (exit, exit_group, or a fatal signal: another
+ * thread's exit_group kills a thread at its next call, or at once if it's
+ * blocked in one) doesn't return: the host's task_exit op is called on the
+ * thread instead (host_ops.h), with its process's pid and wait status if
+ * it was the process's last thread.
+ *
+ * init's end, its exit_group or its last thread's exit, runs as any
+ * process's (its files closed) and is reported so: task_exit(1, status),
+ * status as wait4 has it ((code & 0xff) << 8, or the fatal signal). The host
+ * ends then, with lkl_sys_halt() (from any thread; after init's end it is
+ * the only call a thread without a task can make) or its own exit.
  */
 long lkl_syscall(long no, long *params);
 long lkl_sys_halt(void);
