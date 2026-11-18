@@ -12,10 +12,12 @@ void idle_host_task_irq_enter(void);
 void idle_host_task_irq_exit(void);
 void idle_host_task_busy(void);
 long lkl_sys_halt(void);
+struct kernel_clone_args;
+int copy_fork_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args);
 
 #define sys_mmap sys_mmap_pgoff
 #define sys_mmap2 sys_mmap_pgoff
-#define sys_clone sys_ni_syscall
 #define sys_vfork sys_ni_syscall
 #define sys_rt_sigreturn sys_ni_syscall
 

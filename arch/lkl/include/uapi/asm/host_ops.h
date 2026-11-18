@@ -201,6 +201,27 @@ enum lkl_prot {
  * which is safe: nothing is held. Optional: without it, a caught signal's
  * handler is skipped, as if it had returned at once.
  *
+ * @fork - a program's fork (clone making a process, without CLONE_THREAD:
+ * fork, vfork, posix_spawn's CLONE_VM | CLONE_VFORK) as a fork of the host
+ * process. Called on the parent's host thread inside its clone, holding
+ * the CPU (it may not call into the kernel). The host forks its process,
+ * the kernel's memory (its data, its pool, the threads' kernel stacks)
+ * staying shared between the two (mapped shared before the fork: the
+ * kernel itself doesn't assume one process), and in the child starts a
+ * thread that calls f(arg), which returns once the kernel has first
+ * scheduled the child's task, with the CPU released; then the host resumes
+ * the program there as the clone's return in the child, with 0 (the
+ * parent's registers at the clone; the stack clone was given, if any).
+ * Returns the thread's id, what thread_self() returns on it, unique among
+ * all the host processes' threads (the CPU's owner is one); 0 if it failed
+ * (clone returns -EAGAIN). If the clone fails after the fork (a signal
+ * came, and it restarts), f(arg) calls thread_exit on the child's thread
+ * instead of returning, and thread_join(id), from the parent's process,
+ * must wait for that: the host ends the child process. The kernel's host
+ * ops (semaphores, mutexes, timers) must work across the processes. The
+ * child's exit is reported by task_exit, as any task's. Optional: without
+ * it, clone fails with -ENOSYS.
+ *
  * @hostfd_rw - read (write 0) or write (write 1) len bytes at buf on host fd
  * fd, for a guest file made by host_fd(fd, flags) (asm/syscalls.h): returns
  * the bytes done or a negative Linux errno. Called on the calling task's
@@ -271,6 +292,7 @@ struct lkl_host_operations {
 	void (*task_exit)(int pid, int status);
 	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int write);
 	int (*signal_handler)(struct lkl_signal *sig);
+	lkl_thread_t (*fork)(void (*f)(void *), void *arg);
 };
 
 /**

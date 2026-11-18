@@ -421,6 +421,71 @@ out:
 	return ret;
 }
 
+/*
+ * A fork's child, in the child's host process: its thread waits like any
+ * new thread until the kernel first schedules the task, which is then the
+ * thread's host task, and leaves the kernel as the clone's return in the
+ * child (0, signals delivered); the host resumes the program there. If the
+ * clone failed after the host's fork (copy_process undoing it), the thread
+ * is woken dead (kill_thread) and ends.
+ */
+static void fork_bootstrap(void *arg)
+{
+	struct thread_info *ti = arg;
+	struct task_struct *task = ti->task;
+	bool cpu = true;
+
+	lkl_ops->sem_down(ti->sched_sem);
+	if (ti->dead) {
+		lkl_ops->thread_exit();
+		return;
+	}
+
+	set_ti_thread_flag(ti, TIF_HOST_THREAD);
+	if (lkl_ops->tls_set)
+		lkl_ops->tls_set(task_key, task);
+	schedule_tail(ti->prev_sched);
+	/*
+	 * CLONE_CHILD_SETTID's write is the first schedule's: switch_to_host_task
+	 * runs schedule_tail at every switch back to a host task, which would
+	 * write the tid again for the task's life, into memory that, after an
+	 * exec in the same address space, is the new program's (tier A: a
+	 * version table in ld.so's heap, "undefined symbol ..., version
+	 * GLIBC_2.38").
+	 */
+	task->set_child_tid = NULL;
+
+	syscall_return(task, __NR_clone, NULL, 0, &cpu);
+	if (cpu)
+		lkl_cpu_put();
+}
+
+/*
+ * copy_thread() for a program's clone, which makes a process (fork, vfork,
+ * posix_spawn's clone; a thread is new_thread's): the host forks its
+ * process, on the parent's host thread, the CPU held, and the child's
+ * first thread runs fork_bootstrap. Until it does, it's a plain thread
+ * (not TIF_HOST_THREAD), which kill_thread can end. Everything else is
+ * clone's as usual: the child task, its files, signals, its parent, the
+ * wait for a vfork, CLONE_*_SETTID.
+ */
+int copy_fork_thread(struct task_struct *p,
+		     const struct kernel_clone_args *args)
+{
+	struct thread_info *ti = task_thread_info(p);
+
+	if (args->flags & CLONE_THREAD)
+		return -EINVAL;
+	if (!lkl_ops->fork || !test_thread_flag(TIF_HOST_THREAD))
+		return -ENOSYS;
+
+	clear_ti_thread_flag(ti, TIF_HOST_THREAD);
+	clear_ti_thread_flag(ti, TIF_SCHED_JB);
+	ti->tid = lkl_ops->fork(fork_bootstrap, ti);
+
+	return ti->tid ? 0 : -EAGAIN;
+}
+
 static struct task_struct *idle_host_task;
 
 /*

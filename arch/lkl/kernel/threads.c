@@ -6,6 +6,7 @@
 #include <asm/cpu.h>
 #include <asm/sched.h>
 #include <asm/switch_to.h>
+#include <asm/syscalls.h>
 
 static int init_ti(struct thread_info *ti)
 {
@@ -51,9 +52,14 @@ void setup_thread_stack(struct task_struct *p, struct task_struct *org)
 	ti->preempt_count = org_ti->preempt_count;
 }
 
+/*
+ * A thread that isn't a host task's ends: woken dead, joined. (Not one that
+ * never got a host thread: its creation failed.) A fork's child process's
+ * thread is one until it first runs (copy_fork_thread).
+ */
 static void kill_thread(struct thread_info *ti)
 {
-	if (!test_ti_thread_flag(ti, TIF_HOST_THREAD)) {
+	if (!test_ti_thread_flag(ti, TIF_HOST_THREAD) && ti->tid) {
 		ti->dead = true;
 		lkl_ops->sem_up(ti->sched_sem);
 		lkl_ops->thread_join(ti->tid);
@@ -194,6 +200,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		set_ti_thread_flag(ti, TIF_HOST_THREAD);
 		return 0;
 	}
+
+	/* a program's clone (no function: it returns to the program) */
+	if (!args->fn)
+		return copy_fork_thread(p, args);
 
 	tba = kmalloc(sizeof(*tba), GFP_KERNEL);
 	if (!tba)

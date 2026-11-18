@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <setjmp.h>
+#ifndef __MINGW32__
+#include <pthread.h>
+#endif
 #include <lkl.h>
 #include <lkl_host.h>
 
@@ -1584,6 +1587,107 @@ static int lkl_test_signals(void)
 }
 
 /*
+ * A fork through the host's fork op. The posix host's kernel memory isn't
+ * shared, so no host process is forked: the test's op starts the child's
+ * thread in this one, which, once its bootstrap returns, runs the
+ * program's side of the clone in the child. The op is called inside the
+ * clone, on the parent's thread; the child's task bootstraps when first
+ * scheduled and is the child process (its pid the clone's result, init its
+ * parent, init's files copied); its exit status is wait4's.
+ * CLONE_CHILD_SETTID's word is written once, at the child's first
+ * schedule, not again at its later switches (it was, at every one).
+ */
+struct fork_child {
+	void (*f)(void *);
+	void *arg;
+	int fds[4];	/* parent to child, child to parent */
+	long pid, ppid, settid_first, settid_later, trips, close;
+};
+static struct fork_child fork_child;
+static int fork_calls;
+static pthread_t fork_caller;
+static volatile int settid_word;
+
+#define FORK_TRIPS 10
+
+static void fork_child_thread(void *arg)
+{
+	struct fork_child *c = arg;
+	char b;
+	int i;
+
+	c->f(c->arg);
+	/* the program, after its clone returned 0 in the child */
+	c->settid_first = settid_word;
+	settid_word = 0;
+	c->pid = lkl_sys_getpid();
+	c->ppid = lkl_sys_getppid();
+	for (i = 0; i < FORK_TRIPS; i++) {
+		if (lkl_sys_read(c->fds[0], &b, 1) != 1 ||
+		    lkl_sys_write(c->fds[3], &b, 1) != 1)
+			break;
+	}
+	c->trips = i;
+	c->settid_later = settid_word;
+	/* its copy of init's files: closing one leaves init's open */
+	c->close = lkl_sys_close(c->fds[1]);
+	lkl_sys_exit_group(9);
+}
+
+static lkl_thread_t test_fork(void (*f)(void *), void *arg)
+{
+	fork_calls++;
+	fork_caller = pthread_self();
+	fork_child.f = f;
+	fork_child.arg = arg;
+	return lkl_host_ops.thread_create(fork_child_thread, &fork_child);
+}
+
+static int lkl_test_fork(void)
+{
+	struct fork_child *c = &fork_child;
+	long pid, ret, w = -1;
+	int status = 0, i, trips = 0;
+	char b = 'x';
+
+	if (lkl_sys_pipe2(&c->fds[0], 0) || lkl_sys_pipe2(&c->fds[2], 0))
+		return TEST_FAILURE;
+	pid = lkl_sys_clone(LKL_SIGCHLD | LKL_CLONE_CHILD_SETTID, 0, NULL,
+			    (int *)&settid_word, 0);
+	if (pid > 0) {
+		for (i = 0; i < FORK_TRIPS; i++) {
+			if (lkl_sys_write(c->fds[1], &b, 1) != 1 ||
+			    lkl_sys_read(c->fds[2], &b, 1) != 1)
+				break;
+			trips++;
+		}
+		ret = lkl_sys_wait4(pid, &status, 0, NULL);
+		w = lkl_sys_write(c->fds[1], &b, 1);
+	} else {
+		ret = pid;
+	}
+	for (i = 0; i < 4; i++)
+		lkl_sys_close(c->fds[i]);
+	/* a clone making a thread is new_thread's */
+	i = lkl_sys_clone(LKL_CLONE_VM | LKL_CLONE_SIGHAND | LKL_CLONE_THREAD,
+			  0, NULL, NULL, 0);
+
+	lkl_test_logf("clone = %ld: fork op %d call(s), on the parent's thread %d; child: getpid %ld getppid %ld, settid %ld at first, %ld after %ld/%d round trips (parent %d), close %ld; wait4 %ld status %#x; init's write end after %ld\n",
+		      pid, fork_calls, pthread_equal(fork_caller, pthread_self()),
+		      c->pid, c->ppid, c->settid_first, c->settid_later,
+		      c->trips, FORK_TRIPS, trips, c->close, ret, status, w);
+	lkl_test_logf("clone(CLONE_THREAD) = %d\n", i);
+
+	if (pid <= 1 || fork_calls != 1 ||
+	    !pthread_equal(fork_caller, pthread_self()) || c->pid != pid ||
+	    c->ppid != 1 || c->settid_first != pid || c->settid_later ||
+	    c->trips != FORK_TRIPS || trips != FORK_TRIPS || c->close ||
+	    ret != pid || status != 9 << 8 || w != 1 || i != -LKL_EINVAL)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
  * The halt's other thread (stop_kernel): a process of its own, made before
  * init's end, since after it no new task can be made. It first checks that
  * init's end closed init's files: it reads a pipe whose write end only init
@@ -1784,6 +1888,7 @@ struct lkl_test tests[] = {
 #ifndef __MINGW32__
 	LKL_TEST(task_exit),
 	LKL_TEST(signals),
+	LKL_TEST(fork),
 	LKL_TEST(init_exit),
 #endif
 	LKL_TEST(stop_kernel),
@@ -1799,6 +1904,7 @@ int main(int argc, const char **argv)
 	lkl_host_ops.timer_alloc = counting_timer_alloc;
 	lkl_host_ops.task_exit = test_task_exit;
 	lkl_host_ops.signal_handler = test_signal_handler;
+	lkl_host_ops.fork = test_fork;
 #endif
 
 	if (lkl_init(&lkl_host_ops) < 0) {

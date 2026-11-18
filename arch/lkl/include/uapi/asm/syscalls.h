@@ -294,6 +294,10 @@ typedef __kernel_rwf_t		rwf_t;
  * It returns the disk's device number (as mknod takes it); the disk is
  * memblkN, N counting from 0. Reads are memcpys from the mapping.
  *
+ * clone making a process (fork, vfork: no CLONE_THREAD) is a fork of the
+ * host process too, by the host's fork op inside the call (host_ops.h);
+ * clone with CLONE_THREAD is -EINVAL (a thread is new_thread's).
+ *
  * Signals are the kernel's (actions, masks, kill, default actions, wait
  * statuses), delivered as a call returns to the program: a caught one's
  * handler is run by the host's signal_handler op, inside the call, and the
