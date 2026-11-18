@@ -5,6 +5,7 @@ __SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)
 __SYSCALL(__NR_new_thread, sys_new_thread)
 __SYSCALL(__NR_attach_thread, sys_attach_thread)
 __SYSCALL(__NR_host_fd, sys_host_fd)
+__SYSCALL(__NR_new_exec, sys_new_exec)
 #ifdef CONFIG_BLOCK
 __SYSCALL(__NR_memblk_add, sys_memblk_add)
 #endif

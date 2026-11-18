@@ -1600,6 +1600,8 @@ static int lkl_test_signals(void)
 struct fork_child {
 	void (*f)(void *);
 	void *arg;
+	void (*program)(struct fork_child *c);
+	volatile int execd, exiting;
 	int fds[4];	/* parent to child, child to parent */
 	long pid, ppid, settid_first, settid_later, trips, close;
 };
@@ -1613,11 +1615,17 @@ static volatile int settid_word;
 static void fork_child_thread(void *arg)
 {
 	struct fork_child *c = arg;
-	char b;
-	int i;
 
 	c->f(c->arg);
 	/* the program, after its clone returned 0 in the child */
+	c->program(c);
+}
+
+static void fork_child_program(struct fork_child *c)
+{
+	char b;
+	int i;
+
 	c->settid_first = settid_word;
 	settid_word = 0;
 	c->pid = lkl_sys_getpid();
@@ -1652,6 +1660,7 @@ static int lkl_test_fork(void)
 
 	if (lkl_sys_pipe2(&c->fds[0], 0) || lkl_sys_pipe2(&c->fds[2], 0))
 		return TEST_FAILURE;
+	c->program = fork_child_program;
 	pid = lkl_sys_clone(LKL_SIGCHLD | LKL_CLONE_CHILD_SETTID, 0, NULL,
 			    (int *)&settid_word, 0);
 	if (pid > 0) {
@@ -1683,6 +1692,158 @@ static int lkl_test_fork(void)
 	    c->ppid != 1 || c->settid_first != pid || c->settid_later ||
 	    c->trips != FORK_TRIPS || trips != FORK_TRIPS || c->close ||
 	    ret != pid || status != 9 << 8 || w != 1 || i != -LKL_EINVAL)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
+ * exec's kernel half, new_exec(name), the host having loaded the program:
+ * in a process of two threads, after a handler for SIGUSR1, SIGUSR2
+ * ignored, SIGUSR1 blocked and pending, a close-on-exec pipe and a plain
+ * one, an alternate stack, set_tid_address and a name: the other thread
+ * (blocked in a read) ends, the close-on-exec fds are closed, SIGUSR1's
+ * action is the default and SIGUSR2's still ignored, SIGUSR1 still blocked
+ * and pending, the alternate stack and clear_child_tid gone (the exit
+ * doesn't write the word), the name the new one's.
+ */
+#define PR_SET_NAME 15
+#define PR_GET_NAME 16
+#define SS_DISABLE 2
+
+struct exec_results {
+	struct exit_process p;
+	long ret, pid, cloexec_fd, plain_fd, usr1, usr2, blocked, pending;
+	long ss_sp, ss_size, ss_flags;
+	char comm[16];
+	int ctid, ctid_exec;
+};
+
+static void exec_process(void *arg)
+{
+	struct exec_results *r = arg;
+	struct exit_process *p = &r->p;
+	static char altstack[16384];
+	lkl_stack_t ss = { altstack, 0, sizeof(altstack) };
+	struct lkl_sigaction sa;
+	lkl_sigset_t set;
+	struct timespec ts = { 0, 20000000 };
+	int cfds[2], fds[2];
+	lkl_thread_t tid;
+
+	if (lkl_sys_new_thread_group_leader())
+		return;
+	p->pid = lkl_sys_getpid();
+	if (lkl_sys_pipe2(p->fds, 0) || lkl_sys_pipe2(cfds, LKL_O_CLOEXEC) ||
+	    lkl_sys_pipe2(fds, 0))
+		return;
+	/* (blocked in the other thread too, which would take it) */
+	sig_mask(LKL_SIG_BLOCK, SIGBIT(LKL_SIGUSR1));
+	p->tid = lkl_sys_new_thread();
+	tid = lkl_host_ops.thread_create(thread_blocked, p);
+	if (!tid)
+		return;
+	sig_action(LKL_SIGUSR1, sig_plain_handler, 0);
+	sig_action(LKL_SIGUSR2, (void *)1 /* SIG_IGN */, 0);
+	lkl_sys_kill(p->pid, LKL_SIGUSR1);
+	lkl_sys_sigaltstack(&ss, NULL);
+	r->ctid = 1;
+	lkl_sys_set_tid_address(&r->ctid);
+	lkl_sys_prctl(PR_SET_NAME, (unsigned long)"before", 0, 0, 0);
+	/* (if the thread isn't reading yet, it dies at its next call) */
+	nanosleep(&ts, NULL);
+
+	r->ret = lkl_sys_new_exec("/nix/store/x-prog/bin/after");
+
+	r->pid = lkl_sys_getpid();
+	r->cloexec_fd = lkl_sys_fcntl(cfds[0], LKL_F_GETFD, 0);
+	r->plain_fd = lkl_sys_fcntl(fds[0], LKL_F_GETFD, 0);
+	lkl_sys_rt_sigaction(LKL_SIGUSR1, NULL, &sa, sizeof(sa.sa_mask));
+	r->usr1 = (long)sa.lkl_sa_handler;
+	lkl_sys_rt_sigaction(LKL_SIGUSR2, NULL, &sa, sizeof(sa.sa_mask));
+	r->usr2 = (long)sa.lkl_sa_handler;
+	lkl_sys_rt_sigprocmask(LKL_SIG_BLOCK, NULL, &set, sizeof(set));
+	r->blocked = set.sig[0];
+	lkl_sys_rt_sigpending(&set, sizeof(set));
+	r->pending = set.sig[0];
+	lkl_sys_sigaltstack(NULL, &ss);
+	r->ss_sp = (long)ss.ss_sp;
+	r->ss_size = ss.ss_size;
+	r->ss_flags = ss.ss_flags;
+	lkl_sys_prctl(PR_GET_NAME, (unsigned long)r->comm, 0, 0, 0);
+	/* not written at the exec (the address may be the new program's) */
+	r->ctid_exec = r->ctid;
+	/* nor at the exit: clear_child_tid is gone */
+	r->ctid = 77;
+	lkl_sys_close(fds[0]);
+	lkl_sys_close(fds[1]);
+	lkl_sys_exit(0);
+}
+
+/* a vfork's child: its parent's clone returns at its exec, not its exit */
+static void vfork_child_program(struct fork_child *c)
+{
+	struct timespec ts = { 0, 50000000 };
+
+	c->execd = 1;
+	lkl_sys_new_exec("prog");
+	nanosleep(&ts, NULL);
+	c->exiting = 1;
+	lkl_sys_exit_group(0);
+}
+
+static int lkl_test_exec(void)
+{
+	struct exec_results r = { 0 };
+	struct fork_child *c = &fork_child;
+	lkl_thread_t tid;
+	long pid, vexiting = -1, vexecd = -1, ret;
+	int status = -1;
+
+	tid = lkl_host_ops.thread_create(exec_process, &r);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	while (!__atomic_load_n(&r.p.thread.calls, __ATOMIC_SEQ_CST))
+		;
+	lkl_sys_wait4(r.p.pid, &status, 0, NULL);
+	lkl_sys_close(r.p.fds[0]);
+	lkl_sys_close(r.p.fds[1]);
+	lkl_test_logf("process %ld: new_exec %ld; the other thread: task_exit %d, pid %d; getpid %ld; F_GETFD close-on-exec %ld, plain %ld; SIGUSR1 action %#lx, SIGUSR2 %#lx; blocked %#lx pending %#lx; sigaltstack %#lx size %ld flags %ld; name \"%s\"; clear_child_tid's word %d after the exec, %d after the exit; exit status %#x\n",
+		      r.p.pid, r.ret, r.p.thread.calls, r.p.thread.pid, r.pid,
+		      r.cloexec_fd, r.plain_fd, r.usr1, r.usr2, r.blocked,
+		      r.pending, r.ss_sp, r.ss_size, r.ss_flags, r.comm,
+		      r.ctid_exec, r.ctid, status);
+
+	memset(c, 0, sizeof(*c));
+	c->program = vfork_child_program;
+	pid = lkl_sys_clone(LKL_CLONE_VM | LKL_CLONE_VFORK | LKL_SIGCHLD, 0,
+			    NULL, NULL, 0);
+	if (pid > 0) {
+		vexecd = c->execd;
+		vexiting = c->exiting;
+		lkl_sys_wait4(pid, NULL, 0, NULL);
+	}
+	lkl_test_logf("vfork: clone %ld returned with the child exec'd %ld, exiting %ld\n",
+		      pid, vexecd, vexiting);
+
+	/*
+	 * init's process, as the first program's exec is: its parked thread
+	 * (host0) isn't one to kill and wait for (it can't die: the exec hung)
+	 */
+	ret = lkl_sys_new_exec("/init");
+	lkl_test_logf("init's new_exec: %ld, getpid then %ld\n", ret,
+		      lkl_sys_getpid());
+	if (ret || lkl_sys_getpid() != 1)
+		return TEST_FAILURE;
+
+	if (r.ret || r.p.thread.calls != 1 || r.p.thread.pid ||
+	    r.pid != r.p.pid || r.cloexec_fd != -LKL_EBADF || r.plain_fd ||
+	    r.usr1 != 0 || r.usr2 != 1 ||
+	    r.blocked != SIGBIT(LKL_SIGUSR1) ||
+	    r.pending != SIGBIT(LKL_SIGUSR1) || r.ss_sp || r.ss_size ||
+	    !(r.ss_flags & SS_DISABLE) || strcmp(r.comm, "after") ||
+	    r.ctid_exec != 1 || r.ctid != 77 || status != 0)
+		return TEST_FAILURE;
+	if (pid <= 0 || vexecd != 1 || vexiting)
 		return TEST_FAILURE;
 	return TEST_SUCCESS;
 }
@@ -1889,6 +2050,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(task_exit),
 	LKL_TEST(signals),
 	LKL_TEST(fork),
+	LKL_TEST(exec),
 	LKL_TEST(init_exit),
 #endif
 	LKL_TEST(stop_kernel),

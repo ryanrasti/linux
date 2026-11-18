@@ -22,3 +22,4 @@
 #define __NR_attach_thread		(__NR_arch_specific_syscall + 3)
 #define __NR_host_fd			(__NR_arch_specific_syscall + 4)
 #define __NR_memblk_add			(__NR_arch_specific_syscall + 5)
+#define __NR_new_exec			(__NR_arch_specific_syscall + 6)

@@ -298,6 +298,20 @@ typedef __kernel_rwf_t		rwf_t;
  * host process too, by the host's fork op inside the call (host_ops.h);
  * clone with CLONE_THREAD is -EINVAL (a thread is new_thread's).
  *
+ * new_exec(name) is an exec's kernel half, the program's memory being the
+ * host's: the host, at the exec's point of no return (the new image
+ * checked, the old one still mapped), calls it as the exec-ing thread,
+ * then maps and starts the new image. It ends the process's other threads
+ * (waiting for them: one outside the kernel dies at its next call; the
+ * caller keeps its own tid), closes close-on-exec files, drops the user
+ * pointers the kernel keeps for the task (set_child_tid, clear_child_tid,
+ * unwritten; the robust list, walked; rseq), releases a vfork parent,
+ * deletes POSIX timers, clears the alternate signal stack, resets caught
+ * signals to their default (ignored ones stay ignored) and names the task
+ * after name's last part. The mask, pending signals, itimers, pid and cwd
+ * are kept. 0, or -EAGAIN if the process is exiting or another exec is in
+ * progress (the caller then dies at its call's return).
+ *
  * Signals are the kernel's (actions, masks, kill, default actions, wait
  * statuses), delivered as a call returns to the program: a caught one's
  * handler is run by the host's signal_handler op, inside the call, and the

@@ -15,6 +15,11 @@
 #include <linux/platform_device.h>
 #include <linux/fdtable.h>
 #include <linux/tick.h>
+#include <linux/sched/jobctl.h>
+#include <linux/sched/task.h>
+#include <linux/posix-timers.h>
+#include <linux/rseq.h>
+#include <linux/binfmts.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
 #include <asm/syscalls_32.h>
@@ -29,6 +34,8 @@ static asmlinkage long sys_new_thread_group_leader(void);
 static asmlinkage long sys_new_thread(void);
 
 static asmlinkage long sys_attach_thread(pid_t tid);
+
+static asmlinkage long sys_new_exec(const char __user *name);
 
 /* hostfd.c */
 asmlinkage long sys_host_fd(int fd, unsigned int flags);
@@ -743,4 +750,180 @@ SYSCALL_DEFINE0(new_thread)
 SYSCALL_DEFINE1(attach_thread, pid_t, tid)
 {
 	return task_pid_nr(current) == tid ? 0 : -EBUSY;
+}
+
+/*
+ * An exec's other threads end (de_thread's work, which is static in
+ * fs/exec.c): each is killed and waited for, the leader until it is a
+ * zombie if the caller isn't it. Unlike de_thread, the caller doesn't take
+ * the leader's pid (its tid stays its own: getpid is still the process's),
+ * and host0 isn't one of them: in init's process it is the thread no host
+ * thread runs, parked for good (a SIGKILL couldn't wake it, and the exec
+ * would wait forever). A thread running outside the kernel dies at its
+ * next syscall: the exec waits for it.
+ */
+static int exec_single_thread(struct task_struct *me)
+{
+	struct signal_struct *sig = me->signal;
+	spinlock_t *lock = &me->sighand->siglock;
+	struct task_struct *leader = me->group_leader, *t;
+	int count = 0;
+
+	spin_lock_irq(lock);
+	if ((sig->flags & SIGNAL_GROUP_EXIT) || sig->group_exec_task) {
+		spin_unlock_irq(lock);
+		return -EAGAIN;
+	}
+	sig->group_exec_task = me;
+	sig->group_stop_count = 0;
+	for_other_threads(me, t) {
+		if (t == host0)
+			continue;
+		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
+		/*
+		 * (a zombie counts, as zap_other_threads' does: it is waited
+		 * for until released; a thread new_thread made that no host
+		 * thread has taken yet doesn't: it can't run to die until
+		 * then, and dies at attach_thread)
+		 */
+		if (t != leader && READ_ONCE(t->__state) != TASK_NEW)
+			count++;
+		if (t->exit_state)
+			continue;
+		sigaddset(&t->pending.signal, SIGKILL);
+		signal_wake_up(t, 1);
+	}
+
+	sig->notify_count = count;
+	while (sig->notify_count) {
+		__set_current_state(TASK_KILLABLE);
+		spin_unlock_irq(lock);
+		schedule();
+		if (__fatal_signal_pending(me))
+			goto killed;
+		spin_lock_irq(lock);
+	}
+	spin_unlock_irq(lock);
+
+	/* exit_notify() wakes us when the leader is a zombie */
+	while (leader != me) {
+		write_lock_irq(&tasklist_lock);
+		sig->notify_count = -1;
+		if (leader->exit_state)
+			break;
+		__set_current_state(TASK_KILLABLE);
+		write_unlock_irq(&tasklist_lock);
+		schedule();
+		if (__fatal_signal_pending(me))
+			goto killed;
+	}
+	if (leader != me)
+		write_unlock_irq(&tasklist_lock);
+
+	sig->group_exec_task = NULL;
+	sig->notify_count = 0;
+	return 0;
+
+killed:
+	read_lock(&tasklist_lock);
+	sig->group_exec_task = NULL;
+	sig->notify_count = 0;
+	read_unlock(&tasklist_lock);
+	return -EAGAIN;
+}
+
+/*
+ * The files table made the exec's own, as unshare_files() does, but in
+ * init's process host0, a thread of it, keeps sharing it: dropped for the
+ * unshare (else, holding a reference, it made it copy the table and kept
+ * the old one, the pre-exec fds open for good: a pipe's reader never saw
+ * EOF), then given the table again.
+ */
+static int exec_unshare_files(struct task_struct *me)
+{
+	struct files_struct *files = me->files;
+	bool host0_shares = host0->files == files;
+	int ret;
+
+	if (host0_shares) {
+		task_lock(host0);
+		host0->files = NULL;
+		task_unlock(host0);
+		put_files_struct(files);
+	}
+	ret = unshare_files();
+	if (host0_shares) {
+		files = me->files;
+		atomic_inc(&files->count);
+		task_lock(host0);
+		host0->files = files;
+		task_unlock(host0);
+	}
+	return ret;
+}
+
+/*
+ * new_exec(name): an exec's kernel half, the host having loaded the new
+ * program (its memory is the host's, so exec_mmap and the binfmt are the
+ * host's too). Of begin_new_exec() and bprm_execve(), what a program can
+ * observe of a task that isn't its memory: the other threads killed (the
+ * process single-threaded), the files unshared and close-on-exec ones
+ * closed, the user pointers the kernel keeps for the task dropped
+ * (set_child_tid, clear_child_tid, the robust futex list, rseq) and a
+ * vfork parent released (exec_mm_release), the POSIX timers deleted, the
+ * alternate signal stack cleared, caught signals' actions reset to the
+ * default (ignored ones stay ignored), the name changed, self_exec_id
+ * moved on. Kept, as Linux keeps them: the mask and pending signals, the
+ * itimers and alarm, the pid, the cwd and the rest. Not done: credentials
+ * (no setuid file), the personality, dumpability.
+ */
+SYSCALL_DEFINE1(new_exec, const char __user *, name)
+{
+	struct task_struct *me = current;
+	char *path;
+	long ret;
+
+	/* the name as exec's: the path's last part */
+	path = strndup_user(name, PATH_MAX);
+	if (IS_ERR(path))
+		return PTR_ERR(path);
+
+	ret = exec_single_thread(me);
+	if (!ret)
+		ret = exec_unshare_files(me);
+	if (ret) {
+		kfree(path);
+		return ret;
+	}
+
+	/*
+	 * The old image's user pointers. clear_child_tid is dropped, not
+	 * written: Linux writes 0 there if the old memory is still another
+	 * task's (mm_users > 1), which here it always is (every host task
+	 * shares init's stub mm), and the address may be the new program's
+	 * by now. exec_mm_release walks the robust futex list (with FUTEX:
+	 * in the old image, so before the host replaces it) and completes a
+	 * vfork parent's wait.
+	 */
+	me->set_child_tid = NULL;
+	me->clear_child_tid = NULL;
+	exec_mm_release(me, me->mm);
+	rseq_execve(me);
+
+#ifdef CONFIG_POSIX_TIMERS
+	spin_lock_irq(&me->sighand->siglock);
+	posix_cpu_timers_exit(me);
+	spin_unlock_irq(&me->sighand->siglock);
+	exit_itimers(me);
+	flush_itimer_signals();
+#endif
+
+	do_close_on_exec(me->files);
+	me->sas_ss_sp = me->sas_ss_size = 0;
+	__set_task_comm(me, kbasename(path), true);
+	kfree(path);
+	WRITE_ONCE(me->self_exec_id, me->self_exec_id + 1);
+	flush_signal_handlers(me, 0);
+
+	return 0;
 }
