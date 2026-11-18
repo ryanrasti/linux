@@ -53,6 +53,12 @@ int lkl_test_nanosleep(void)
 #endif
 
 LKL_TEST_CALL(getpid, lkl_sys_getpid, 1)
+/*
+ * The thread that started the kernel is init itself, not another thread of
+ * PID 1's process: its tid is 1 and it has no parent.
+ */
+LKL_TEST_CALL(gettid, lkl_sys_gettid, 1)
+LKL_TEST_CALL(getppid, lkl_sys_getppid, 0)
 
 void check_latency(long (*f)(void), long *min, long *max, long *avg)
 {
@@ -767,6 +773,13 @@ static int lkl_test_start_kernel(void)
 }
 
 
+/*
+ * init's exit_group is the host's: instead of running it (do_exit() would
+ * panic) lkl_syscall() returns init's wait status, here exit code 3; the
+ * kernel is left as it was, so the test can still halt it.
+ */
+LKL_TEST_CALL(init_exit, lkl_sys_exit_group, 3 << 8, 3);
+
 LKL_TEST_CALL(stop_kernel, lkl_sys_halt, 0);
 
 struct lkl_test tests[] = {
@@ -778,6 +791,8 @@ struct lkl_test tests[] = {
 	LKL_TEST(kasan),
 #endif
 	LKL_TEST(getpid),
+	LKL_TEST(gettid),
+	LKL_TEST(getppid),
 	LKL_TEST(syscall_latency),
 	LKL_TEST(syscall_bounds),
 	LKL_TEST(umask),
@@ -830,6 +845,7 @@ struct lkl_test tests[] = {
 #ifdef LKL_HOST_CONFIG_LKL_PCI_MSI_KUNIT_TEST
 	LKL_TEST(kunit_pci_msi),
 #endif
+	LKL_TEST(init_exit),
 	LKL_TEST(stop_kernel),
 };
 

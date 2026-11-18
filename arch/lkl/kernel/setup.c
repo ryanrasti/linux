@@ -110,6 +110,8 @@ int __init lkl_start_kernel(const char *fmt, ...)
 	lkl_ops->sem_free(init_sem);
 	current_thread_info()->tid = lkl_ops->thread_self();
 	lkl_cpu_change_owner(current_thread_info()->tid);
+	/* init, current here, is this thread's task: the first program's */
+	syscalls_init_thread();
 
 	lkl_cpu_put();
 	is_running = 1;
@@ -187,8 +189,6 @@ static int lkl_run_init(struct linux_binprm *bprm)
 	setup_new_exec(bprm);
 
 	set_binfmt(&lkl_run_init_binfmt);
-
-	init_pid_ns.child_reaper = 0;
 
 	syscalls_init();
 

@@ -9,6 +9,8 @@
 #include <linux/task_work.h>
 #include <linux/syscalls.h>
 #include <linux/kthread.h>
+#include <linux/completion.h>
+#include <linux/sched/signal.h>
 #include <linux/platform_device.h>
 #include <asm/host_ops.h>
 #include <asm/syscalls.h>
@@ -58,6 +60,18 @@ static long run_syscall(long no, long *params)
 		     CLONE_SIGHAND | SIGCHLD)
 
 static int host_task_id;
+/*
+ * init (PID 1): the task of the thread that started the kernel, which
+ * makes the first program's syscalls, and of every call when the host has
+ * no thread local storage.
+ */
+static struct task_struct *init_host_task;
+/*
+ * A thread of init's process that no host thread runs: the task host tasks
+ * are cloned from (new_host_task), so that a host thread's task shares
+ * init's files without borrowing init itself, whose own thread may be
+ * waiting in a syscall.
+ */
 static struct task_struct *host0;
 
 static int new_host_task(struct task_struct **task, int new_tg_leader)
@@ -94,6 +108,10 @@ static void del_host_task(void *arg)
 	struct task_struct *task = (struct task_struct *)arg;
 	struct thread_info *ti = task_thread_info(task);
 
+	/* init's exit would panic; its end is the host's (lkl_syscall) */
+	if (task == init_host_task)
+		return;
+
 	if (lkl_cpu_get() < 0)
 		return;
 
@@ -107,7 +125,7 @@ static struct lkl_tls_key *task_key;
 
 long lkl_syscall(long no, long *params)
 {
-	struct task_struct *task = host0;
+	struct task_struct *task = init_host_task;
 	long ret;
 
 	ret = lkl_cpu_get();
@@ -125,6 +143,19 @@ long lkl_syscall(long no, long *params)
 	}
 
 	switch_to_host_task(task);
+
+	/*
+	 * init's end, its exit_group or its last thread's exit, is the host's,
+	 * with its wait status: do_exit() would panic. (host0 is the other
+	 * live thread init always has.) The call returns the status instead;
+	 * the host ends then.
+	 */
+	if (is_global_init(task) &&
+	    (no == __NR_exit_group ||
+	     (no == __NR_exit && atomic_read(&task->signal->live) == 2))) {
+		ret = (params[0] & 0xff) << 8;
+		goto out;
+	}
 
 	ret = run_syscall(no, params);
 
@@ -173,20 +204,32 @@ static int idle_host_task_loop(void *unused)
 	}
 }
 
-int syscalls_init(void)
+static DECLARE_COMPLETION(host0_parked);
+
+/* host0's own host thread: park the task, then end, leaving it to others */
+static int host0_park(void *unused)
 {
 	snprintf(current->comm, sizeof(current->comm), "host0");
 	set_thread_flag(TIF_HOST_THREAD);
 	host0 = current;
+	complete(&host0_parked);
+	thread_sched_jb();
+	lkl_ops->thread_exit();
+	return 0;
+}
 
-	// Reap zombie host tasks spawned as new thread group leaders via
-	// new_thread_group_leader syscall (otherwise the dead task resources
-	// such as `struct task_struct` won't be reclaimed by kernel).
-	// TODO: currently LKL doesn't support thread signal handling in
-	// user-space, thus, it's safe to ignore this signal here. However,
-	// if user-space signal handling is implemented in future we might want
-	// to remove the line of code below to let user-space handle SIGCHLD.
-	kernel_sigaction(SIGCHLD, SIG_IGN);
+/*
+ * Called by init in its exec of /init (lkl_run_init), whose task is then
+ * the one of the thread that started the kernel (syscalls_init_thread).
+ * init is the first program's process: its signal actions stay the
+ * defaults, and the idle host task is a kernel thread, not one of its.
+ */
+int syscalls_init(void)
+{
+	struct task_struct *idle;
+
+	set_thread_flag(TIF_HOST_THREAD);
+	init_host_task = current;
 
 	if (lkl_ops->tls_alloc) {
 		task_key = lkl_ops->tls_alloc(del_host_task);
@@ -194,13 +237,22 @@ int syscalls_init(void)
 			return -1;
 	}
 
-	if (kernel_thread(idle_host_task_loop, NULL, NULL, CLONE_FLAGS) < 0) {
+	idle = kthread_run(idle_host_task_loop, NULL, "idle_host_task");
+	if (IS_ERR(idle) || user_mode_thread(host0_park, NULL, CLONE_FLAGS) < 0) {
 		if (lkl_ops->tls_free)
 			lkl_ops->tls_free(task_key);
 		return -1;
 	}
+	wait_for_completion(&host0_parked);
 
 	return 0;
+}
+
+/* the thread that started the kernel: its task is init */
+void syscalls_init_thread(void)
+{
+	if (lkl_ops->tls_set)
+		lkl_ops->tls_set(task_key, init_host_task);
 }
 
 void syscalls_cleanup(void)

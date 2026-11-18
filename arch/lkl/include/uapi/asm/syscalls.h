@@ -268,6 +268,18 @@ typedef __kernel_rwf_t		rwf_t;
 #define st_ctime st_ctime
 #define s_addr s_addr
 
+/**
+ * lkl_syscall - run system call @no with @params, as the calling thread's task
+ *
+ * The thread that called lkl_start_kernel() is init (PID 1), the first
+ * program's process. Another thread's first call makes it a thread of init's
+ * process (or, if the call is new_thread_group_leader, a process of its
+ * own). If the host has no thread local storage every call is init's.
+ *
+ * init's end, its exit_group or its last thread's exit, isn't run: the call
+ * returns init's wait status ((code & 0xff) << 8) and the host ends then,
+ * with lkl_sys_halt() or its own exit.
+ */
 long lkl_syscall(long no, long *params);
 long lkl_sys_halt(void);
 
