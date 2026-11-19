@@ -74,6 +74,11 @@ static long run_syscall(long no, long *params)
 	return ret;
 }
 
+long run_syscall_current(long no, long *params)
+{
+	return run_syscall(no, params);
+}
+
 
 #define CLONE_FLAGS (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD |	\
 		     CLONE_SIGHAND | SIGCHLD)

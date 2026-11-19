@@ -5,6 +5,8 @@ int syscalls_init(void);
 void syscalls_init_thread(void);
 void syscalls_cleanup(void);
 long lkl_syscall(long no, long *params);
+/* syscall no as current, whatever task that is (tsi.c's lkl_net_syscall) */
+long run_syscall_current(long no, long *params);
 bool wakeup_idle_host_task(void);
 bool others_runnable(void);
 void idle_host_task_idle(void);

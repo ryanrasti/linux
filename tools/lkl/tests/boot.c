@@ -1110,6 +1110,31 @@ static void thread_tsi_connect(void *arg)
 }
 
 /*
+ * The host's own syscalls (lkl_net_syscall) run as the tsi task, of no
+ * process of the program's: its pid isn't init's, init's fds aren't its
+ * (a close of one is EBADF, and init's stays open), and an exit is
+ * refused.
+ */
+static int lkl_test_tsi_syscall(void)
+{
+	long none[6] = { 0 }, args[6] = { 0 };
+	long pid, fd, closed, still, ex;
+
+	fd = lkl_sys_open("/", LKL_O_RDONLY, 0);
+	pid = lkl_net_syscall(__lkl__NR_getpid, none);
+	args[0] = fd;
+	closed = lkl_net_syscall(__lkl__NR_close, args);
+	still = lkl_sys_close(fd);
+	ex = lkl_net_syscall(__lkl__NR_exit, none);
+	lkl_test_logf("getpid %ld (init's %ld); close of init's fd %ld: %ld, then init's own close %ld; exit %ld\n",
+		      pid, lkl_sys_getpid(), fd, closed, still, ex);
+	if (pid <= 1 || fd < 0 || closed != -LKL_EBADF || still != 0 ||
+	    ex != -LKL_EINVAL)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
  * A connect to a non-loopback address is the host's (tsi.c): net_connect
  * is told the address and the caller's pid; a nonblocking connect is
  * EINPROGRESS, not ready, until lkl_net_done; then the bytes go both ways
@@ -2447,6 +2472,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(tsi_connect),
 	LKL_TEST(tsi_listen),
 	LKL_TEST(tsi_dgram),
+	LKL_TEST(tsi_syscall),
 #endif
 	LKL_TEST(hostfd_poll),
 	LKL_TEST(hostfd_nonblock),

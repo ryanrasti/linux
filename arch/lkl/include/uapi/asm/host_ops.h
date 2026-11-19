@@ -410,6 +410,16 @@ int lkl_is_running(void);
  * lkl_net_shutdown - shutdown(how) of the end: SHUT_WR, the program reads EOF.
  * lkl_net_close - the end released; with reset, the program's next call on
  * its socket fails with ECONNRESET (else it reads EOF).
+ *
+ * lkl_net_syscall - syscall no with params (as lkl_syscall's) made by the
+ * host's own code that serves the network (a library the provider uses:
+ * a getrandom, a read of /proc/self/maps for a stack's bounds), run as the
+ * kernel task the lkl_net_* calls run as: no thread of the program's (a
+ * host thread's first lkl_syscall makes it a thread of init's process,
+ * which keeps that process alive and its files open until the thread makes
+ * another call, and holds up an exec), its files not the program's. Not
+ * exit, exit_group or the host-task calls (new_thread, attach_thread,
+ * new_thread_group_leader, new_exec): -EINVAL.
  */
 void *lkl_net_done(void *sock, int err);
 void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len);
@@ -419,6 +429,7 @@ long lkl_net_recv(void *end, void *buf, unsigned long len);
 long lkl_net_send(void *end, const void *buf, unsigned long len);
 long lkl_net_shutdown(void *end, int how);
 void lkl_net_close(void *end, int reset);
+long lkl_net_syscall(long no, long *params);
 
 /*
  * lkl_hostfd_ready - host fd fd, which a guest file of host_fd's polled not

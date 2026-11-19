@@ -1358,6 +1358,35 @@ void lkl_net_close(void *end, int reset)
 	tsi_leave();
 }
 
+/*
+ * The host's own syscall (asm/host_ops.h), as the tsi task: a kernel
+ * thread, so no thread of init's process to keep it from ending, or to
+ * hold its files open after its exit (capnix: a provider's library read
+ * /proc/self/maps, the executor got a host task of init's, and the sandbox
+ * never ended). Not the calls that would end the tsi task or make it a
+ * host task of a process's.
+ */
+long lkl_net_syscall(long no, long *params)
+{
+	long ret;
+
+	switch (no) {
+	case __NR_exit:
+	case __NR_exit_group:
+	case __NR_new_thread:
+	case __NR_attach_thread:
+	case __NR_new_thread_group_leader:
+	case __NR_new_exec:
+		return -EINVAL;
+	}
+	ret = tsi_enter();
+	if (ret)
+		return ret;
+	ret = run_syscall_current(no, params);
+	tsi_leave();
+	return ret;
+}
+
 /* ---- the tsi task ---- */
 
 static DECLARE_COMPLETION(tsi_parked);
