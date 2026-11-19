@@ -28,29 +28,55 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 			 int write)
 {
 	struct task_struct *task = current;
-	int flags = write ? LKL_HOSTFD_WRITE : 0;
+	ssize_t done = 0;
 	long ret;
+	int flags;
 
 	/* only a host task has a host thread to do the I/O on */
 	if (!test_thread_flag(TIF_HOST_THREAD) || !lkl_ops->hostfd_rw)
 		return -EINVAL;
 
-	/*
-	 * Schedule out, as a host task leaving the kernel does: the CPU goes
-	 * to the next task, and this thread comes back here without it.
-	 */
-	/* (f_flags read once: an fcntl meanwhile applies to the next call) */
-	if (READ_ONCE(file->f_flags) & O_NONBLOCK)
-		flags |= LKL_HOSTFD_NONBLOCK;
-	thread_sched_jb();
-	ret = lkl_ops->hostfd_rw((long)file->private_data, (void *)buf, len,
-				 flags);
-	/* the kernel halted meanwhile: nothing to return to */
-	if (lkl_cpu_get() < 0)
-		lkl_ops->thread_exit();
-	switch_to_host_task(task);
+	for (;;) {
+		flags = write ? LKL_HOSTFD_WRITE : 0;
+		/* (f_flags read once a call: an fcntl meanwhile applies to the next) */
+		if (READ_ONCE(file->f_flags) & O_NONBLOCK)
+			flags |= LKL_HOSTFD_NONBLOCK;
+		/*
+		 * Schedule out, as a host task leaving the kernel does: the CPU
+		 * goes to the next task, and this thread comes back here without
+		 * it.
+		 */
+		thread_sched_jb();
+		ret = lkl_ops->hostfd_rw((long)file->private_data, buf + done,
+					 len - done, flags);
+		/* the kernel halted meanwhile: nothing to return to */
+		if (lkl_cpu_get() < 0)
+			lkl_ops->thread_exit();
+		switch_to_host_task(task);
 
-	return ret;
+		/*
+		 * A read is one read, and a nonblocking write takes what the fd
+		 * takes now. A blocking write is whole, as a pipe's (pipe_write):
+		 * the host may take it in pieces, or wait without taking any
+		 * (-ERESTARTSYS), and it is asked for the rest until it is done,
+		 * or a signal comes, which cuts it short at what was written. A
+		 * host whose threads share one CPU (exobox's coroutines, or its
+		 * token) can't wait in a write(2) a full pipe doesn't take whole:
+		 * it writes what the pipe takes, and waits for the rest outside
+		 * the write, briefly (the task sleeps uninterruptibly meanwhile,
+		 * out of a signal's reach), then returns.
+		 */
+		if (!write || (flags & LKL_HOSTFD_NONBLOCK) || !ret)
+			break;
+		if (ret > 0)
+			done += ret;
+		else if (ret != -ERESTARTSYS || !done)
+			break;
+		if (done >= len || signal_pending(current))
+			break;
+	}
+
+	return done ? done : ret;
 }
 
 static ssize_t hostfd_read(struct file *file, char __user *buf, size_t len,

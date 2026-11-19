@@ -227,7 +227,12 @@ enum lkl_prot {
  * on host fd fd, for a guest file made by host_fd(fd, flags)
  * (asm/syscalls.h): returns the bytes done or a negative Linux errno. Called
  * on the calling task's host thread with the CPU released, the task asleep
- * in the kernel, so it may block for as long as the I/O takes; but not with
+ * in the kernel, so it may block for as long as the I/O takes. A write may
+ * also take less than len (what the fd takes without waiting), or wait a
+ * while and return -ERESTARTSYS with nothing done: the kernel asks again for
+ * the rest of a blocking write until it is whole or a signal is pending
+ * (then the call returns what was written, or is restarted or interrupted
+ * if nothing was), as a pipe's write. Not with
  * LKL_HOSTFD_NONBLOCK (the file is O_NONBLOCK): then if the fd isn't ready
  * now it returns -EAGAIN at once, as a nonblocking read or write would, and
  * (with hostfd_poll) watches the fd as hostfd_poll does for what isn't

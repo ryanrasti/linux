@@ -969,6 +969,68 @@ static int lkl_test_hostfd_nonblock(void)
 	return TEST_SUCCESS;
 }
 
+/*
+ * hostfd_pieces's host: the posix host's hostfd_rw, taking at most 3 bytes
+ * a call, and waiting without taking any every other call (-ERESTARTSYS), as
+ * a host that can't wait in a write(2) a full pipe doesn't take whole does.
+ */
+static int hostfd_calls;
+
+static long hostfd_rw_pieces(int fd, void *buf, unsigned long len, int flags)
+{
+	ssize_t ret;
+
+	if (hostfd_calls++ % 2)
+		return -512; /* ERESTARTSYS (include/linux/errno.h: the kernel's own) */
+	if (len > 3)
+		len = 3;
+	ret = flags & LKL_HOSTFD_WRITE ? write(fd, buf, len) : read(fd, buf, len);
+	return ret < 0 ? -LKL_EIO : ret;
+}
+
+/*
+ * A blocking write is whole, as a pipe's, though the host takes it in pieces
+ * and waits between them: the kernel asks for the rest until it is done. A
+ * read is one read, and so is a nonblocking write: what the host gave.
+ */
+static int lkl_test_hostfd_pieces(void)
+{
+	long (*rw)(int, void *, unsigned long, int) = lkl_host_ops.hostfd_rw;
+	long w, nb, whole, part, rd, got;
+	char buf[16] = { 0 }, rbuf[16] = { 0 };
+	int p[2];
+	ssize_t n;
+
+	if (pipe(p))
+		return TEST_FAILURE;
+	w = lkl_sys_host_fd(p[1], LKL_O_WRONLY);
+	nb = lkl_sys_host_fd(p[1], LKL_O_WRONLY | LKL_O_NONBLOCK);
+	rd = lkl_sys_host_fd(p[0], LKL_O_RDONLY);
+	if (w < 0 || nb < 0 || rd < 0)
+		return TEST_FAILURE;
+	lkl_host_ops.hostfd_rw = hostfd_rw_pieces;
+	hostfd_calls = 0;
+	whole = lkl_sys_write(w, "abcdefghij", 10);
+	n = read(p[0], buf, sizeof(buf) - 1);
+	hostfd_calls = 0;
+	part = lkl_sys_write(nb, "klmnop", 6);
+	hostfd_calls = 0;
+	got = lkl_sys_read(rd, rbuf, sizeof(rbuf));
+	lkl_host_ops.hostfd_rw = rw;
+
+	lkl_test_logf("a write of 10 in pieces of 3: %ld, the host got %zd \"%s\"; nonblocking: %ld; a read: %ld \"%s\"\n",
+		      whole, n, buf, part, got, rbuf);
+	lkl_sys_close(w);
+	lkl_sys_close(nb);
+	lkl_sys_close(rd);
+	close(p[0]);
+	close(p[1]);
+	if (whole != 10 || n != 10 || strcmp(buf, "abcdefghij") || part != 3 ||
+	    got != 3 || strcmp(rbuf, "klm"))
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 /* memblk_extents's file: a pattern with a run of zero blocks in it */
 static unsigned char memblk_byte(long i)
 {
@@ -2653,6 +2715,7 @@ struct lkl_test tests[] = {
 #endif
 	LKL_TEST(hostfd_poll),
 	LKL_TEST(hostfd_nonblock),
+	LKL_TEST(hostfd_pieces),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),
