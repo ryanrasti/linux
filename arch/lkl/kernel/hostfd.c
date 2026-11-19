@@ -14,6 +14,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/syscalls.h>
 #include <asm/cpu.h>
@@ -57,9 +58,52 @@ static ssize_t hostfd_write(struct file *file, const char __user *buf,
 	return hostfd_rw(file, (char __user *)buf, len, 1);
 }
 
+/*
+ * Every poller of a host fd file waits here: lkl_hostfd_ready wakes them
+ * all, and each asks the host again. One queue for all of them is enough,
+ * as a wakeup only makes a poller look again.
+ */
+static DECLARE_WAIT_QUEUE_HEAD(hostfd_wait);
+
+/*
+ * The host says what the fd has ready now (hostfd_poll), watching it for
+ * the rest: so the guest's poll, select and epoll see a host fd, such as a
+ * channel the host passed in, become readable without a read blocked on
+ * it.
+ */
+static __poll_t hostfd_poll(struct file *file, poll_table *wait)
+{
+	__poll_t want = 0, ready;
+
+	if (!lkl_ops->hostfd_poll)
+		return EPOLLIN | EPOLLRDNORM | EPOLLOUT | EPOLLWRNORM;
+	poll_wait(file, &hostfd_wait, wait);
+	if (file->f_mode & FMODE_READ)
+		want |= EPOLLIN;
+	if (file->f_mode & FMODE_WRITE)
+		want |= EPOLLOUT;
+	/* (POLLHUP and POLLERR whatever was asked, as poll(2) gives them) */
+	ready = lkl_ops->hostfd_poll((long)file->private_data, want) &
+		(want | EPOLLHUP | EPOLLERR);
+	if (ready & EPOLLIN)
+		ready |= EPOLLRDNORM;
+	if (ready & EPOLLOUT)
+		ready |= EPOLLWRNORM;
+	return ready;
+}
+
+void lkl_hostfd_ready(int fd)
+{
+	if (lkl_cpu_get() < 0)
+		return;
+	wake_up_interruptible_all(&hostfd_wait);
+	lkl_cpu_put();
+}
+
 static const struct file_operations hostfd_fops = {
 	.read	= hostfd_read,
 	.write	= hostfd_write,
+	.poll	= hostfd_poll,
 };
 
 /*

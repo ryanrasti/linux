@@ -264,6 +264,12 @@ enum lkl_prot {
  * is a sock the host holds a reference to: the program closed it (a
  * connect it gave up, a listen it ended; lkl_net_done still gives the
  * reference back).
+ *
+ * @hostfd_poll - a poll of a guest file made by host_fd(fd, flags): return
+ * which of events (POLLIN, POLLOUT) host fd fd has ready now, without
+ * waiting. For any not ready, the host watches the fd and calls
+ * lkl_hostfd_ready(fd) once one is (the guest's pollers then ask again).
+ * Called with the CPU held. Without it, the files poll as always ready.
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -333,6 +339,7 @@ struct lkl_host_operations {
 	int (*net_listen)(void *sock, int pid, const struct sockaddr *addr, int len);
 	int (*net_sendto)(void *sock, int pid, const struct sockaddr *addr, int len, const void *buf, unsigned long size);
 	void (*net_ready)(void *obj);
+	unsigned int (*hostfd_poll)(int fd, unsigned int events);
 };
 
 /**
@@ -403,6 +410,13 @@ long lkl_net_recv(void *end, void *buf, unsigned long len);
 long lkl_net_send(void *end, const void *buf, unsigned long len);
 long lkl_net_shutdown(void *end, int how);
 void lkl_net_close(void *end, int reset);
+
+/*
+ * lkl_hostfd_ready - host fd fd, which a guest file of host_fd's polled not
+ * ready (hostfd_poll), may be ready now: the guest's pollers ask again.
+ * From a thread of the host's own, never from inside a host op.
+ */
+void lkl_hostfd_ready(int fd);
 
 int lkl_printf(const char *fmt, ...);
 void lkl_bug(const char *fmt, ...);

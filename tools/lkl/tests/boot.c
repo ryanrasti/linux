@@ -13,6 +13,7 @@
 
 #include <sys/stat.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <fcntl.h>
 #ifndef __MINGW32__
 #include <sys/mman.h>
@@ -877,6 +878,72 @@ static int lkl_test_memblk(void)
 }
 
 #define PROGRAM_MEM (1UL << 30)
+/* the posix host's hostfd_poll: poll(2) of the fd, not waiting */
+static unsigned int test_hostfd_poll(int fd, unsigned int events)
+{
+	struct pollfd p = { .fd = fd, .events = events };
+
+	return poll(&p, 1, 0) == 1 ? p.revents : 0;
+}
+
+struct hostfd_waiter {
+	long epfd, ret;
+};
+
+static void thread_hostfd_epoll(void *arg)
+{
+	struct hostfd_waiter *w = arg;
+	struct lkl_epoll_event ev;
+
+	w->ret = lkl_sys_epoll_wait(w->epfd, &ev, 1, 5000);
+}
+
+/*
+ * A host fd file polls as its host fd is (hostfd_poll): not readable while
+ * the host pipe is empty; an epoll_wait on it wakes once the host writes
+ * and says so (lkl_hostfd_ready).
+ */
+static int lkl_test_hostfd_poll(void)
+{
+	struct hostfd_waiter w = { .ret = -1 };
+	struct lkl_epoll_event ev = { .events = LKL_POLLIN };
+	struct lkl_pollfd pfd;
+	struct timespec ts = { 0, 20000000 };
+	long fd, before, early, after;
+	int p[2];
+	lkl_thread_t tid;
+
+	if (pipe(p))
+		return TEST_FAILURE;
+	lkl_host_ops.hostfd_poll = test_hostfd_poll;
+	fd = lkl_sys_host_fd(p[0], LKL_O_RDONLY);
+	pfd = (struct lkl_pollfd){ .fd = fd, .events = LKL_POLLIN };
+	before = lkl_sys_poll(&pfd, 1, 0);
+	w.epfd = lkl_sys_epoll_create(1);
+	lkl_sys_epoll_ctl(w.epfd, LKL_EPOLL_CTL_ADD, fd, &ev);
+	tid = lkl_host_ops.thread_create(thread_hostfd_epoll, &w);
+	nanosleep(&ts, NULL);
+	early = w.ret;
+	if (write(p[1], "x", 1) != 1)
+		return TEST_FAILURE;
+	lkl_hostfd_ready(p[0]);
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	pfd.revents = 0;
+	after = lkl_sys_poll(&pfd, 1, 0);
+	lkl_test_logf("poll before the write %ld; epoll_wait %ld while waiting, %ld after the write; poll %ld (0x%x)\n",
+		      before, early, w.ret, after, pfd.revents);
+	lkl_sys_close(w.epfd);
+	lkl_sys_close(fd);
+	close(p[0]);
+	close(p[1]);
+	lkl_host_ops.hostfd_poll = NULL;
+	if (before != 0 || early != -1 || w.ret != 1 || after != 1 ||
+	    !(pfd.revents & LKL_POLLIN))
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 #ifdef LKL_CONFIG_LKL_TSI
 /*
  * The host side of tsi.c: what the net_* ops were told, as a host would
@@ -2294,6 +2361,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(tsi_listen),
 	LKL_TEST(tsi_dgram),
 #endif
+	LKL_TEST(hostfd_poll),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),
