@@ -9,7 +9,10 @@
  * The host's I/O is done outside the CPU, with the task asleep in the
  * kernel (TASK_UNINTERRUPTIBLE, as in a disk read): a read of stdin can
  * wait for as long as it takes while the rest of the kernel runs, or idles
- * tickless if nothing else is runnable.
+ * tickless if nothing else is runnable. A nonblocking file's (O_NONBLOCK,
+ * at host_fd or by fcntl later) doesn't wait: the host returns -EAGAIN if
+ * its fd isn't ready, as a pipe's read would (tokio reads to EAGAIN after
+ * each edge; a read that waited instead stalled its runtime).
  */
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
@@ -25,6 +28,7 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 			 int write)
 {
 	struct task_struct *task = current;
+	int flags = write ? LKL_HOSTFD_WRITE : 0;
 	long ret;
 
 	/* only a host task has a host thread to do the I/O on */
@@ -35,9 +39,12 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 	 * Schedule out, as a host task leaving the kernel does: the CPU goes
 	 * to the next task, and this thread comes back here without it.
 	 */
+	/* (f_flags read once: an fcntl meanwhile applies to the next call) */
+	if (READ_ONCE(file->f_flags) & O_NONBLOCK)
+		flags |= LKL_HOSTFD_NONBLOCK;
 	thread_sched_jb();
 	ret = lkl_ops->hostfd_rw((long)file->private_data, (void *)buf, len,
-				 write);
+				 flags);
 	/* the kernel halted meanwhile: nothing to return to */
 	if (lkl_cpu_get() < 0)
 		lkl_ops->thread_exit();
@@ -108,14 +115,15 @@ static const struct file_operations hostfd_fops = {
 
 /*
  * host_fd(fd, flags): a new descriptor (the lowest free) for host fd fd;
- * flags are the access mode (O_RDONLY, O_WRONLY, O_RDWR) and O_CLOEXEC.
+ * flags are the access mode (O_RDONLY, O_WRONLY, O_RDWR), O_CLOEXEC and
+ * O_NONBLOCK.
  */
 SYSCALL_DEFINE2(host_fd, int, fd, unsigned int, flags)
 {
 	struct file *file;
 	int gfd;
 
-	if (fd < 0 || (flags & ~(O_ACCMODE | O_CLOEXEC)) ||
+	if (fd < 0 || (flags & ~(O_ACCMODE | O_CLOEXEC | O_NONBLOCK)) ||
 	    (flags & O_ACCMODE) == O_ACCMODE)
 		return -EINVAL;
 
@@ -124,8 +132,8 @@ SYSCALL_DEFINE2(host_fd, int, fd, unsigned int, flags)
 		return gfd;
 	/* an inode of its own, so that it can be typed */
 	file = anon_inode_create_getfile("[hostfd]", &hostfd_fops,
-					 (void *)(long)fd, flags & O_ACCMODE,
-					 NULL);
+					 (void *)(long)fd,
+					 flags & (O_ACCMODE | O_NONBLOCK), NULL);
 	if (IS_ERR(file)) {
 		put_unused_fd(gfd);
 		return PTR_ERR(file);

@@ -223,12 +223,17 @@ enum lkl_prot {
  * child's exit is reported by task_exit, as any task's. Optional: without
  * it, clone fails with -ENOSYS.
  *
- * @hostfd_rw - read (write 0) or write (write 1) len bytes at buf on host fd
- * fd, for a guest file made by host_fd(fd, flags) (asm/syscalls.h): returns
- * the bytes done or a negative Linux errno. Called on the calling task's
- * host thread with the CPU released, the task asleep in the kernel, so it
- * may block for as long as the I/O takes. Without it, the files' reads and
- * writes fail with -EINVAL.
+ * @hostfd_rw - read or write (flags has LKL_HOSTFD_WRITE) len bytes at buf
+ * on host fd fd, for a guest file made by host_fd(fd, flags)
+ * (asm/syscalls.h): returns the bytes done or a negative Linux errno. Called
+ * on the calling task's host thread with the CPU released, the task asleep
+ * in the kernel, so it may block for as long as the I/O takes; but not with
+ * LKL_HOSTFD_NONBLOCK (the file is O_NONBLOCK): then if the fd isn't ready
+ * now it returns -EAGAIN at once, as a nonblocking read or write would, and
+ * (with hostfd_poll) watches the fd as hostfd_poll does for what isn't
+ * ready, calling lkl_hostfd_ready once it may be: an edge-triggered epoll
+ * that read to -EAGAIN waits for that wakeup.
+ * Without it, the files' reads and writes fail with -EINVAL.
  *
  * Networking (arch/lkl/kernel/tsi.c, CONFIG_LKL_TSI): a program's AF_INET
  * sockets are its own for loopback (127.0.0.0/8, 0.0.0.0) and the host's
@@ -271,6 +276,10 @@ enum lkl_prot {
  * lkl_hostfd_ready(fd) once one is (the guest's pollers then ask again).
  * Called with the CPU held. Without it, the files poll as always ready.
  */
+/* hostfd_rw's flags */
+#define LKL_HOSTFD_WRITE	1
+#define LKL_HOSTFD_NONBLOCK	2
+
 struct lkl_host_operations {
 	const char *virtio_devices;
 
@@ -332,7 +341,7 @@ struct lkl_host_operations {
 	struct lkl_dev_pci_ops *pci_ops;
 
 	void (*task_exit)(int pid, int status);
-	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int write);
+	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int flags);
 	int (*signal_handler)(struct lkl_signal *sig);
 	lkl_thread_t (*fork)(void (*f)(void *), void *arg);
 	int (*net_connect)(void *sock, int pid, const struct sockaddr *addr, int len);

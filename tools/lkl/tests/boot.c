@@ -877,6 +877,93 @@ static int lkl_test_memblk(void)
 	return TEST_SUCCESS;
 }
 
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ 1031 /* (glibc's only with _GNU_SOURCE) */
+#endif
+
+struct hostfd_io {
+	long fd, ret;
+	int write;
+	char buf[8];
+};
+
+static void thread_hostfd_io(void *arg)
+{
+	struct hostfd_io *io = arg;
+
+	io->ret = io->write ? lkl_sys_write(io->fd, "x", 1) :
+			      lkl_sys_read(io->fd, io->buf, sizeof(io->buf));
+}
+
+/*
+ * io on another thread; if it still waits after 50 ms, unblock(fd) lets it
+ * finish (a write to the pipe, or a read making room). Its result.
+ */
+static long hostfd_io_bounded(long fd, int out, int unblock)
+{
+	struct hostfd_io io = { .fd = fd, .ret = -1, .write = out };
+	struct timespec ts = { 0, 50000000 };
+	char b[4096];
+	lkl_thread_t tid;
+
+	tid = lkl_host_ops.thread_create(thread_hostfd_io, &io);
+	if (!tid)
+		return -1000;
+	nanosleep(&ts, NULL);
+	if (out ? read(unblock, b, sizeof(b)) < 0 : write(unblock, "y", 1) != 1)
+		return -1000;
+	if (lkl_host_ops.thread_join(tid))
+		return -1000;
+	return io.ret;
+}
+
+/*
+ * A nonblocking host fd file's reads and writes don't wait for the host
+ * fd: -EAGAIN while it isn't ready (an empty pipe; a full one), whether
+ * O_NONBLOCK came with host_fd or with a later fcntl; once ready, the I/O.
+ */
+static int lkl_test_hostfd_nonblock(void)
+{
+	char fill[4096] = { 0 };
+	long at_open, by_fcntl, setfl, full, ready;
+	long rd = -1, rd2 = -1, wr = -1;
+	int p[2], q[2];
+
+	if (pipe(p) || pipe(q))
+		return TEST_FAILURE;
+	/* a pipe of one page, filled: no room for a write */
+	if (fcntl(q[1], F_SETPIPE_SZ, sizeof(fill)) < 0 ||
+	    write(q[1], fill, sizeof(fill)) != sizeof(fill))
+		return TEST_FAILURE;
+
+	rd = lkl_sys_host_fd(p[0], LKL_O_RDONLY | LKL_O_NONBLOCK);
+	at_open = rd < 0 ? rd : hostfd_io_bounded(rd, 0, p[1]);
+	/* the unblocking write left a byte: a nonblocking read gets it */
+	ready = rd < 0 ? rd : lkl_sys_read(rd, fill, 1);
+
+	rd2 = lkl_sys_host_fd(p[0], LKL_O_RDONLY);
+	setfl = lkl_sys_fcntl(rd2, LKL_F_SETFL, LKL_O_NONBLOCK);
+	by_fcntl = hostfd_io_bounded(rd2, 0, p[1]);
+
+	wr = lkl_sys_host_fd(q[1], LKL_O_WRONLY);
+	lkl_sys_fcntl(wr, LKL_F_SETFL, LKL_O_NONBLOCK);
+	full = hostfd_io_bounded(wr, 1, q[0]);
+
+	lkl_test_logf("O_NONBLOCK at host_fd: fd %ld, read of an empty pipe %ld, then %ld; by fcntl (%ld): read %ld; write to a full pipe %ld\n",
+		      rd, at_open, ready, setfl, by_fcntl, full);
+	lkl_sys_close(rd);
+	lkl_sys_close(rd2);
+	lkl_sys_close(wr);
+	close(p[0]);
+	close(p[1]);
+	close(q[0]);
+	close(q[1]);
+	if (rd < 0 || at_open != -LKL_EAGAIN || ready != 1 || setfl ||
+	    by_fcntl != -LKL_EAGAIN || full != -LKL_EAGAIN)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
 #define PROGRAM_MEM (1UL << 30)
 /* the posix host's hostfd_poll: poll(2) of the fd, not waiting */
 static unsigned int test_hostfd_poll(int fd, unsigned int events)
@@ -2362,6 +2449,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(tsi_dgram),
 #endif
 	LKL_TEST(hostfd_poll),
+	LKL_TEST(hostfd_nonblock),
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),

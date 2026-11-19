@@ -568,10 +568,19 @@ static void *posix_memmove(void *dest, const void *src, unsigned long n)
 	return memmove(dest, src, (size_t)n);
 }
 
-/* a guest file over a host fd (host_fd): the I/O on the host's */
-static long hostfd_rw(int fd, void *buf, unsigned long len, int write_)
+/*
+ * a guest file over a host fd (host_fd): the I/O on the host's; a
+ * nonblocking file's only if the fd is ready
+ */
+static long hostfd_rw(int fd, void *buf, unsigned long len, int flags)
 {
-	ssize_t ret = write_ ? write(fd, buf, len) : read(fd, buf, len);
+	int w = flags & LKL_HOSTFD_WRITE;
+	struct pollfd p = { .fd = fd, .events = w ? POLLOUT : POLLIN };
+	ssize_t ret;
+
+	if ((flags & LKL_HOSTFD_NONBLOCK) && poll(&p, 1, 0) == 0)
+		return -EAGAIN;
+	ret = w ? write(fd, buf, len) : read(fd, buf, len);
 
 	return ret < 0 ? -errno : ret;
 }
