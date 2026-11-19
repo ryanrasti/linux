@@ -126,6 +126,12 @@ struct sockaddr {
 	char sa_data[14];
 };
 
+/* memblk_add's extents (see lkl_syscall below) */
+struct memblk_extent {
+	__u64 addr;
+	__u64 len;
+};
+
 struct __aio_sigset;
 struct cachestat;
 struct cachestat_range;
@@ -288,11 +294,16 @@ typedef __kernel_rwf_t		rwf_t;
  * fstat says it's a character device (with no rdev); it can't be polled,
  * seeked or ioctl'ed. flags: O_RDONLY, O_WRONLY or O_RDWR, and O_CLOEXEC.
  *
- * memblk_add(addr, len) (with CONFIG_BLOCK) adds a read-only disk whose len
- * bytes (whole 512-byte sectors) are host memory at addr, a mapping the
- * host keeps unchanged while the kernel runs: an erofs image to mount, say.
- * It returns the disk's device number (as mknod takes it); the disk is
- * memblkN, N counting from 0. Reads are memcpys from the mapping.
+ * memblk_add(extents, n) (with CONFIG_BLOCK) adds a read-only disk made of
+ * n extents (struct memblk_extent), in order: each a whole number of
+ * 512-byte sectors (len, not 0) of host memory at addr, a mapping the host
+ * keeps unchanged while the kernel runs, or zeros (addr 0). An erofs image
+ * to mount, say: one mapped file is one extent; an image synthesized over
+ * host files is its metadata, then each file's mapping and its padding.
+ * The kernel copies the table (n at most 2^20); the host keeps its own to
+ * find where a block is. It returns the disk's device number (as mknod
+ * takes it); the disk is memblkN, N counting from 0. Reads are memcpys from
+ * the mappings.
  *
  * clone making a process (fork, vfork: no CLONE_THREAD) is a fork of the
  * host process too, by the host's fork op inside the call (host_ops.h);

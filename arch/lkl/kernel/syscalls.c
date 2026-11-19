@@ -40,7 +40,9 @@ static asmlinkage long sys_new_exec(const char __user *name);
 /* hostfd.c */
 asmlinkage long sys_host_fd(int fd, unsigned int flags);
 /* memblk.c */
-asmlinkage long sys_memblk_add(unsigned long addr, unsigned long len);
+struct memblk_extent;
+asmlinkage long sys_memblk_add(const struct memblk_extent __user *ext,
+			       unsigned long n);
 
 typedef long (*syscall_handler_t)(long arg1, ...);
 

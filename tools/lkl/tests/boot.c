@@ -800,13 +800,15 @@ static int lkl_test_host_fd(void)
 
 /*
  * memblk: an erofs image (mkfs.erofs's, if there is one) mapped from the
- * host, added as a disk, mounted at /nix/store, and a file of it read.
+ * host, added as a disk of one extent, mounted at /nix/store, and a file of
+ * it read.
  */
 static int lkl_test_memblk(void)
 {
 	char dir[] = "/tmp/lkl-memblk-XXXXXX", path[128], cmd[512];
 	char buf[32] = { 0 };
 	static const char hello[] = "from host memory\n";
+	struct lkl_memblk_extent ext;
 	long dev, bad, ret, mnt, rd, creat = 0;
 	struct stat st;
 	void *img;
@@ -843,8 +845,11 @@ static int lkl_test_memblk(void)
 	if (img == MAP_FAILED)
 		return TEST_FAILURE;
 
-	bad = lkl_sys_memblk_add((long)img, 1000);
-	dev = lkl_sys_memblk_add((long)img, st.st_size);
+	ext.addr = (long)img;
+	ext.len = 1000;
+	bad = lkl_sys_memblk_add(&ext, 1);
+	ext.len = st.st_size;
+	dev = lkl_sys_memblk_add(&ext, 1);
 	if (dev == -LKL_ENOSYS) {
 		lkl_test_logf("no CONFIG_BLOCK\n");
 		munmap(img, st.st_size);
@@ -960,6 +965,174 @@ static int lkl_test_hostfd_nonblock(void)
 	close(q[1]);
 	if (rd < 0 || at_open != -LKL_EAGAIN || ready != 1 || setfl ||
 	    by_fcntl != -LKL_EAGAIN || full != -LKL_EAGAIN)
+
+/* memblk_extents's file: a pattern with a run of zero blocks in it */
+static unsigned char memblk_byte(long i)
+{
+	return i >= 12288 && i < 28672 ? 0 : (unsigned char)(i * 7 + i / 251 + 1);
+}
+
+/*
+ * memblk_extents: a disk of many extents of all three kinds. An erofs image
+ * (mkfs.erofs's) is cut into them: each run of zero sectors a zeros extent,
+ * the rest pieces of 1, 3 and 2 sectors, alternately from the image's host
+ * mapping and from a copy of it in another buffer, so that every block the
+ * filesystem reads spans extents. It mounts, its files read back, and the
+ * raw disk reads back as the image. Malformed tables are refused.
+ */
+static int lkl_test_memblk_extents(void)
+{
+	char dir[] = "/tmp/lkl-memblk-XXXXXX", path[128], cmd[512];
+	static const char hello[] = "hello, extents\n";
+	static const long data_len = 40000, piece[] = { 1, 3, 2 };
+	long dev, mnt, nod, empty, odd, rd = 0, raw = 0, n = 0, zeros = 0;
+	long i, sectors, k = 0, bad = 0;
+	struct lkl_memblk_extent *ext, bad_ext;
+	unsigned char *img, *copy, *buf;
+	struct stat st;
+	int fd, ok;
+
+	if (!mkdtemp(dir))
+		return TEST_FAILURE;
+	snprintf(path, sizeof(path), "%s/tree", dir);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/tree/data", dir);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0)
+		return TEST_FAILURE;
+	for (i = 0; i < data_len; i++) {
+		unsigned char b = memblk_byte(i);
+
+		if (write(fd, &b, 1) != 1)
+			return TEST_FAILURE;
+	}
+	close(fd);
+	snprintf(path, sizeof(path), "%s/tree/hello", dir);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0 || write(fd, hello, sizeof(hello) - 1) < 0)
+		return TEST_FAILURE;
+	close(fd);
+	snprintf(cmd, sizeof(cmd),
+		 "mkfs.erofs %s/img %s/tree >/dev/null 2>&1", dir, dir);
+	ok = system(cmd) == 0;
+	snprintf(cmd, sizeof(cmd), "rm -rf %s/tree", dir);
+	if (system(cmd))
+		return TEST_FAILURE;
+	snprintf(path, sizeof(path), "%s/img", dir);
+	if (!ok) {
+		lkl_test_logf("no mkfs.erofs\n");
+		rmdir(dir);
+		return TEST_SKIP;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0 || fstat(fd, &st) || st.st_size % 512)
+		return TEST_FAILURE;
+	img = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	unlink(path);
+	rmdir(dir);
+	if (img == MAP_FAILED)
+		return TEST_FAILURE;
+
+	/* The copy and the image stay: the disk is never removed. */
+	sectors = st.st_size / 512;
+	copy = malloc(st.st_size);
+	ext = calloc(sectors, sizeof(*ext));
+	buf = malloc(st.st_size);
+	if (!copy || !ext || !buf)
+		return TEST_FAILURE;
+	memcpy(copy, img, st.st_size);
+	for (i = 0; i < sectors;) {
+		const unsigned char *s = img + i * 512;
+		long len = 0;
+		int zero = 1;
+
+		for (long j = 0; j < 512; j++)
+			zero &= !s[j];
+		if (zero) {
+			do {
+				len++;
+				zero = i + len < sectors;
+				for (long j = 0; zero && j < 512; j++)
+					zero = !s[len * 512 + j];
+			} while (zero);
+			ext[n].addr = 0;
+			zeros++;
+		} else {
+			len = piece[k % 3];
+			if (i + len > sectors)
+				len = sectors - i;
+			ext[n].addr = (long)(k % 2 ? copy : img) + i * 512;
+			k++;
+		}
+		ext[n++].len = len * 512;
+		i += len;
+	}
+
+	empty = lkl_sys_memblk_add(ext, 0);
+	bad_ext.addr = (long)img;
+	bad_ext.len = 1000;
+	odd = lkl_sys_memblk_add(&bad_ext, 1);
+	dev = lkl_sys_memblk_add(ext, n);
+	if (dev == -LKL_ENOSYS) {
+		lkl_test_logf("no CONFIG_BLOCK\n");
+		return TEST_SKIP;
+	}
+	nod = lkl_sys_mknodat(LKL_AT_FDCWD, "/memblk-ext", LKL_S_IFBLK | 0600,
+			      dev);
+	lkl_sys_mkdir("/ext", 0755);
+	mnt = lkl_sys_mount("/memblk-ext", "/ext", "erofs", LKL_MS_RDONLY, NULL);
+	if (mnt == -LKL_ENODEV) {
+		lkl_test_logf("no CONFIG_EROFS_FS\n");
+		return TEST_SKIP;
+	}
+
+	fd = lkl_sys_open("/ext/data", LKL_O_RDONLY, 0);
+	if (fd >= 0) {
+		long r;
+
+		while ((r = lkl_sys_read(fd, (char *)buf + rd,
+					 data_len + 1 - rd)) > 0)
+			rd += r;
+		lkl_sys_close(fd);
+		for (i = 0; i < rd && i < data_len; i++)
+			bad += buf[i] != memblk_byte(i);
+	} else {
+		rd = fd;
+	}
+	fd = lkl_sys_open("/ext/hello", LKL_O_RDONLY, 0);
+	if (fd >= 0) {
+		memset(buf, 0, 64);
+		bad += lkl_sys_read(fd, (char *)buf, 63) != sizeof(hello) - 1 ||
+		       strcmp((char *)buf, hello);
+		lkl_sys_close(fd);
+	} else {
+		bad++;
+	}
+	lkl_sys_umount("/ext", 0);
+
+	/* The raw disk, from mid-sector to mid-sector: across every extent. */
+	fd = lkl_sys_open("/memblk-ext", LKL_O_RDONLY, 0);
+	if (fd >= 0) {
+		long r;
+
+		while (raw < st.st_size - 1400 &&
+		       (r = lkl_sys_pread64(fd, (char *)buf + raw,
+					    st.st_size - 1400 - raw,
+					    700 + raw)) > 0)
+			raw += r;
+		lkl_sys_close(fd);
+	} else {
+		raw = fd;
+	}
+
+	lkl_test_logf("image %ld bytes, %ld extents (%ld of zeros): memblk_add %#lx (none: %ld, 1000 bytes: %ld), mknod %ld, mount %ld, data read %ld (%ld wrong), raw read %ld\n",
+		      (long)st.st_size, n, zeros, dev, empty, odd, nod, mnt,
+		      rd, bad, raw);
+	if (empty != -LKL_EINVAL || odd != -LKL_EINVAL || dev <= 0 || nod ||
+	    mnt || rd != data_len || bad || zeros < 1 || n < 8 ||
+	    raw != st.st_size - 1400 ||
+	    memcmp(buf, img + 700, st.st_size - 1400))
 		return TEST_FAILURE;
 	return TEST_SUCCESS;
 }
@@ -2467,6 +2640,7 @@ struct lkl_test tests[] = {
 	LKL_TEST(syscall_switches),
 	LKL_TEST(host_fd),
 	LKL_TEST(memblk),
+	LKL_TEST(memblk_extents),
 	LKL_TEST(meminfo),
 #ifdef LKL_CONFIG_LKL_TSI
 	LKL_TEST(tsi_connect),
