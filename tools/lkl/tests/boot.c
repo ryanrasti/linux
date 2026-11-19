@@ -965,6 +965,9 @@ static int lkl_test_hostfd_nonblock(void)
 	close(q[1]);
 	if (rd < 0 || at_open != -LKL_EAGAIN || ready != 1 || setfl ||
 	    by_fcntl != -LKL_EAGAIN || full != -LKL_EAGAIN)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
 
 /* memblk_extents's file: a pattern with a run of zero blocks in it */
 static unsigned char memblk_byte(long i)
