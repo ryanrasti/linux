@@ -64,7 +64,7 @@ static long run_syscall(long no, long *params)
 	/* the number is the caller's: check it before it indexes the table */
 	if (no < 0 || no >= __NR_syscalls)
 		return -ENOSYS;
-	handler = (syscall_handler_t)syscall_table[no];
+	handler = (syscall_handler_t)tsi_handler(no, params, syscall_table[no]);
 
 	ret = handler(params[0], params[1], params[2], params[3], params[4],
 		      params[5]);

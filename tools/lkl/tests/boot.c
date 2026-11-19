@@ -12,6 +12,7 @@
 #include <lkl_host.h>
 
 #include <sys/stat.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 #ifndef __MINGW32__
 #include <sys/mman.h>
@@ -876,6 +877,262 @@ static int lkl_test_memblk(void)
 }
 
 #define PROGRAM_MEM (1UL << 30)
+#ifdef LKL_CONFIG_LKL_TSI
+/*
+ * The host side of tsi.c: what the net_* ops were told, as a host would
+ * note it for a thread of its own to act on.
+ */
+static struct {
+	void *sock;
+	int pid;
+	struct lkl_sockaddr_in addr;
+	char dgram[64];
+	unsigned long dgram_len;
+	int connects, listens, sendtos, readies;
+	void *ready_obj;
+} tsi_host;
+
+static int test_net_note(void *sock, int pid, const struct lkl_sockaddr *addr,
+			 int len)
+{
+	tsi_host.sock = sock;
+	tsi_host.pid = pid;
+	memcpy(&tsi_host.addr, addr, sizeof(tsi_host.addr));
+	return 0;
+}
+
+static int test_net_connect(void *sock, int pid,
+			    const struct lkl_sockaddr *addr, int len)
+{
+	test_net_note(sock, pid, addr, len);
+	__sync_fetch_and_add(&tsi_host.connects, 1);
+	return 0;
+}
+
+static int test_net_listen(void *sock, int pid, const struct lkl_sockaddr *addr,
+			   int len)
+{
+	tsi_host.listens++;
+	return test_net_note(sock, pid, addr, len);
+}
+
+static int test_net_sendto(void *sock, int pid, const struct lkl_sockaddr *addr,
+			   int len, const void *buf, unsigned long size)
+{
+	tsi_host.sendtos++;
+	if (size > sizeof(tsi_host.dgram))
+		return -LKL_EMSGSIZE;
+	memcpy(tsi_host.dgram, buf, size);
+	tsi_host.dgram_len = size;
+	return test_net_note(sock, pid, addr, len);
+}
+
+static void test_net_ready(void *obj)
+{
+	tsi_host.readies++;
+	tsi_host.ready_obj = obj;
+}
+
+static struct lkl_sockaddr_in tsi_addr(unsigned int ip, unsigned short port)
+{
+	struct lkl_sockaddr_in a = { .sin_family = LKL_AF_INET };
+
+	a.sin_addr.lkl_s_addr = htonl(ip);
+	a.sin_port = htons(port);
+	return a;
+}
+
+struct tsi_blocking {
+	long fd, ret;
+	struct lkl_sockaddr_in to;
+};
+
+static void thread_tsi_connect(void *arg)
+{
+	struct tsi_blocking *b = arg;
+
+	b->ret = lkl_sys_connect(b->fd, (struct lkl_sockaddr *)&b->to,
+				 sizeof(b->to));
+}
+
+/*
+ * A connect to a non-loopback address is the host's (tsi.c): net_connect
+ * is told the address and the caller's pid; a nonblocking connect is
+ * EINPROGRESS, not ready, until lkl_net_done; then the bytes go both ways
+ * through the end (lkl_net_recv/send), the end's shutdown is the guest's
+ * EOF, the guest's close is net_ready(end) and the end's EOF. A blocking
+ * connect waits for the host's answer: a refusal is its error. The socket
+ * says AF_INET (SO_DOMAIN), its peer is the address connected to.
+ */
+static int lkl_test_tsi_connect(void)
+{
+	struct lkl_sockaddr_in to = tsi_addr(0x0a010203, 80), peer;
+	struct tsi_blocking b = { .ret = 1 };
+	struct lkl_pollfd pfd;
+	struct timespec ts = { 0, 1000000 };
+	int domain = 0, soerr = -1, plen = sizeof(peer), len = sizeof(int);
+	long fd, conn, poll0, poll1, w, rd, eof, gone, n;
+	char buf[16] = { 0 }, back[16] = { 0 };
+	lkl_thread_t tid;
+	void *end;
+	int i;
+
+	fd = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_STREAM | LKL_O_NONBLOCK, 0);
+	lkl_sys_getsockopt(fd, LKL_SOL_SOCKET, LKL_SO_DOMAIN, (char *)&domain,
+			   &len);
+	conn = lkl_sys_connect(fd, (struct lkl_sockaddr *)&to, sizeof(to));
+	pfd = (struct lkl_pollfd){ .fd = fd, .events = LKL_POLLOUT };
+	poll0 = lkl_sys_poll(&pfd, 1, 0);
+	end = tsi_host.connects ? lkl_net_done(tsi_host.sock, 0) : NULL;
+	poll1 = lkl_sys_poll(&pfd, 1, 0);
+	len = sizeof(int);
+	lkl_sys_getsockopt(fd, LKL_SOL_SOCKET, LKL_SO_ERROR, (char *)&soerr,
+			   &len);
+	memset(&peer, 0, sizeof(peer));
+	lkl_sys_getpeername(fd, (struct lkl_sockaddr *)&peer, &plen);
+	w = lkl_sys_write(fd, "hello", 5);
+	n = end ? lkl_net_recv(end, buf, sizeof(buf)) : -1;
+	if (end)
+		lkl_net_send(end, "world", 5);
+	rd = lkl_sys_read(fd, back, sizeof(back));
+	if (end)
+		lkl_net_shutdown(end, 1 /* SHUT_WR */);
+	eof = lkl_sys_read(fd, back + 5, sizeof(back) - 5);
+	tsi_host.readies = 0;
+	lkl_sys_close(fd);
+	gone = end ? lkl_net_recv(end, buf + 5, 4) : -1;
+	lkl_test_logf("SO_DOMAIN %d, connect %ld (host told %d time(s), pid %d, %x:%d), poll %ld then %ld (0x%x), SO_ERROR %d, peer %x:%d; guest wrote %ld, host read %ld \"%s\"; guest read %ld \"%s\", then %ld at the host's shutdown; after the close net_ready %d (end: %d), recv %ld\n",
+		      domain, conn, tsi_host.connects, tsi_host.pid,
+		      ntohl(tsi_host.addr.sin_addr.lkl_s_addr),
+		      ntohs(tsi_host.addr.sin_port), poll0, poll1, pfd.revents,
+		      soerr, ntohl(peer.sin_addr.lkl_s_addr),
+		      ntohs(peer.sin_port), w, n, buf, rd, back, eof,
+		      tsi_host.readies, tsi_host.ready_obj == end, gone);
+	if (end)
+		lkl_net_close(end, 0);
+	if (domain != LKL_AF_INET || conn != -LKL_EINPROGRESS ||
+	    tsi_host.connects != 1 || tsi_host.pid != 1 ||
+	    memcmp(&tsi_host.addr, &to, 8) || poll0 != 0 || !end ||
+	    poll1 != 1 || !(pfd.revents & LKL_POLLOUT) || soerr != 0 ||
+	    memcmp(&peer, &to, 8) || w != 5 || n != 5 || strcmp(buf, "hello") ||
+	    rd != 5 || strcmp(back, "world") || eof != 0 ||
+	    !tsi_host.readies || tsi_host.ready_obj != end || gone != -LKL_EPIPE)
+		return TEST_FAILURE;
+
+	/* blocking, refused */
+	b.fd = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_STREAM, 0);
+	b.to = tsi_addr(0x0a090909, 81);
+	tid = lkl_host_ops.thread_create(thread_tsi_connect, &b);
+	for (i = 0; i < 1000 && tsi_host.connects != 2; i++)
+		nanosleep(&ts, NULL);
+	end = tsi_host.connects == 2 ?
+		lkl_net_done(tsi_host.sock, -LKL_ECONNREFUSED) : NULL;
+	if (!tid || lkl_host_ops.thread_join(tid))
+		return TEST_FAILURE;
+	lkl_sys_close(b.fd);
+	lkl_test_logf("blocking connect: %ld (end %p)\n", b.ret, end);
+	if (b.ret != -LKL_ECONNREFUSED || end)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
+ * A listen is the guest's first (a loopback client is accepted from the
+ * inner socket) and offered to the host (net_listen, unless bound to
+ * loopback), whose inbound connections (lkl_net_accept) are accepted with
+ * the peer the host gave; the listener's close is net_ready(sock).
+ */
+static int lkl_test_tsi_listen(void)
+{
+	struct lkl_sockaddr_in at = tsi_addr(0, 8080);
+	struct lkl_sockaddr_in from = tsi_addr(0x0a050505, 1234);
+	struct lkl_sockaddr_in lo = tsi_addr(0x7f000001, 8080), peer, peer2;
+	int plen = sizeof(peer), plen2 = sizeof(peer2);
+	long fd, client, a1, a2 = -1, rd = -1, bound, listened;
+	char buf[8] = { 0 };
+	void *end = NULL, *sock;
+
+	memset(&peer, 0, sizeof(peer));
+	memset(&peer2, 0, sizeof(peer2));
+	fd = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_STREAM, 0);
+	bound = lkl_sys_bind(fd, (struct lkl_sockaddr *)&at, sizeof(at));
+	listened = lkl_sys_listen(fd, 4);
+	sock = tsi_host.listens ? tsi_host.sock : NULL;
+	client = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_STREAM, 0);
+	lkl_sys_connect(client, (struct lkl_sockaddr *)&lo, sizeof(lo));
+	a1 = lkl_sys_accept4(fd, (struct lkl_sockaddr *)&peer, &plen, 0);
+	if (sock) {
+		end = lkl_net_accept(sock, (struct lkl_sockaddr *)&from,
+				     sizeof(from));
+		a2 = lkl_sys_accept4(fd, (struct lkl_sockaddr *)&peer2, &plen2,
+				     0);
+	}
+	if (end)
+		lkl_net_send(end, "in", 2);
+	if (a2 >= 0)
+		rd = lkl_sys_read(a2, buf, sizeof(buf));
+	tsi_host.readies = 0;
+	lkl_sys_close(fd);
+	lkl_test_logf("bind %ld listen %ld: net_listen %d time(s) (port %d); loopback client accepted %ld from %x; host's accepted %ld from %x:%d, read %ld \"%s\"; the close: net_ready %d (sock: %d)\n",
+		      bound, listened, tsi_host.listens,
+		      ntohs(tsi_host.addr.sin_port), a1,
+		      ntohl(peer.sin_addr.lkl_s_addr), a2,
+		      ntohl(peer2.sin_addr.lkl_s_addr), ntohs(peer2.sin_port),
+		      rd, buf, tsi_host.readies, tsi_host.ready_obj == sock);
+	if (sock)
+		lkl_net_done(sock, 0);
+	if (end)
+		lkl_net_close(end, 0);
+	lkl_sys_close(client);
+	lkl_sys_close(a1);
+	lkl_sys_close(a2);
+	if (bound || listened || tsi_host.listens != 1 ||
+	    ntohs(tsi_host.addr.sin_port) != 8080 || a1 < 0 ||
+	    ntohl(peer.sin_addr.lkl_s_addr) != 0x7f000001 || !end || a2 < 0 ||
+	    memcmp(&peer2, &from, 8) || rd != 2 || strcmp(buf, "in") ||
+	    tsi_host.readies != 1 || tsi_host.ready_obj != sock)
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+
+/*
+ * A datagram to a non-loopback address (a resolver's query) is the host's
+ * (net_sendto), and its answer (lkl_net_reply) is received from the
+ * address the query went to.
+ */
+static int lkl_test_tsi_dgram(void)
+{
+	struct lkl_sockaddr_in ns = tsi_addr(0x0a000203, 53), from;
+	int flen = sizeof(from);
+	long fd, sent, got = -1, replied = -1;
+	char buf[16] = { 0 };
+
+	memset(&from, 0, sizeof(from));
+	fd = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_DGRAM | LKL_O_NONBLOCK, 0);
+	sent = lkl_sys_sendto(fd, "query", 5, 0, (struct lkl_sockaddr *)&ns,
+			      sizeof(ns));
+	if (tsi_host.sendtos) {
+		replied = lkl_net_reply(tsi_host.sock,
+					(struct lkl_sockaddr *)&ns, sizeof(ns),
+					"answer", 6);
+		lkl_net_done(tsi_host.sock, 0);
+	}
+	got = lkl_sys_recvfrom(fd, buf, sizeof(buf), 0,
+			       (struct lkl_sockaddr *)&from, &flen);
+	lkl_sys_close(fd);
+	lkl_test_logf("sendto %ld: net_sendto %d time(s), %lu bytes \"%.5s\" to %x:%d; reply %ld; recvfrom %ld \"%s\" from %x:%d\n",
+		      sent, tsi_host.sendtos, tsi_host.dgram_len,
+		      tsi_host.dgram, ntohl(tsi_host.addr.sin_addr.lkl_s_addr),
+		      ntohs(tsi_host.addr.sin_port), replied, got, buf,
+		      ntohl(from.sin_addr.lkl_s_addr), ntohs(from.sin_port));
+	if (sent != 5 || tsi_host.sendtos != 1 || tsi_host.dgram_len != 5 ||
+	    memcmp(tsi_host.dgram, "query", 5) || replied || got != 6 ||
+	    strcmp(buf, "answer") || memcmp(&from, &ns, 8))
+		return TEST_FAILURE;
+	return TEST_SUCCESS;
+}
+#endif
+
 /*
  * The memory reported is the program's (program_mem=1G on the command
  * line), not the kernel's pool (mem=32M): sysinfo's total, and
@@ -2032,6 +2289,11 @@ struct lkl_test tests[] = {
 	LKL_TEST(host_fd),
 	LKL_TEST(memblk),
 	LKL_TEST(meminfo),
+#ifdef LKL_CONFIG_LKL_TSI
+	LKL_TEST(tsi_connect),
+	LKL_TEST(tsi_listen),
+	LKL_TEST(tsi_dgram),
+#endif
 #endif
 #ifdef LKL_HOST_CONFIG_MMU
 	LKL_TEST(shared_mmap),
@@ -2067,6 +2329,12 @@ int main(int argc, const char **argv)
 	lkl_host_ops.task_exit = test_task_exit;
 	lkl_host_ops.signal_handler = test_signal_handler;
 	lkl_host_ops.fork = test_fork;
+#ifdef LKL_CONFIG_LKL_TSI
+	lkl_host_ops.net_connect = test_net_connect;
+	lkl_host_ops.net_listen = test_net_listen;
+	lkl_host_ops.net_sendto = test_net_sendto;
+	lkl_host_ops.net_ready = test_net_ready;
+#endif
 #endif
 
 	if (lkl_init(&lkl_host_ops) < 0) {
