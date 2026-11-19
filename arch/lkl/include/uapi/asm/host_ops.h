@@ -10,6 +10,7 @@ struct lkl_jmp_buf {
 	unsigned long buf[128];
 };
 struct lkl_pci_dev;
+struct sockaddr;
 
 /**
  * lkl_signal - a caught signal's delivery (signal_handler)
@@ -228,6 +229,41 @@ enum lkl_prot {
  * host thread with the CPU released, the task asleep in the kernel, so it
  * may block for as long as the I/O takes. Without it, the files' reads and
  * writes fail with -EINVAL.
+ *
+ * Networking (arch/lkl/kernel/tsi.c, CONFIG_LKL_TSI): a program's AF_INET
+ * sockets are its own for loopback (127.0.0.0/8, 0.0.0.0) and the host's
+ * for any other address. sock is the program's socket, end the host's end
+ * of a connection (see lkl_net_* below). Each op is called on the calling
+ * task's host thread with the CPU held: it must not block or call into the
+ * kernel, only take note and wake whatever will act (the host's own
+ * thread), and return at once. Each that returns 0 hands the host a
+ * reference to sock, which it gives back with lkl_net_done(sock, err);
+ * until then sock stays valid, also after the program closes it.
+ *
+ * @net_connect - the program connects sock (a stream) to addr (sockaddr_in,
+ * len bytes); pid is its process's. Return 0, then lkl_net_done(sock, 0)
+ * once connected (it returns the connection's end) or (sock, -errno) for a
+ * refusal; or return -errno at once. Meanwhile a blocking connect waits, a
+ * nonblocking one returned -EINPROGRESS (poll: POLLOUT, or POLLERR and
+ * SO_ERROR). Without it, such connects fail with -ENETUNREACH.
+ *
+ * @net_listen - the program listens on sock, bound to addr (not loopback:
+ * the inner socket listens for the guest's own clients first). Return 0 to
+ * serve the address too: each inbound connection is lkl_net_accept(sock,
+ * peer, len), until the host's lkl_net_done(sock, err) or net_ready(sock),
+ * the program's close. Nonzero: the listen stays the guest's alone.
+ *
+ * @net_sendto - a datagram of size bytes at buf from sock to addr (not
+ * loopback): a query to the program's resolver, or any other. The host
+ * copies it. Return 0 (answers come as lkl_net_reply(sock, ...), then
+ * lkl_net_done(sock, err), err nonzero being the socket's error once) or
+ * -errno, sendmsg's error. Without it, -ENETUNREACH.
+ *
+ * @net_ready - obj is an end: data arrived, room was made, or the guest's
+ * side was shut down or closed (lkl_net_recv/send now get further); or obj
+ * is a sock the host holds a reference to: the program closed it (a
+ * connect it gave up, a listen it ended; lkl_net_done still gives the
+ * reference back).
  */
 struct lkl_host_operations {
 	const char *virtio_devices;
@@ -293,6 +329,10 @@ struct lkl_host_operations {
 	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int write);
 	int (*signal_handler)(struct lkl_signal *sig);
 	lkl_thread_t (*fork)(void (*f)(void *), void *arg);
+	int (*net_connect)(void *sock, int pid, const struct sockaddr *addr, int len);
+	int (*net_listen)(void *sock, int pid, const struct sockaddr *addr, int len);
+	int (*net_sendto)(void *sock, int pid, const struct sockaddr *addr, int len, const void *buf, unsigned long size);
+	void (*net_ready)(void *obj);
 };
 
 /**
@@ -324,6 +364,45 @@ void lkl_cleanup(void);
  * lkl_is_running - returns 1 if the kernel is currently running
  */
 int lkl_is_running(void);
+
+/*
+ * The host's calls for networking (see the net_* ops), each from a thread
+ * of its own, never from inside a host op. They take the CPU and run as a
+ * kernel thread of their own (tsi), so none blocks on the network: an end
+ * is nonblocking.
+ *
+ * lkl_net_done - give back the reference an op handed over, with the
+ * outcome: for a connect, 0 (connected: returns the connection's end, or
+ * NULL if the program closed sock meanwhile, or the kernel had no memory)
+ * or -errno (the program's connect fails with it); for a listen, the end of
+ * the host's serving it; for a datagram, 0 or the socket's error.
+ *
+ * lkl_net_accept - an inbound connection from peer (sockaddr_in, len bytes)
+ * for a sock the host serves (net_listen): its end, queued for the
+ * program's accept, which sees peer as getpeername. NULL: refused (the
+ * program closed sock, its backlog is full, no memory).
+ *
+ * lkl_net_reply - a datagram for sock, from address from (the resolver's,
+ * as the program sent to): 0 or -errno.
+ *
+ * lkl_net_recv, lkl_net_send - read what the program wrote, write what it
+ * will read: bytes done; from recv, 0 once the program shut its writing
+ * down (EOF; it may still read), -EPIPE once it closed its socket (after
+ * all it wrote was read); -EAGAIN when there's nothing to read or no room
+ * (net_ready(end) comes when there is); -EPIPE from send once the program
+ * closed; -ECONNRESET once it closed with data unread.
+ * lkl_net_shutdown - shutdown(how) of the end: SHUT_WR, the program reads EOF.
+ * lkl_net_close - the end released; with reset, the program's next call on
+ * its socket fails with ECONNRESET (else it reads EOF).
+ */
+void *lkl_net_done(void *sock, int err);
+void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len);
+long lkl_net_reply(void *sock, const struct sockaddr *from, int len,
+		   const void *buf, unsigned long size);
+long lkl_net_recv(void *end, void *buf, unsigned long len);
+long lkl_net_send(void *end, const void *buf, unsigned long len);
+long lkl_net_shutdown(void *end, int how);
+void lkl_net_close(void *end, int reset);
 
 int lkl_printf(const char *fmt, ...);
 void lkl_bug(const char *fmt, ...);

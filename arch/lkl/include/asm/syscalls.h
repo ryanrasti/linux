@@ -16,6 +16,19 @@ struct kernel_clone_args;
 int copy_fork_thread(struct task_struct *p,
 		     const struct kernel_clone_args *args);
 
+/*
+ * tsi.c: the handler run_syscall runs for syscall no, given the table's:
+ * the program's AF_INET sockets are impersonated (CONFIG_LKL_TSI).
+ */
+#ifdef CONFIG_LKL_TSI
+void *tsi_handler(long no, long *params, void *handler);
+#else
+static inline void *tsi_handler(long no, long *params, void *handler)
+{
+	return handler;
+}
+#endif
+
 #define sys_mmap sys_mmap_pgoff
 #define sys_mmap2 sys_mmap_pgoff
 #define sys_vfork sys_ni_syscall
