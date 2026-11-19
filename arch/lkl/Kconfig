@@ -25,6 +25,19 @@ config LKL_TRACING
 	  option it could not be turned off; without it an embedder saves
 	  about 1 MiB of slab and 0.5 MiB of text.
 
+config LKL_TSI
+	bool "Impersonated AF_INET sockets, served by the host"
+	default y
+	depends on INET && UNIX
+	help
+	  A program's AF_INET stream and datagram sockets stay the guest's
+	  own for loopback, and are served by the host for every other
+	  address: connects, listens and datagrams go to the host
+	  operations net_connect, net_listen and net_sendto, and the host
+	  moves the bytes with lkl_net_* (asm/host_ops.h). Modelled on
+	  libkrunfw's Transparent Socket Impersonation, with direct calls
+	  instead of vsock. Without it, only loopback works.
+
 config LKL_FUZZING
 	bool "LLVM fuzzing instrumentation"
 	default n
