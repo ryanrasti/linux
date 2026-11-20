@@ -24,8 +24,13 @@
 #include <asm/host_ops.h>
 #include <asm/sched.h>
 
-static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
-			 int write)
+/*
+ * One host read or write of host fd fd (blocking unless nonblock), the
+ * calling task asleep meanwhile: a host_fd file's, and a connection's that
+ * a host fd backs (tsi.c).
+ */
+long lkl_hostfd_io(long fd, char __user *buf, size_t len, int write,
+		   int nonblock)
 {
 	struct task_struct *task = current;
 	ssize_t done = 0;
@@ -38,8 +43,7 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 
 	for (;;) {
 		flags = write ? LKL_HOSTFD_WRITE : 0;
-		/* (f_flags read once a call: an fcntl meanwhile applies to the next) */
-		if (READ_ONCE(file->f_flags) & O_NONBLOCK)
+		if (nonblock)
 			flags |= LKL_HOSTFD_NONBLOCK;
 		/*
 		 * Schedule out, as a host task leaving the kernel does: the CPU
@@ -47,8 +51,7 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 		 * it.
 		 */
 		thread_sched_jb();
-		ret = lkl_ops->hostfd_rw((long)file->private_data, buf + done,
-					 len - done, flags);
+		ret = lkl_ops->hostfd_rw(fd, buf + done, len - done, flags);
 		/* the kernel halted meanwhile: nothing to return to */
 		if (lkl_cpu_get() < 0)
 			lkl_ops->thread_exit();
@@ -79,6 +82,14 @@ static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
 	return done ? done : ret;
 }
 
+static ssize_t hostfd_rw(struct file *file, char __user *buf, size_t len,
+			 int write)
+{
+	/* (f_flags read once a call: an fcntl meanwhile applies to the next) */
+	return lkl_hostfd_io((long)file->private_data, buf, len, write,
+			     READ_ONCE(file->f_flags) & O_NONBLOCK);
+}
+
 static ssize_t hostfd_read(struct file *file, char __user *buf, size_t len,
 			   loff_t *pos)
 {
@@ -104,25 +115,33 @@ static DECLARE_WAIT_QUEUE_HEAD(hostfd_wait);
  * channel the host passed in, become readable without a read blocked on
  * it.
  */
-static __poll_t hostfd_poll(struct file *file, poll_table *wait)
+__poll_t lkl_hostfd_poll_fd(struct file *file, long fd, __poll_t want,
+			    poll_table *wait)
 {
-	__poll_t want = 0, ready;
+	__poll_t ready;
 
 	if (!lkl_ops->hostfd_poll)
 		return EPOLLIN | EPOLLRDNORM | EPOLLOUT | EPOLLWRNORM;
 	poll_wait(file, &hostfd_wait, wait);
-	if (file->f_mode & FMODE_READ)
-		want |= EPOLLIN;
-	if (file->f_mode & FMODE_WRITE)
-		want |= EPOLLOUT;
 	/* (POLLHUP and POLLERR whatever was asked, as poll(2) gives them) */
-	ready = lkl_ops->hostfd_poll((long)file->private_data, want) &
+	ready = lkl_ops->hostfd_poll(fd, want) &
 		(want | EPOLLHUP | EPOLLERR);
 	if (ready & EPOLLIN)
 		ready |= EPOLLRDNORM;
 	if (ready & EPOLLOUT)
 		ready |= EPOLLWRNORM;
 	return ready;
+}
+
+static __poll_t hostfd_poll(struct file *file, poll_table *wait)
+{
+	__poll_t want = 0;
+
+	if (file->f_mode & FMODE_READ)
+		want |= EPOLLIN;
+	if (file->f_mode & FMODE_WRITE)
+		want |= EPOLLOUT;
+	return lkl_hostfd_poll_fd(file, (long)file->private_data, want, wait);
 }
 
 void lkl_hostfd_ready(int fd)

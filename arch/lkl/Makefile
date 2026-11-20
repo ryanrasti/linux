@@ -54,7 +54,7 @@ LKL_ENTRY_POINTS := lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
 	lkl_get_free_irq lkl_put_irq lkl_is_running lkl_bug lkl_printf \
 	lkl_init lkl_cleanup lkl_hostfd_ready
 ifdef CONFIG_LKL_TSI
-LKL_ENTRY_POINTS += lkl_net_done lkl_net_accept lkl_net_reply lkl_net_recv \
+LKL_ENTRY_POINTS += lkl_net_done lkl_net_accept lkl_net_reply lkl_net_done_fd lkl_net_accept_fd lkl_net_recv \
 	lkl_net_send lkl_net_shutdown lkl_net_close lkl_net_syscall
 endif
 

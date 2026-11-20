@@ -86,6 +86,9 @@ struct tsi_hook {
 struct tsi_pending {
 	struct list_head list;
 	struct socket *transport;
+	/* or a host fd (lkl_net_accept_fd), if hosted */
+	bool hosted;
+	long hostfd;
 	struct sockaddr_in peer;
 };
 
@@ -95,6 +98,9 @@ struct tsi_sock {
 	struct socket *isocket;
 	/* host-backed: the guest end of the socketpair */
 	struct socket *transport;
+	/* host-backed by a host fd instead (lkl_net_done_fd): no transport */
+	bool hosted;
+	long hostfd;
 	struct tsi_hook ihook, thook;
 	int status;
 	int conn;
@@ -122,6 +128,12 @@ static struct proto tsi_proto = {
 
 static const struct proto_ops tsi_stream_ops;
 static const struct proto_ops tsi_dgram_ops;
+
+/* hostfd.c's I/O and poll by fd */
+long lkl_hostfd_io(long fd, char __user *buf, size_t len, int write,
+		   int nonblock);
+__poll_t lkl_hostfd_poll_fd(struct file *file, long fd, __poll_t want,
+			    poll_table *wait);
 
 /* the task the host's calls run as: see the top */
 static struct task_struct *tsi_task;
@@ -351,8 +363,18 @@ static int tsi_release(struct socket *sock)
 	tsk->transport = NULL;
 	tsk->isocket = NULL;
 	list_for_each_entry_safe(p, n, &pending, list) {
-		sock_release(p->transport);
+		if (p->hosted) {
+			if (lkl_ops->net_fd_close)
+				lkl_ops->net_fd_close(p->hostfd);
+		} else {
+			sock_release(p->transport);
+		}
 		kfree(p);
+	}
+	if (tsk->hosted) {
+		tsk->hosted = false;
+		if (lkl_ops->net_fd_close)
+			lkl_ops->net_fd_close(tsk->hostfd);
 	}
 	skb_queue_purge(&sk->sk_receive_queue);
 	if (host_holds && lkl_ops->net_ready)
@@ -675,7 +697,12 @@ static int tsi_accept(struct socket *sock, struct socket *newsock,
 	nsk = tsi_sk_alloc(newsock, SOCK_STREAM);
 	if (!nsk) {
 		if (p) {
-			sock_release(p->transport);
+			if (p->hosted) {
+				if (lkl_ops->net_fd_close)
+					lkl_ops->net_fd_close(p->hostfd);
+			} else {
+				sock_release(p->transport);
+			}
 			kfree(p);
 		} else {
 			sock_release(nsock);
@@ -685,11 +712,14 @@ static int tsi_accept(struct socket *sock, struct socket *newsock,
 	ntsk = tsi_sk(nsk);
 	if (p) {
 		ntsk->transport = p->transport;
+		ntsk->hosted = p->hosted;
+		ntsk->hostfd = p->hostfd;
 		ntsk->peer = p->peer;
 		tsi_getname(sock, (struct sockaddr *)&ntsk->local, 0);
 		ntsk->status = TSI_HOST;
 		ntsk->conn = TSI_CONNECTED;
-		tsi_hook(ntsk, ntsk->transport, &ntsk->thook);
+		if (!p->hosted)
+			tsi_hook(ntsk, ntsk->transport, &ntsk->thook);
 		kfree(p);
 	} else {
 		struct sock *csk = nsock->sk;
@@ -723,6 +753,10 @@ static __poll_t tsi_stream_poll(struct file *file, struct socket *sock,
 		case TSI_CONNECTING:
 			return 0;
 		case TSI_CONNECTED:
+			if (tsk->hosted)
+				return lkl_hostfd_poll_fd(file, tsk->hostfd,
+							  EPOLLIN | EPOLLOUT,
+							  wait);
 			return tsk->transport->ops->poll(file, tsk->transport,
 							 NULL);
 		default:
@@ -780,6 +814,13 @@ static int tsi_shutdown(struct socket *sock, int how)
 	struct tsi_sock *tsk = tsi_sk(sock->sk);
 
 	if (tsk->status == TSI_HOST) {
+		if (tsk->hosted) {
+			if (how < SHUT_RD || how > SHUT_RDWR)
+				return -EINVAL;
+			if (lkl_ops->net_fd_shutdown)
+				lkl_ops->net_fd_shutdown(tsk->hostfd, how);
+			return 0;
+		}
 		if (!tsk->transport)
 			return sock->type == SOCK_DGRAM ? 0 : -ENOTCONN;
 		return tsk->transport->ops->shutdown(tsk->transport, how);
@@ -787,6 +828,42 @@ static int tsi_shutdown(struct socket *sock, int how)
 	if (!tsk->isocket)
 		return -ENOTCONN;
 	return tsk->isocket->ops->shutdown(tsk->isocket, how);
+}
+
+/*
+ * A host-fd-backed connection's send or receive: the host's write or read
+ * of its fd, a segment of msg at a time (the program's own buffers: no
+ * MMU, so a user address is the host's), as a host_fd file's. A receive is
+ * one read; a send all of msg, unless nonblocking or cut short. Neither
+ * MSG_PEEK nor out-of-band data: the host fd has no such call.
+ */
+static int tsi_hostfd_msg(struct socket *sock, struct msghdr *msg, int flags,
+			  int write)
+{
+	struct tsi_sock *tsk = tsi_sk(sock->sk);
+	int nonblock = (flags & MSG_DONTWAIT) ||
+		       (sock->file && (READ_ONCE(sock->file->f_flags) & O_NONBLOCK));
+	long done = 0, ret = 0;
+
+	if (flags & (MSG_PEEK | MSG_OOB))
+		return -EOPNOTSUPP;
+	if (!user_backed_iter(&msg->msg_iter))
+		return -EINVAL;
+	while (iov_iter_count(&msg->msg_iter)) {
+		void __user *base = iter_iov_addr(&msg->msg_iter);
+		size_t seg = iter_iov_len(&msg->msg_iter);
+
+		ret = lkl_hostfd_io(tsk->hostfd, base, seg, write, nonblock);
+		if (ret <= 0)
+			break;
+		iov_iter_advance(&msg->msg_iter, ret);
+		done += ret;
+		if (!write || (size_t)ret < seg)
+			break;
+	}
+	if (write && ret == -EPIPE && !done && !(flags & MSG_NOSIGNAL))
+		send_sig(SIGPIPE, current, 0);
+	return done ? done : ret;
 }
 
 static int tsi_stream_sendmsg(struct socket *sock, struct msghdr *msg,
@@ -805,6 +882,8 @@ static int tsi_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 	/* a connected TCP socket ignores the address; AF_UNIX's would not */
 	msg->msg_name = NULL;
 	msg->msg_namelen = 0;
+	if (tsk->hosted)
+		return tsi_hostfd_msg(sock, msg, msg->msg_flags, 1);
 	return tsk->transport->ops->sendmsg(tsk->transport, msg, len);
 }
 
@@ -824,6 +903,8 @@ static int tsi_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		return err;
 	/* TCP's recvfrom gives no address (AF_UNIX's would give its own) */
 	msg->msg_name = NULL;
+	if (tsk->hosted)
+		return tsi_hostfd_msg(sock, msg, flags, 0);
 	return tsk->transport->ops->recvmsg(tsk->transport, msg, len, flags);
 }
 
@@ -1222,6 +1303,77 @@ void *lkl_net_done(void *sock, int err)
 	sock_put(sk);
 	tsi_leave();
 	return end;
+}
+
+int lkl_net_done_fd(void *sock, long fd)
+{
+	struct sock *sk = sock;
+	struct tsi_sock *tsk = tsi_sk(sk);
+	int err = 0;
+
+	if (fd < 0 || sk->sk_type != SOCK_STREAM)
+		return -EINVAL;
+	err = tsi_enter();
+	if (err)
+		return err;
+	lock_sock(sk);
+	if (tsk->conn != TSI_CONNECTING) {
+		err = -EINVAL;
+	} else if (tsk->released) {
+		/* the program gave up: the host keeps fd */
+		tsk->conn = TSI_NONE;
+		err = -ECONNABORTED;
+	} else {
+		tsk->hosted = true;
+		tsk->hostfd = fd;
+		tsk->conn = TSI_CONNECTED;
+		sk->sk_socket->state = SS_CONNECTED;
+		sk->sk_state = TCP_ESTABLISHED;
+	}
+	tsi_wake(tsk);
+	release_sock(sk);
+	sock_put(sk);
+	tsi_leave();
+	return err;
+}
+
+int lkl_net_accept_fd(void *sock, const struct sockaddr *peer, int len,
+		      long fd)
+{
+	struct sock *sk = sock;
+	struct tsi_sock *tsk = tsi_sk(sk);
+	struct tsi_pending *p;
+	int err;
+
+	if (fd < 0 || len < (int)sizeof(struct sockaddr_in))
+		return -EINVAL;
+	err = tsi_enter();
+	if (err)
+		return err;
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	err = -ENOMEM;
+	if (!p)
+		goto out;
+	lock_sock(sk);
+	if (tsk->released || !tsk->host_listening ||
+	    tsk->npending >= max(tsk->backlog, 1)) {
+		release_sock(sk);
+		kfree(p);
+		err = -ECONNREFUSED;
+		goto out;
+	}
+	p->hosted = true;
+	p->hostfd = fd;
+	memcpy(&p->peer, peer, sizeof(p->peer));
+	p->peer.sin_family = AF_INET;
+	list_add_tail(&p->list, &tsk->pending);
+	tsk->npending++;
+	tsi_wake(tsk);
+	release_sock(sk);
+	err = 0;
+out:
+	tsi_leave();
+	return err;
 }
 
 void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len)

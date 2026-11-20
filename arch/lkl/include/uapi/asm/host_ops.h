@@ -280,6 +280,13 @@ enum lkl_prot {
  * waiting. For any not ready, the host watches the fd and calls
  * lkl_hostfd_ready(fd) once one is (the guest's pollers then ask again).
  * Called with the CPU held. Without it, the files poll as always ready.
+ *
+ * @net_fd_shutdown - the program shut down (how: SHUT_RD, SHUT_WR, SHUT_RDWR)
+ * a connection backed by host fd fd (lkl_net_done_fd, lkl_net_accept_fd),
+ * which the host may not shut down itself: it asks whoever can.
+ *
+ * @net_fd_close - the program's last reference to such a connection is
+ * gone: the host closes fd (and ends the connection).
  */
 /* hostfd_rw's flags */
 #define LKL_HOSTFD_WRITE	1
@@ -353,6 +360,8 @@ struct lkl_host_operations {
 	int (*net_listen)(void *sock, int pid, const struct sockaddr *addr, int len);
 	int (*net_sendto)(void *sock, int pid, const struct sockaddr *addr, int len, const void *buf, unsigned long size);
 	void (*net_ready)(void *obj);
+	void (*net_fd_shutdown)(long fd, int how);
+	void (*net_fd_close)(long fd);
 	unsigned int (*hostfd_poll)(int fd, unsigned int events);
 };
 
@@ -403,6 +412,13 @@ int lkl_is_running(void);
  * program's accept, which sees peer as getpeername. NULL: refused (the
  * program closed sock, its backlog is full, no memory).
  *
+ * lkl_net_done_fd, lkl_net_accept_fd - as lkl_net_done(sock, 0) for a
+ * connect and lkl_net_accept, the connection a host fd: the program's
+ * socket reads and writes fd itself, as a host_fd file does (hostfd_rw,
+ * hostfd_poll), with no end and no copy; its shutdown and close are
+ * net_fd_shutdown and net_fd_close. 0, or -errno: nothing took fd (the
+ * host still owns it).
+ *
  * lkl_net_reply - a datagram for sock, from address from (the resolver's,
  * as the program sent to): 0 or -errno.
  *
@@ -428,6 +444,8 @@ int lkl_is_running(void);
  */
 void *lkl_net_done(void *sock, int err);
 void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len);
+int lkl_net_done_fd(void *sock, long fd);
+int lkl_net_accept_fd(void *sock, const struct sockaddr *peer, int len, long fd);
 long lkl_net_reply(void *sock, const struct sockaddr *from, int len,
 		   const void *buf, unsigned long size);
 long lkl_net_recv(void *end, void *buf, unsigned long len);
