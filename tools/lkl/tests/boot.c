@@ -1278,9 +1278,7 @@ static struct {
 	void *sock;
 	int pid;
 	struct lkl_sockaddr_in addr;
-	char dgram[64];
-	unsigned long dgram_len;
-	int connects, listens, sendtos, readies;
+	int connects, listens, readies;
 	void *ready_obj;
 } tsi_host;
 
@@ -1294,7 +1292,7 @@ static int test_net_note(void *sock, int pid, const struct lkl_sockaddr *addr,
 }
 
 static int test_net_connect(void *sock, int pid,
-			    const struct lkl_sockaddr *addr, int len)
+			    const struct lkl_sockaddr *addr, int len, int type)
 {
 	test_net_note(sock, pid, addr, len);
 	__sync_fetch_and_add(&tsi_host.connects, 1);
@@ -1305,17 +1303,6 @@ static int test_net_listen(void *sock, int pid, const struct lkl_sockaddr *addr,
 			   int len)
 {
 	tsi_host.listens++;
-	return test_net_note(sock, pid, addr, len);
-}
-
-static int test_net_sendto(void *sock, int pid, const struct lkl_sockaddr *addr,
-			   int len, const void *buf, unsigned long size)
-{
-	tsi_host.sendtos++;
-	if (size > sizeof(tsi_host.dgram))
-		return -LKL_EMSGSIZE;
-	memcpy(tsi_host.dgram, buf, size);
-	tsi_host.dgram_len = size;
 	return test_net_note(sock, pid, addr, len);
 }
 
@@ -1513,40 +1500,20 @@ static int lkl_test_tsi_listen(void)
 }
 
 /*
- * A datagram to a non-loopback address (a resolver's query) is the host's
- * (net_sendto), and its answer (lkl_net_reply) is received from the
- * address the query went to.
+ * An unconnected datagram to a non-loopback address has no host to go to
+ * (a connected UDP socket's are the host's, through net_connect).
  */
 static int lkl_test_tsi_dgram(void)
 {
-	struct lkl_sockaddr_in ns = tsi_addr(0x0a000203, 53), from;
-	int flen = sizeof(from);
-	long fd, sent, got = -1, replied = -1;
-	char buf[16] = { 0 };
+	struct lkl_sockaddr_in ns = tsi_addr(0x0a000203, 53);
+	long fd, sent;
 
-	memset(&from, 0, sizeof(from));
 	fd = lkl_sys_socket(LKL_AF_INET, LKL_SOCK_DGRAM | LKL_O_NONBLOCK, 0);
 	sent = lkl_sys_sendto(fd, "query", 5, 0, (struct lkl_sockaddr *)&ns,
 			      sizeof(ns));
-	if (tsi_host.sendtos) {
-		replied = lkl_net_reply(tsi_host.sock,
-					(struct lkl_sockaddr *)&ns, sizeof(ns),
-					"answer", 6);
-		lkl_net_done(tsi_host.sock, 0);
-	}
-	got = lkl_sys_recvfrom(fd, buf, sizeof(buf), 0,
-			       (struct lkl_sockaddr *)&from, &flen);
 	lkl_sys_close(fd);
-	lkl_test_logf("sendto %ld: net_sendto %d time(s), %lu bytes \"%.5s\" to %x:%d; reply %ld; recvfrom %ld \"%s\" from %x:%d\n",
-		      sent, tsi_host.sendtos, tsi_host.dgram_len,
-		      tsi_host.dgram, ntohl(tsi_host.addr.sin_addr.lkl_s_addr),
-		      ntohs(tsi_host.addr.sin_port), replied, got, buf,
-		      ntohl(from.sin_addr.lkl_s_addr), ntohs(from.sin_port));
-	if (sent != 5 || tsi_host.sendtos != 1 || tsi_host.dgram_len != 5 ||
-	    memcmp(tsi_host.dgram, "query", 5) || replied || got != 6 ||
-	    strcmp(buf, "answer") || memcmp(&from, &ns, 8))
-		return TEST_FAILURE;
-	return TEST_SUCCESS;
+	lkl_test_logf("sendto %ld\n", sent);
+	return sent == -LKL_ENETUNREACH ? TEST_SUCCESS : TEST_FAILURE;
 }
 #endif
 
@@ -2754,7 +2721,6 @@ int main(int argc, const char **argv)
 #ifdef LKL_CONFIG_LKL_TSI
 	lkl_host_ops.net_connect = test_net_connect;
 	lkl_host_ops.net_listen = test_net_listen;
-	lkl_host_ops.net_sendto = test_net_sendto;
 	lkl_host_ops.net_ready = test_net_ready;
 #endif
 #endif

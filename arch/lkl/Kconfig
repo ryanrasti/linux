@@ -32,8 +32,8 @@ config LKL_TSI
 	help
 	  A program's AF_INET stream and datagram sockets stay the guest's
 	  own for loopback, and are served by the host for every other
-	  address: connects, listens and datagrams go to the host
-	  operations net_connect, net_listen and net_sendto, and the host
+	  address: connects (TCP, and UDP's connected sockets) and listens
+	  go to the host operations net_connect and net_listen, and the host
 	  moves the bytes with lkl_net_* (asm/host_ops.h). Modelled on
 	  libkrunfw's Transparent Socket Impersonation, with direct calls
 	  instead of vsock. Without it, only loopback works.

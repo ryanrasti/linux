@@ -25,9 +25,12 @@
  *   as usual), and, unless it is bound to loopback, host op net_listen
  *   offers the address to the host, which hands in inbound connections with
  *   lkl_net_accept(sock, peer) -> end.
- * - a datagram to a non-loopback address (the program's resolver queries,
- *   to the nameserver /etc/resolv.conf names): host op net_sendto, answered
- *   with lkl_net_reply(sock, from, data) datagrams.
+ * - a UDP socket's connect to any other address: the same host op,
+ *   net_connect(.., SOCK_DGRAM), answered with a host fd (a connected UDP
+ *   socket of the host's) or a seqpacket end; each send and receive is then
+ *   one datagram to and from the peer (the program's resolver is one such:
+ *   no protocol of the resolver's here). An unconnected sendto to a
+ *   non-loopback address is ENETUNREACH.
  *
  * Every net_* op that returns 0 hands the host a reference to sock, given
  * back with lkl_net_done(sock, err). A socket the guest closes while the
@@ -107,8 +110,6 @@ struct tsi_sock {
 	bool released;
 	/* the host holds a reference for a listen (net_listen) */
 	bool host_listening;
-	/* datagrams the host holds (net_sendto), each a reference */
-	int dgram_refs;
 	/* host-backed: the peer (a stream's, or a datagram socket's connect) */
 	struct sockaddr_in peer;
 	/* host-backed: the local address getsockname answers (0: the inner's) */
@@ -279,16 +280,17 @@ static void tsi_end_ready(struct sock *sk)
  * A connection: a socketpair, the guest's end hooked to the outer socket
  * later (*guest), the host's end (*end) reporting to the host.
  */
-static int tsi_socketpair(struct socket **guest, struct socket **end)
+/* a stream's transport, or (SOCK_SEQPACKET) a datagram socket's: whole datagrams */
+static int tsi_socketpair(int type, struct socket **guest, struct socket **end)
 {
 	struct socket *a, *b;
 	struct sock *sk;
 	int err;
 
-	err = sock_create_kern(&init_net, AF_UNIX, SOCK_STREAM, 0, &a);
+	err = sock_create_kern(&init_net, AF_UNIX, type, 0, &a);
 	if (err)
 		return err;
-	err = sock_create_kern(&init_net, AF_UNIX, SOCK_STREAM, 0, &b);
+	err = sock_create_kern(&init_net, AF_UNIX, type, 0, &b);
 	if (err)
 		goto free_a;
 	err = a->ops->socketpair(a, b);
@@ -349,8 +351,7 @@ static int tsi_release(struct socket *sock)
 	tsk = tsi_sk(sk);
 	lock_sock(sk);
 	tsk->released = true;
-	host_holds = tsk->conn == TSI_CONNECTING || tsk->host_listening ||
-		     tsk->dgram_refs;
+	host_holds = tsk->conn == TSI_CONNECTING || tsk->host_listening;
 	list_splice_init(&tsk->pending, &pending);
 	tsk->npending = 0;
 	inner = tsk->isocket;
@@ -425,25 +426,16 @@ static int tsi_getname(struct socket *sock, struct sockaddr *addr, int peer)
 static int tsi_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct tsi_sock *tsk = tsi_sk(sock->sk);
-	struct sk_buff_head *q = &sock->sk->sk_receive_queue;
 
 	/*
-	 * A datagram the host queued: FIONREAD is its size (glibc's resolver
-	 * sizes its buffer for the second of its parallel answers so; the
-	 * inner socket's 0 had it truncate the answer and fail).
+	 * A host-fd datagram socket's next datagram size is the host's to know
+	 * (an ioctl of its fd): unanswered, as glibc's resolver takes (it then
+	 * sizes its buffer for the largest answer; the inner socket's 0 had it
+	 * truncate the answer and fail).
 	 */
-	if (sock->type == SOCK_DGRAM && cmd == SIOCINQ &&
-	    !skb_queue_empty_lockless(q)) {
-		struct sk_buff *skb;
-		int amount = 0;
-
-		spin_lock_bh(&q->lock);
-		skb = skb_peek(q);
-		if (skb)
-			amount = skb->len;
-		spin_unlock_bh(&q->lock);
-		return put_user(amount, (int __user *)arg);
-	}
+	if (sock->type == SOCK_DGRAM && tsk->status == TSI_HOST && tsk->hosted &&
+	    (cmd == SIOCINQ || cmd == SIOCOUTQ))
+		return -ENOIOCTLCMD;
 	if (tsk->status == TSI_HOST && tsk->transport &&
 	    (cmd == SIOCINQ || cmd == SIOCOUTQ))
 		return tsk->transport->ops->ioctl(tsk->transport, cmd, arg);
@@ -627,7 +619,7 @@ static int tsi_stream_connect(struct socket *sock, struct sockaddr *addr,
 	sock_hold(sk);
 	err = lkl_ops->net_connect(sk, task_tgid_vnr(current),
 				   (struct sockaddr *)&tsk->peer,
-				   sizeof(tsk->peer));
+				   sizeof(tsk->peer), SOCK_STREAM);
 	if (err) {
 		sock_put(sk);
 		tsk->status = TSI_HYBRID;
@@ -910,50 +902,163 @@ static int tsi_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 
 /* ---- datagrams ---- */
 
-/* the sender of a datagram the host queued (lkl_net_reply) */
-struct tsi_dgram_cb {
-	struct sockaddr_in from;
-};
-
-#define TSI_CB(skb) ((struct tsi_dgram_cb *)(skb)->cb)
-
+/*
+ * A UDP socket connected to a non-loopback address is the host's, as a
+ * stream's connect is: net_connect(.., SOCK_DGRAM), waited for even when
+ * nonblocking (UDP's connect doesn't return EINPROGRESS; a resolver's
+ * nonblocking socket must be connected when connect returns). Then each
+ * send is one datagram to the peer and each receive one from it, through
+ * a host fd (lkl_net_done_fd: a connected UDP socket of the host's) or a
+ * seqpacket end (lkl_net_done: the host copies whole datagrams). An
+ * unconnected sendto to a non-loopback address has no host to go to:
+ * ENETUNREACH. Loopback stays the inner socket's, as before.
+ */
 static int tsi_dgram_connect(struct socket *sock, struct sockaddr *addr,
 			     int len, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct tsi_sock *tsk = tsi_sk(sk);
 	struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+	struct socket *transport;
+	bool unspec;
+	long timeo;
 	int err;
 
 	if (!tsk->isocket)
 		return -EINVAL;
-	if (len >= (int)sizeof(sa_family_t) && addr->sa_family == AF_UNSPEC) {
-		lock_sock(sk);
-		tsk->status = TSI_HYBRID;
-		release_sock(sk);
-		return tsk->isocket->ops->connect(tsk->isocket, addr, len,
-						  flags);
+	if (len < (int)sizeof(sa_family_t))
+		return -EINVAL;
+	unspec = addr->sa_family == AF_UNSPEC;
+	if (!unspec) {
+		err = tsi_check_addr(addr, len);
+		if (err)
+			return err;
 	}
-	err = tsi_check_addr(addr, len);
-	if (err)
-		return err;
-	if (tsi_is_local(sin)) {
+	lock_sock(sk);
+	if (tsk->conn == TSI_CONNECTING) {
+		release_sock(sk);
+		return -EALREADY;
+	}
+	/* a new connect (or AF_UNSPEC) dissolves a host peer, as UDP's would */
+	transport = tsk->transport;
+	tsk->transport = NULL;
+	if (tsk->hosted) {
+		tsk->hosted = false;
+		if (lkl_ops->net_fd_close)
+			lkl_ops->net_fd_close(tsk->hostfd);
+	}
+	tsk->conn = TSI_NONE;
+	tsk->status = TSI_HYBRID;
+	sock->state = SS_UNCONNECTED;
+	release_sock(sk);
+	tsi_unhook_release(transport, &tsk->thook);
+
+	if (unspec || tsi_is_local(sin)) {
 		err = tsk->isocket->ops->connect(tsk->isocket, addr, len,
 						 flags);
-		if (!err) {
+		if (!err && !unspec) {
 			lock_sock(sk);
 			tsk->status = TSI_INET;
 			release_sock(sk);
 		}
 		return err;
 	}
-	/* the host's peer: only recorded, as UDP's connect only records */
+	if (!lkl_ops->net_connect)
+		return -ENETUNREACH;
+
 	lock_sock(sk);
+	/* a local port of the guest's own, for getsockname */
+	if (!inet_sk(tsk->isocket->sk)->inet_num) {
+		struct sockaddr_in any = { .sin_family = AF_INET };
+
+		kernel_bind(tsk->isocket, (struct sockaddr *)&any, sizeof(any));
+	}
 	tsk->peer = *sin;
+	tsk->peer.sin_family = AF_INET;
 	memset(tsk->peer.sin_zero, 0, sizeof(tsk->peer.sin_zero));
 	tsk->status = TSI_HOST;
+	tsk->conn = TSI_CONNECTING;
+	sk->sk_err = 0;
+	sock_hold(sk);
+	err = lkl_ops->net_connect(sk, task_tgid_vnr(current),
+				   (struct sockaddr *)&tsk->peer,
+				   sizeof(tsk->peer), SOCK_DGRAM);
+	if (err) {
+		sock_put(sk);
+		tsk->status = TSI_HYBRID;
+		tsk->conn = TSI_NONE;
+		goto out;
+	}
+	timeo = sock_sndtimeo(sk, 0);
+	err = tsi_wait(sk, &timeo, tsi_not_connecting);
+	if (err == -EAGAIN)
+		/* SO_SNDTIMEO ran out: the connect still comes, sends wait */
+		err = 0;
+	else if (!err)
+		err = tsi_connect_result(tsk);
+	if (!err)
+		sock->state = SS_CONNECTED;
+out:
 	release_sock(sk);
-	return 0;
+	return err;
+}
+
+/*
+ * One datagram through the host fd: the program's buffer itself if it is
+ * one segment (no MMU: a user address is the host's), else a bounce
+ * buffer, so a send is one write and a receive one read.
+ */
+static int tsi_hostfd_dgram(struct socket *sock, struct msghdr *msg,
+			    size_t len, int flags, int write)
+{
+	struct tsi_sock *tsk = tsi_sk(sock->sk);
+	int nonblock = (flags & MSG_DONTWAIT) ||
+		       (sock->file && (READ_ONCE(sock->file->f_flags) & O_NONBLOCK));
+	void *buf;
+	long ret;
+
+	if (flags & (MSG_PEEK | MSG_OOB))
+		return -EOPNOTSUPP;
+	if (len > 65535) {
+		if (write)
+			return -EMSGSIZE;
+		len = 65535;
+	}
+	if (user_backed_iter(&msg->msg_iter) &&
+	    iter_iov_len(&msg->msg_iter) >= len) {
+		ret = lkl_hostfd_io(tsk->hostfd, iter_iov_addr(&msg->msg_iter),
+				    len, write, nonblock);
+		if (ret > 0)
+			iov_iter_advance(&msg->msg_iter, ret);
+	} else {
+		buf = kmalloc(len ? len : 1, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+		if (write && !copy_from_iter_full(buf, len, &msg->msg_iter)) {
+			kfree(buf);
+			return -EFAULT;
+		}
+		ret = lkl_hostfd_io(tsk->hostfd, (char __user *)buf, len, write,
+				    nonblock);
+		if (!write && ret > 0 &&
+		    copy_to_iter(buf, ret, &msg->msg_iter) != ret)
+			ret = -EFAULT;
+		kfree(buf);
+	}
+	if (!write && ret >= 0 && msg->msg_name) {
+		memcpy(msg->msg_name, &tsk->peer, sizeof(tsk->peer));
+		msg->msg_namelen = sizeof(tsk->peer);
+	}
+	return ret;
+}
+
+/* whether a send's address (if any) is the host socket's one peer */
+static bool tsi_dgram_peer(struct tsi_sock *tsk, struct msghdr *msg)
+{
+	struct sockaddr_in *to = msg->msg_name;
+
+	return !to || (to->sin_addr.s_addr == tsk->peer.sin_addr.s_addr &&
+		       to->sin_port == tsk->peer.sin_port);
 }
 
 static int tsi_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
@@ -961,109 +1066,57 @@ static int tsi_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
 {
 	struct sock *sk = sock->sk;
 	struct tsi_sock *tsk = tsi_sk(sk);
-	struct sockaddr_in to;
-	void *buf;
 	int err;
 
 	if (msg->msg_name) {
 		err = tsi_check_addr(msg->msg_name, msg->msg_namelen);
 		if (err)
 			return err;
-		to = *(struct sockaddr_in *)msg->msg_name;
-	} else if (tsk->status == TSI_HOST) {
-		to = tsk->peer;
-	} else {
-		return tsk->isocket ?
-			tsk->isocket->ops->sendmsg(tsk->isocket, msg, len) :
-			-EDESTADDRREQ;
 	}
-	if (tsi_is_local(&to)) {
-		if (!tsk->isocket)
-			return -EINVAL;
-		return tsk->isocket->ops->sendmsg(tsk->isocket, msg, len);
+	if (READ_ONCE(tsk->status) == TSI_HOST) {
+		err = tsi_wait_connected(sk, msg->msg_flags & MSG_DONTWAIT);
+		if (err)
+			return err;
+		/* the host's socket has one peer: another address isn't it */
+		if (!tsi_dgram_peer(tsk, msg))
+			return -EISCONN;
+		msg->msg_name = NULL;
+		msg->msg_namelen = 0;
+		if (tsk->hosted)
+			return tsi_hostfd_dgram(sock, msg, len, msg->msg_flags,
+						1);
+		return tsk->transport->ops->sendmsg(tsk->transport, msg, len);
 	}
-
-	if (!lkl_ops->net_sendto)
+	if (msg->msg_name && !tsi_is_local(msg->msg_name))
 		return -ENETUNREACH;
-	if (len > 65507)
-		return -EMSGSIZE;
-	buf = kmalloc(len ? len : 1, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-	if (!copy_from_iter_full(buf, len, &msg->msg_iter)) {
-		kfree(buf);
-		return -EFAULT;
-	}
-	to.sin_family = AF_INET;
-	memset(to.sin_zero, 0, sizeof(to.sin_zero));
-	lock_sock(sk);
-	tsk->dgram_refs++;
-	sock_hold(sk);
-	err = lkl_ops->net_sendto(sk, task_tgid_vnr(current),
-				  (struct sockaddr *)&to, sizeof(to), buf, len);
-	if (err) {
-		tsk->dgram_refs--;
-		sock_put(sk);
-	}
-	release_sock(sk);
-	kfree(buf);
-	return err ? err : len;
-}
-
-/* one datagram, the host's or the inner socket's, without waiting */
-static int tsi_dgram_try(struct sock *sk, struct msghdr *msg, size_t len,
-			 int flags)
-{
-	struct tsi_sock *tsk = tsi_sk(sk);
-	struct sk_buff *skb;
-	size_t copied;
-	int err;
-
-	err = sock_error(sk);
-	if (err)
-		return err;
-	skb = skb_recv_datagram(sk, flags | MSG_DONTWAIT, &err);
-	if (skb) {
-		copied = min_t(size_t, len, skb->len);
-		if (copied < skb->len)
-			msg->msg_flags |= MSG_TRUNC;
-		err = skb_copy_datagram_msg(skb, 0, msg, copied);
-		if (!err && msg->msg_name) {
-			memcpy(msg->msg_name, &TSI_CB(skb)->from,
-			       sizeof(struct sockaddr_in));
-			msg->msg_namelen = sizeof(struct sockaddr_in);
-		}
-		if (!err)
-			err = flags & MSG_TRUNC ? skb->len : copied;
-		skb_free_datagram(sk, skb);
-		return err;
-	}
 	if (!tsk->isocket)
-		return -EAGAIN;
-	return tsk->isocket->ops->recvmsg(tsk->isocket, msg, len,
-					  flags | MSG_DONTWAIT);
+		return -EDESTADDRREQ;
+	return tsk->isocket->ops->sendmsg(tsk->isocket, msg, len);
 }
 
 static int tsi_dgram_recvmsg(struct socket *sock, struct msghdr *msg,
 			     size_t len, int flags)
 {
-	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct sock *sk = sock->sk;
-	long timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+	struct tsi_sock *tsk = tsi_sk(sk);
 	int err;
 
-	add_wait_queue(sk_sleep(sk), &wait);
-	for (;;) {
-		err = tsi_dgram_try(sk, msg, len, flags);
-		if (err != -EAGAIN || !timeo)
-			break;
-		if (signal_pending(current)) {
-			err = sock_intr_errno(timeo);
-			break;
-		}
-		timeo = wait_woken(&wait, TASK_INTERRUPTIBLE, timeo);
+	if (READ_ONCE(tsk->status) != TSI_HOST)
+		return tsk->isocket ?
+			tsk->isocket->ops->recvmsg(tsk->isocket, msg, len,
+						   flags) :
+			-ENOTCONN;
+	err = tsi_wait_connected(sk, flags & MSG_DONTWAIT);
+	if (err)
+		return err;
+	if (tsk->hosted)
+		return tsi_hostfd_dgram(sock, msg, len, flags, 0);
+	/* the end's address is AF_UNIX's: the program's is its peer */
+	err = tsk->transport->ops->recvmsg(tsk->transport, msg, len, flags);
+	if (err >= 0 && msg->msg_name) {
+		memcpy(msg->msg_name, &tsk->peer, sizeof(tsk->peer));
+		msg->msg_namelen = sizeof(tsk->peer);
 	}
-	remove_wait_queue(sk_sleep(sk), &wait);
 	return err;
 }
 
@@ -1072,13 +1125,27 @@ static __poll_t tsi_dgram_poll(struct file *file, struct socket *sock,
 {
 	struct tsi_sock *tsk = tsi_sk(sock->sk);
 	struct socket *inner = READ_ONCE(tsk->isocket);
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM;
+	__poll_t mask;
 
 	sock_poll_wait(file, sock, wait);
+	if (READ_ONCE(tsk->status) == TSI_HOST) {
+		switch (READ_ONCE(tsk->conn)) {
+		case TSI_CONNECTING:
+			return 0;
+		case TSI_CONNECTED:
+			if (tsk->hosted)
+				return lkl_hostfd_poll_fd(file, tsk->hostfd,
+							  EPOLLIN | EPOLLOUT,
+							  wait);
+			return tsk->transport->ops->poll(file, tsk->transport,
+							 NULL);
+		default:
+			return EPOLLOUT | EPOLLWRNORM | EPOLLERR;
+		}
+	}
+	mask = EPOLLOUT | EPOLLWRNORM;
 	if (inner)
 		mask |= inner->ops->poll(file, inner, NULL);
-	if (!skb_queue_empty_lockless(&sock->sk->sk_receive_queue))
-		mask |= EPOLLIN | EPOLLRDNORM;
 	if (READ_ONCE(sock->sk->sk_err))
 		mask |= EPOLLERR;
 	return mask;
@@ -1271,15 +1338,11 @@ void *lkl_net_done(void *sock, int err)
 	if (tsi_enter())
 		return NULL;
 	lock_sock(sk);
-	if (sk->sk_type == SOCK_DGRAM) {
-		tsk->dgram_refs--;
-		if (err && !tsk->released) {
-			sk->sk_err = -err;
-			sk_error_report(sk);
-		}
-	} else if (tsk->conn == TSI_CONNECTING) {
+	if (tsk->conn == TSI_CONNECTING) {
 		if (!err && !tsk->released)
-			err = tsi_socketpair(&guest, &end);
+			err = tsi_socketpair(sk->sk_type == SOCK_DGRAM ?
+					     SOCK_SEQPACKET : SOCK_STREAM,
+					     &guest, &end);
 		if (tsk->released) {
 			/* the program gave up: nothing to connect */
 			tsk->conn = TSI_NONE;
@@ -1311,7 +1374,7 @@ int lkl_net_done_fd(void *sock, long fd)
 	struct tsi_sock *tsk = tsi_sk(sk);
 	int err = 0;
 
-	if (fd < 0 || sk->sk_type != SOCK_STREAM)
+	if (fd < 0)
 		return -EINVAL;
 	err = tsi_enter();
 	if (err)
@@ -1391,7 +1454,7 @@ void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len)
 	lock_sock(sk);
 	if (tsk->released || !tsk->host_listening ||
 	    tsk->npending >= max(tsk->backlog, 1) ||
-	    tsi_socketpair(&p->transport, &end)) {
+	    tsi_socketpair(SOCK_STREAM, &p->transport, &end)) {
 		release_sock(sk);
 		kfree(p);
 		end = NULL;
@@ -1406,36 +1469,6 @@ void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len)
 out:
 	tsi_leave();
 	return end;
-}
-
-long lkl_net_reply(void *sock, const struct sockaddr *from, int len,
-		   const void *buf, unsigned long size)
-{
-	struct sock *sk = sock;
-	struct sk_buff *skb;
-	long err;
-
-	if (len < (int)sizeof(struct sockaddr_in) || size > 65507)
-		return -EINVAL;
-	err = tsi_enter();
-	if (err)
-		return err;
-	err = -EBADF;
-	if (tsi_sk(sk)->released)
-		goto out;
-	err = -ENOMEM;
-	skb = alloc_skb(size, GFP_KERNEL);
-	if (!skb)
-		goto out;
-	skb_put_data(skb, buf, size);
-	memcpy(&TSI_CB(skb)->from, from, sizeof(struct sockaddr_in));
-	TSI_CB(skb)->from.sin_family = AF_INET;
-	err = sock_queue_rcv_skb(sk, skb);
-	if (err)
-		kfree_skb(skb);
-out:
-	tsi_leave();
-	return err;
 }
 
 long lkl_net_recv(void *end, void *buf, unsigned long len)

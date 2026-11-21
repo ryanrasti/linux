@@ -250,24 +250,23 @@ enum lkl_prot {
  * reference to sock, which it gives back with lkl_net_done(sock, err);
  * until then sock stays valid, also after the program closes it.
  *
- * @net_connect - the program connects sock (a stream) to addr (sockaddr_in,
- * len bytes); pid is its process's. Return 0, then lkl_net_done(sock, 0)
- * once connected (it returns the connection's end) or (sock, -errno) for a
- * refusal; or return -errno at once. Meanwhile a blocking connect waits, a
- * nonblocking one returned -EINPROGRESS (poll: POLLOUT, or POLLERR and
- * SO_ERROR). Without it, such connects fail with -ENETUNREACH.
+ * @net_connect - the program connects sock to addr (sockaddr_in, len bytes);
+ * pid is its process's, type the socket's: SOCK_STREAM (TCP) or SOCK_DGRAM
+ * (UDP: a connected UDP socket, its datagrams to and from addr alone).
+ * Return 0, then lkl_net_done(sock, 0) once connected (it returns the
+ * connection's end: a stream's bytes, or a datagram socket's whole
+ * datagrams, one per send and receive), lkl_net_done_fd(sock, fd), or
+ * lkl_net_done(sock, -errno) for a refusal; or return -errno at once.
+ * Meanwhile a blocking stream connect waits, a nonblocking one returned
+ * -EINPROGRESS (poll: POLLOUT, or POLLERR and SO_ERROR); a datagram connect
+ * always waits, as UDP's returns connected. Without it, such connects fail
+ * with -ENETUNREACH, as does an unconnected datagram to such an address.
  *
  * @net_listen - the program listens on sock, bound to addr (not loopback:
  * the inner socket listens for the guest's own clients first). Return 0 to
  * serve the address too: each inbound connection is lkl_net_accept(sock,
  * peer, len), until the host's lkl_net_done(sock, err) or net_ready(sock),
  * the program's close. Nonzero: the listen stays the guest's alone.
- *
- * @net_sendto - a datagram of size bytes at buf from sock to addr (not
- * loopback): a query to the program's resolver, or any other. The host
- * copies it. Return 0 (answers come as lkl_net_reply(sock, ...), then
- * lkl_net_done(sock, err), err nonzero being the socket's error once) or
- * -errno, sendmsg's error. Without it, -ENETUNREACH.
  *
  * @net_ready - obj is an end: data arrived, room was made, or the guest's
  * side was shut down or closed (lkl_net_recv/send now get further); or obj
@@ -356,9 +355,8 @@ struct lkl_host_operations {
 	long (*hostfd_rw)(int fd, void *buf, unsigned long len, int flags);
 	int (*signal_handler)(struct lkl_signal *sig);
 	lkl_thread_t (*fork)(void (*f)(void *), void *arg);
-	int (*net_connect)(void *sock, int pid, const struct sockaddr *addr, int len);
+	int (*net_connect)(void *sock, int pid, const struct sockaddr *addr, int len, int type);
 	int (*net_listen)(void *sock, int pid, const struct sockaddr *addr, int len);
-	int (*net_sendto)(void *sock, int pid, const struct sockaddr *addr, int len, const void *buf, unsigned long size);
 	void (*net_ready)(void *obj);
 	void (*net_fd_shutdown)(long fd, int how);
 	void (*net_fd_close)(long fd);
@@ -405,7 +403,7 @@ int lkl_is_running(void);
  * outcome: for a connect, 0 (connected: returns the connection's end, or
  * NULL if the program closed sock meanwhile, or the kernel had no memory)
  * or -errno (the program's connect fails with it); for a listen, the end of
- * the host's serving it; for a datagram, 0 or the socket's error.
+ * the host's serving it.
  *
  * lkl_net_accept - an inbound connection from peer (sockaddr_in, len bytes)
  * for a sock the host serves (net_listen): its end, queued for the
@@ -418,9 +416,6 @@ int lkl_is_running(void);
  * hostfd_poll), with no end and no copy; its shutdown and close are
  * net_fd_shutdown and net_fd_close. 0, or -errno: nothing took fd (the
  * host still owns it).
- *
- * lkl_net_reply - a datagram for sock, from address from (the resolver's,
- * as the program sent to): 0 or -errno.
  *
  * lkl_net_recv, lkl_net_send - read what the program wrote, write what it
  * will read: bytes done; from recv, 0 once the program shut its writing
@@ -446,8 +441,6 @@ void *lkl_net_done(void *sock, int err);
 void *lkl_net_accept(void *sock, const struct sockaddr *peer, int len);
 int lkl_net_done_fd(void *sock, long fd);
 int lkl_net_accept_fd(void *sock, const struct sockaddr *peer, int len, long fd);
-long lkl_net_reply(void *sock, const struct sockaddr *from, int len,
-		   const void *buf, unsigned long size);
 long lkl_net_recv(void *end, void *buf, unsigned long len);
 long lkl_net_send(void *end, const void *buf, unsigned long len);
 long lkl_net_shutdown(void *end, int how);
