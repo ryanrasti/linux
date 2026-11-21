@@ -126,6 +126,12 @@ struct sockaddr {
 	char sa_data[14];
 };
 
+/* memblk_add's extents (see lkl_syscall below) */
+struct memblk_extent {
+	__u64 addr;
+	__u64 len;
+};
+
 struct __aio_sigset;
 struct cachestat;
 struct cachestat_range;
@@ -268,6 +274,74 @@ typedef __kernel_rwf_t		rwf_t;
 #define st_ctime st_ctime
 #define s_addr s_addr
 
+/**
+ * lkl_syscall - run system call @no with @params, as the calling thread's task
+ *
+ * The thread that called lkl_start_kernel() is init (PID 1), the first
+ * program's process. Another thread's first call makes it a thread of init's
+ * process (or, if the call is new_thread_group_leader, a process of its
+ * own). If the host has no thread local storage every call is init's.
+ *
+ * A thread of any process (a program's pthread_create) takes two calls:
+ * new_thread(), made by a thread of that process, returns the tid of a new
+ * thread of it, which doesn't run yet; attach_thread(tid), as the new host
+ * thread's first call, makes that thread its task.
+ *
+ * host_fd(fd, flags) makes a file of the calling process's (the lowest free
+ * descriptor) whose reads and writes the host does on its own fd fd
+ * (host_ops.h's hostfd_rw), such as the program's stdio: before the
+ * program starts, host_fd(0, O_RDWR) and so on make init's 0, 1 and 2.
+ * fstat says it's a character device (with no rdev); it can't be polled,
+ * seeked or ioctl'ed. flags: O_RDONLY, O_WRONLY or O_RDWR, and O_CLOEXEC.
+ *
+ * memblk_add(extents, n) (with CONFIG_BLOCK) adds a read-only disk made of
+ * n extents (struct memblk_extent), in order: each a whole number of
+ * 512-byte sectors (len, not 0) of host memory at addr, a mapping the host
+ * keeps unchanged while the kernel runs, or zeros (addr 0). An erofs image
+ * to mount, say: one mapped file is one extent; an image synthesized over
+ * host files is its metadata, then each file's mapping and its padding.
+ * The kernel copies the table (n at most 2^20); the host keeps its own to
+ * find where a block is. It returns the disk's device number (as mknod
+ * takes it); the disk is memblkN, N counting from 0. Reads are memcpys from
+ * the mappings.
+ *
+ * clone making a process (fork, vfork: no CLONE_THREAD) is a fork of the
+ * host process too, by the host's fork op inside the call (host_ops.h);
+ * clone with CLONE_THREAD is -EINVAL (a thread is new_thread's).
+ *
+ * new_exec(name) is an exec's kernel half, the program's memory being the
+ * host's: the host, at the exec's point of no return (the new image
+ * checked, the old one still mapped), calls it as the exec-ing thread,
+ * then maps and starts the new image. It ends the process's other threads
+ * (waiting for them: one outside the kernel dies at its next call; the
+ * caller keeps its own tid), closes close-on-exec files, drops the user
+ * pointers the kernel keeps for the task (set_child_tid, clear_child_tid,
+ * unwritten; the robust list, walked; rseq), releases a vfork parent,
+ * deletes POSIX timers, clears the alternate signal stack, resets caught
+ * signals to their default (ignored ones stay ignored) and names the task
+ * after name's last part. The mask, pending signals, itimers, pid and cwd
+ * are kept. 0, or -EAGAIN if the process is exiting or another exec is in
+ * progress (the caller then dies at its call's return).
+ *
+ * Signals are the kernel's (actions, masks, kill, default actions, wait
+ * statuses), delivered as a call returns to the program: a caught one's
+ * handler is run by the host's signal_handler op, inside the call, and the
+ * call then restarts or returns -EINTR as Linux's would (SA_RESTART). A
+ * signal sent while a thread runs outside the kernel waits for its next
+ * call. sigaction has no sa_restorer here: the host keeps restorers.
+ *
+ * A call that ends its task (exit, exit_group, or a fatal signal: another
+ * thread's exit_group kills a thread at its next call, or at once if it's
+ * blocked in one) doesn't return: the host's task_exit op is called on the
+ * thread instead (host_ops.h), with its process's pid and wait status if
+ * it was the process's last thread.
+ *
+ * init's end, its exit_group or its last thread's exit, runs as any
+ * process's (its files closed) and is reported so: task_exit(1, status),
+ * status as wait4 has it ((code & 0xff) << 8, or the fatal signal). The host
+ * ends then, with lkl_sys_halt() (from any thread; after init's end it is
+ * the only call a thread without a task can make) or its own exit.
+ */
 long lkl_syscall(long no, long *params);
 long lkl_sys_halt(void);
 

@@ -29,6 +29,22 @@ static inline void show_node(struct zone *zone)
 		printk("Node %d ", zone_to_nid(zone));
 }
 
+/*
+ * The memory size userspace is told (sysinfo, /proc/meminfo), in pages, if
+ * not the kernel's: a library OS whose programs' memory is their host's,
+ * not the kernel's pool, sets it to theirs (LKL's program_mem=), and
+ * runtimes size their heaps by it. The pool's free and available memory
+ * are reported as the same amount less than this as they are less than
+ * the pool: what the kernel uses counts as used. 0: the kernel's own.
+ */
+unsigned long reported_ram_pages __read_mostly;
+
+static long reported_ram_extra(void)
+{
+	return reported_ram_pages ?
+	       (long)reported_ram_pages - (long)totalram_pages() : 0;
+}
+
 long si_mem_available(void)
 {
 	long available;
@@ -65,6 +81,7 @@ long si_mem_available(void)
 		global_node_page_state(NR_KERNEL_MISC_RECLAIMABLE);
 	reclaimable -= min(reclaimable / 2, wmark_low);
 	available += reclaimable;
+	available += reported_ram_extra();
 
 	if (available < 0)
 		available = 0;
@@ -74,9 +91,11 @@ EXPORT_SYMBOL_GPL(si_mem_available);
 
 void si_meminfo(struct sysinfo *val)
 {
-	val->totalram = totalram_pages();
+	long free = global_zone_page_state(NR_FREE_PAGES) + reported_ram_extra();
+
+	val->totalram = reported_ram_pages ?: totalram_pages();
 	val->sharedram = global_node_page_state(NR_SHMEM);
-	val->freeram = global_zone_page_state(NR_FREE_PAGES);
+	val->freeram = max(free, 0L);
 	val->bufferram = nr_blockdev_pages();
 	val->totalhigh = totalhigh_pages();
 	val->freehigh = nr_free_highpages();

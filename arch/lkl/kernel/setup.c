@@ -37,6 +37,18 @@ static int __init setup_mem_size(char *str)
 }
 early_param("mem", setup_mem_size);
 
+/*
+ * program_mem=<size>: the memory sysinfo and /proc/meminfo report, the
+ * program's (the host's arena), not the kernel's pool (mem=). Runtimes size
+ * their heaps by it: V8 took its smallest heap for a 16 MB pool.
+ */
+static int __init setup_program_mem(char *str)
+{
+	reported_ram_pages = memparse(str, NULL) >> PAGE_SHIFT;
+	return 0;
+}
+early_param("program_mem", setup_program_mem);
+
 void __init setup_arch(char **cl)
 {
 	*cl = cmd_line;
@@ -110,6 +122,8 @@ int __init lkl_start_kernel(const char *fmt, ...)
 	lkl_ops->sem_free(init_sem);
 	current_thread_info()->tid = lkl_ops->thread_self();
 	lkl_cpu_change_owner(current_thread_info()->tid);
+	/* init, current here, is this thread's task: the first program's */
+	syscalls_init_thread();
 
 	lkl_cpu_put();
 	is_running = 1;
@@ -187,8 +201,6 @@ static int lkl_run_init(struct linux_binprm *bprm)
 	setup_new_exec(bprm);
 
 	set_binfmt(&lkl_run_init_binfmt);
-
-	init_pid_ns.child_reaper = 0;
 
 	syscalls_init();
 

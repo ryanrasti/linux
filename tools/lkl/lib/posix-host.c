@@ -568,6 +568,23 @@ static void *posix_memmove(void *dest, const void *src, unsigned long n)
 	return memmove(dest, src, (size_t)n);
 }
 
+/*
+ * a guest file over a host fd (host_fd): the I/O on the host's; a
+ * nonblocking file's only if the fd is ready
+ */
+static long hostfd_rw(int fd, void *buf, unsigned long len, int flags)
+{
+	int w = flags & LKL_HOSTFD_WRITE;
+	struct pollfd p = { .fd = fd, .events = w ? POLLOUT : POLLIN };
+	ssize_t ret;
+
+	if ((flags & LKL_HOSTFD_NONBLOCK) && poll(&p, 1, 0) == 0)
+		return -EAGAIN;
+	ret = w ? write(fd, buf, len) : read(fd, buf, len);
+
+	return ret < 0 ? -errno : ret;
+}
+
 struct lkl_host_operations lkl_host_ops = {
 	.panic = panic,
 	.thread_create = thread_create,
@@ -606,6 +623,7 @@ struct lkl_host_operations lkl_host_ops = {
 	.memcpy = posix_memcpy,
 	.memset = posix_memset,
 	.memmove = posix_memmove,
+	.hostfd_rw = hostfd_rw,
 	.mmap = lkl_mmap,
 	.munmap = lkl_munmap,
 #ifdef LKL_HOST_CONFIG_MMU

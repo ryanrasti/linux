@@ -14,7 +14,29 @@ config LKL
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
 	select HAVE_ARCH_KASAN
+
+config LKL_TRACING
+	bool "Tracing support"
+	default y
 	select TRACING
+	help
+	  Select TRACING, which KASAN's KUnit tests need for their console
+	  tracepoints. TRACING has no prompt of its own, so without this
+	  option it could not be turned off; without it an embedder saves
+	  about 1 MiB of slab and 0.5 MiB of text.
+
+config LKL_TSI
+	bool "Impersonated AF_INET sockets, served by the host"
+	default y
+	depends on INET && UNIX
+	help
+	  A program's AF_INET stream and datagram sockets stay the guest's
+	  own for loopback, and are served by the host for every other
+	  address: connects (TCP, and UDP's connected sockets) and listens
+	  go to the host operations net_connect and net_listen, and the host
+	  moves the bytes with lkl_net_* (asm/host_ops.h). Modelled on
+	  libkrunfw's Transparent Socket Impersonation, with direct calls
+	  instead of vsock. Without it, only loopback works.
 
 config LKL_FUZZING
 	bool "LLVM fuzzing instrumentation"
@@ -105,8 +127,26 @@ config NO_IOPORT_MAP
 	def_bool y
 
 config HZ
-	int
+	int "Timer frequency"
+	range 100 1000
 	default 100
+	help
+	  The tick rate. Boot waits for kernel threads in jiffies, so a
+	  higher rate boots faster (about 45-75 ms at 100, 9-20 ms at
+	  1000); with NO_HZ_IDLE an idle kernel takes no ticks either way.
+
+config LKL_NR_IRQS
+	int "Number of IRQs"
+	range 64 4096 if 64BIT
+	range 32 1024 if !64BIT
+	default 4096 if 64BIT
+	default 1024 if !64BIT
+	help
+	  Every IRQ's descriptor is allocated at boot (4096 of them take
+	  about 2.4 MB of slab), so an embedder with a few devices can ask
+	  for fewer. Must be a multiple of the bits in a long, and at most
+	  their square: arch/lkl/kernel/irq.c keeps one word of pending
+	  bits per long of IRQs, and one word summarising those.
 
 config CONSOLE_LOGLEVEL_QUIET
 	int "quiet console loglevel (1-15)"

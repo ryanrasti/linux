@@ -6,6 +6,7 @@
 #include <asm/cpu.h>
 #include <asm/sched.h>
 #include <asm/switch_to.h>
+#include <asm/syscalls.h>
 
 static int init_ti(struct thread_info *ti)
 {
@@ -51,9 +52,14 @@ void setup_thread_stack(struct task_struct *p, struct task_struct *org)
 	ti->preempt_count = org_ti->preempt_count;
 }
 
+/*
+ * A thread that isn't a host task's ends: woken dead, joined. (Not one that
+ * never got a host thread: its creation failed.) A fork's child process's
+ * thread is one until it first runs (copy_fork_thread).
+ */
 static void kill_thread(struct thread_info *ti)
 {
-	if (!test_ti_thread_flag(ti, TIF_HOST_THREAD)) {
+	if (!test_ti_thread_flag(ti, TIF_HOST_THREAD) && ti->tid) {
 		ti->dead = true;
 		lkl_ops->sem_up(ti->sched_sem);
 		lkl_ops->thread_join(ti->tid);
@@ -91,6 +97,8 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	struct thread_info *_next = task_thread_info(next);
 	unsigned long _prev_flags = _prev->flags;
 	struct lkl_jmp_buf _prev_jb;
+	bool exited = false;
+	int pid = 0, status = 0;
 
 	_current_thread_info = task_thread_info(next);
 	_next->prev_sched = prev;
@@ -103,11 +111,26 @@ struct task_struct *__switch_to(struct task_struct *prev,
 		/* Atomic. Must be done before wakeup next */
 		clear_ti_thread_flag(_prev, TIF_SCHED_JB);
 		_prev_jb = _prev->sched_jb;
+	} else if (test_bit(TIF_HOST_THREAD, &_prev_flags) &&
+		   READ_ONCE(prev->__state) == TASK_DEAD) {
+		/*
+		 * A host task's exit in a syscall: what the host learns, read
+		 * now, since prev may be freed once next runs
+		 */
+		exited = true;
+		host_task_exit_status(prev, &pid, &status);
 	}
 
 	lkl_ops->sem_up(_next->sched_sem);
 	if (test_bit(TIF_SCHED_JB, &_prev_flags)) {
 		lkl_ops->jmp_buf_longjmp(&_prev_jb, 1);
+	} else if (exited) {
+		/*
+		 * its host thread leaves the kernel for good (and may jump out
+		 * of it: the stack's shadow left as if it had returned)
+		 */
+		kasan_unpoison_stack();
+		host_task_exited(pid, status);
 	} else {
 		lkl_ops->sem_down(_prev->sched_sem);
 	}
@@ -135,7 +158,11 @@ void switch_to_host_task(struct task_struct *task)
 	if (current == task)
 		return;
 
-	wake_up_process(task);
+	/* a host task's first run: it was cloned but not woken */
+	if (READ_ONCE(task->__state) == TASK_NEW)
+		wake_up_new_task(task);
+	else
+		wake_up_process(task);
 	thread_sched_jb();
 	lkl_ops->sem_down(task_thread_info(task)->sched_sem);
 	schedule_tail(abs_prev);
@@ -173,6 +200,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		set_ti_thread_flag(ti, TIF_HOST_THREAD);
 		return 0;
 	}
+
+	/* a program's clone (no function: it returns to the program) */
+	if (!args->fn)
+		return copy_fork_thread(p, args);
 
 	tba = kmalloc(sizeof(*tba), GFP_KERNEL);
 	if (!tba)

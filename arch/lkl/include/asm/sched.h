@@ -24,5 +24,7 @@ static inline void thread_sched_jb(void)
 
 void switch_to_host_task(struct task_struct *);
 int host_task_stub(void *unused);
+void host_task_exit_status(struct task_struct *task, int *pid, int *status);
+void __noreturn host_task_exited(int pid, int status);
 
 #endif /*  _ASM_LKL_SCHED_H */

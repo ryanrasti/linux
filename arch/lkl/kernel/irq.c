@@ -8,6 +8,7 @@
 #include <linux/tick.h>
 #include <linux/interrupt.h>
 #include <asm/irqflags.h>
+#include <asm/syscalls.h>
 #include <asm/host_ops.h>
 #include <asm/cpu.h>
 #include <linux/cpu.h>
@@ -16,13 +17,18 @@
  * To avoid much overhead we use an indirect approach: the irqs are marked using
  * a bitmap (array of longs) and a summary of the modified bits is kept in a
  * separate "index" long - one bit for each sizeof(long). Thus we can support
- * 4096 irqs on 64bit platforms and 1024 irqs on 32bit platforms.
+ * up to 4096 irqs on 64bit platforms and 1024 irqs on 32bit platforms
+ * (CONFIG_LKL_NR_IRQS, a whole number of longs: see the asserts below).
  *
  * Whenever an irq is trigger both the array and the index is updated. To find
  * which irqs were triggered we first search the index and then the
  * corresponding part of the arrary.
  */
 static unsigned long irq_status[NR_IRQS/IRQ_STATUS_BITS];
+static_assert(NR_IRQS % IRQ_STATUS_BITS == 0,
+	      "CONFIG_LKL_NR_IRQS must be a multiple of BITS_PER_LONG");
+static_assert(NR_IRQS / IRQ_STATUS_BITS <= IRQ_STATUS_BITS,
+	      "CONFIG_LKL_NR_IRQS: one summary word indexes at most BITS_PER_LONG words");
 static unsigned long irq_index_status;
 
 static inline unsigned long test_and_clear_irq_index_status(void)
@@ -60,8 +66,10 @@ static void run_irq(int irq)
 	/* interrupt handlers need to run with interrupts disabled */
 	local_irq_save(flags);
 	irq_enter();
+	idle_host_task_irq_enter();
 	generic_handle_irq(irq);
 	irq_exit();
+	idle_host_task_irq_exit();
 	set_irq_regs(old_regs);
 	local_irq_restore(flags);
 }
@@ -75,7 +83,7 @@ int lkl_trigger_irq(int irq)
 {
 	int ret;
 
-	if (!irq || irq > NR_IRQS)
+	if (irq <= 0 || irq >= NR_IRQS)
 		return -EINVAL;
 
 	ret = lkl_cpu_try_run_irq(irq);
